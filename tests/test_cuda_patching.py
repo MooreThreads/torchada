@@ -1841,3 +1841,49 @@ class TestCppOpsInfrastructure:
         assert "PrivateUse1" in content
         assert "is_override_enabled" in content
         assert "log_op_call" in content
+
+
+class TestValidateDevice:
+    """Test Validate Device func in FlexAttention."""
+
+    def get_validator(self):
+        import torch.nn.attention.flex_attention as flex_attention
+        return flex_attention._validate_device
+
+    def test_cpu_device_should_pass(self):
+        import torch
+        q = torch.randn(2, 2, device="cpu")
+        k = torch.randn(2, 2, device="cpu")
+        v = torch.randn(2, 2, device="cpu")
+
+        validator = self.get_validator()
+        validator(q, k, v)
+
+    def test_musa_device_should_pass(self):
+        import torch
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required")
+
+        q = torch.randn(2, 2, device="musa")
+        k = torch.randn(2, 2, device="musa")
+        v = torch.randn(2, 2, device="musa")
+
+        validator = self.get_validator()
+        validator(q, k, v)
+
+    def test_invalid_device_should_fail(self):
+        import torch
+
+        class FakeTensor:
+            def __init__(self):
+                self.device = torch.device("meta")
+
+        q = FakeTensor()
+        k = FakeTensor()
+        v = FakeTensor()
+
+        validator = self.get_validator()
+        with pytest.raises(ValueError, match="FlexAttention is only supported"):
+            validator(q, k, v)
