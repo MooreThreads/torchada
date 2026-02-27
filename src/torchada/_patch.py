@@ -1189,10 +1189,12 @@ def _patch_validate_device():
     """
     import torch.nn.attention.flex_attention
 
-    _orig_validate_device = torch.nn.attention.flex_attention._validate_device
+    _orig_validate_device = None
+    if hasattr(torch.nn.attention.flex_attention, "_validate_device"):
+        _orig_validate_device = torch.nn.attention.flex_attention._validate_device
 
     def _validate_device(query, key, value):
-        if query.device.type == "musa":
+        if query.device.type == "musa" or _orig_validate_device is None:
             return
         return _orig_validate_device(query, key, value)
 

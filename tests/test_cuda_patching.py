@@ -1871,3 +1871,18 @@ class TestValidateDevice:
 
         validator = self.get_validator()
         validator(q, k, v)
+
+    def test_patch_when_attribute_missing(self, monkeypatch):
+        """Verify the fallback implementation is installed when the attribute is absent."""
+        import torch
+        import torch.nn.attention.flex_attention as flex_attention
+
+        from torchada._patch import _patch_validate_device
+
+        # Simulate a PyTorch version that does not expose _validate_device.
+        monkeypatch.delattr(flex_attention, "_validate_device", raising=False)
+        assert not hasattr(flex_attention, "_validate_device")
+
+        # The patch must not raise even when the attribute is absent.
+        _patch_validate_device()
+        assert hasattr(flex_attention, "_validate_device")
