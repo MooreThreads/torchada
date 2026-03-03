@@ -388,6 +388,54 @@ class TestDistributedBackend:
             # Check new_group is wrapped
             assert hasattr(dist.new_group, "__wrapped__")
 
+    def test_has_param_with_mock_functions(self):
+        """Test _has_param with mocked functions simulating different torch versions."""
+        from torchada._patch import _has_param
+
+        # Simulate torch 2.7+ with device_id parameter
+        def new_group_v27(
+            ranks=None,
+            timeout=None,
+            backend=None,
+            pg_options=None,
+            use_local_synchronization=False,
+            group_desc=None,
+            device_id=None,
+        ):
+            pass
+
+        # Simulate torch 2.5 without device_id parameter
+        def new_group_v25(
+            ranks=None,
+            timeout=None,
+            backend=None,
+            pg_options=None,
+            use_local_synchronization=False,
+            group_desc=None,
+        ):
+            pass
+
+        # Test detection for torch 2.7+ (has device_id)
+        assert _has_param(new_group_v27, "device_id") is True
+
+        # Test detection for torch 2.5 (no device_id)
+        assert _has_param(new_group_v25, "device_id") is False
+
+        # Test that both have other common parameters
+        assert _has_param(new_group_v27, "backend") is True
+        assert _has_param(new_group_v25, "backend") is True
+
+    def test_new_group_device_id_param_compatibility(self):
+        """Test new_group handles device_id param based on torch version."""
+        import torch.distributed as dist
+
+        from torchada._patch import _has_param
+
+        has_device_id = _has_param(dist.new_group, "device_id")
+
+        # This test just verifies the detection works, not the specific version
+        assert isinstance(has_device_id, bool)
+
 
 class TestNCCLModule:
     """Test NCCL to MCCL module patching."""

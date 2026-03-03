@@ -22,6 +22,7 @@ Usage:
 """
 
 import functools
+import inspect
 import sys
 import warnings
 from types import ModuleType
@@ -106,6 +107,24 @@ _device_str_cache = {}
 
 # Cache for is_musa_platform result - computed once on first call
 _is_musa_platform_cached = None
+
+
+def _has_param(func: Callable, param_name: str) -> bool:
+    """
+    Check if a function has a specific parameter in its signature.
+
+    Args:
+        func: The function to check
+        param_name: The parameter name to look for
+
+    Returns:
+        True if the function has the parameter, False otherwise
+    """
+    try:
+        sig = inspect.signature(func)
+        return param_name in sig.parameters
+    except (ValueError, TypeError):
+        return False
 
 
 def _translate_device(device: Any) -> Any:
@@ -784,6 +803,9 @@ def _patch_distributed_backend():
     # Also patch new_group to translate 'nccl' to 'mccl'
     original_new_group = dist.new_group
 
+    # Cache the check for device_id support (added in torch 2.6)
+    _new_group_has_device_id = _has_param(original_new_group, "device_id")
+
     @functools.wraps(original_new_group)
     def patched_new_group(
         ranks=None,
@@ -799,10 +821,6 @@ def _patch_distributed_backend():
             if isinstance(backend, str) and backend.lower() == "nccl":
                 backend = "mccl"
 
-        # Translate device_id if it's a cuda device
-        if device_id is not None:
-            device_id = _translate_device(device_id)
-
         # Build kwargs for the original function
         kwargs = {
             "ranks": ranks,
@@ -810,8 +828,12 @@ def _patch_distributed_backend():
             "pg_options": pg_options,
             "use_local_synchronization": use_local_synchronization,
             "group_desc": group_desc,
-            "device_id": device_id,
         }
+
+        # Translate device_id if it's a cuda device (only if supported by torch version)
+        if device_id is not None and _new_group_has_device_id:
+            kwargs["device_id"] = _translate_device(device_id)
+
         if timeout is not None:
             kwargs["timeout"] = timeout
 
