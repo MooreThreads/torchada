@@ -287,6 +287,12 @@ class TestErrorHandlingMappings:
         assert _MAPPING_RULE["cudaGetErrorString"] == "musaGetErrorString"
         assert _MAPPING_RULE["cudaPeekAtLastError"] == "musaPeekAtLastError"
 
+    def test_error_codes(self):
+        from torchada._mapping import _MAPPING_RULE
+
+        assert _MAPPING_RULE["CUDA_ERROR_NOT_PERMITTED"] == "MUSA_ERROR_NOT_PERMITTED"
+        assert _MAPPING_RULE["CUDA_ERROR_NOT_SUPPORTED"] == "MUSA_ERROR_NOT_SUPPORTED"
+
 
 class TestNCCLMappings:
     """Test NCCL to MCCL mappings."""
@@ -493,6 +499,20 @@ class TestCUDADriverMappings:
         assert (
             _MAPPING_RULE["CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED"]
             == "MU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_MUSA_VMM_SUPPORTED"
+        )
+
+        assert (
+            _MAPPING_RULE["CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED"]
+            == "MU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED"
+        )
+
+        assert (
+            _MAPPING_RULE["CU_MEM_HANDLE_TYPE_FABRIC"] == "MU_MEM_HANDLE_TYPE_FABRIC"
+        )
+
+        assert (
+            _MAPPING_RULE["CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR"] 
+            == "MU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR"
         )
 
 

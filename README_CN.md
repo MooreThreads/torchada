@@ -255,7 +255,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.37
+torchada>=0.1.38
 ```
 
 ### 步骤 2：条件导入
