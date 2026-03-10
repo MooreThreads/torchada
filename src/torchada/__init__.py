@@ -24,7 +24,7 @@ Usage:
     from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CUDA_HOME
 """
 
-__version__ = "0.1.40"
+__version__ = "0.1.41"
 
 from . import cuda, utils
 from ._patch import apply_patches, get_original_init_process_group, is_patched

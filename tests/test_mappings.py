@@ -439,6 +439,14 @@ class TestIntrinsicMappings:
         assert "__half2float" not in _MAPPING_RULE
         assert "__hadd" not in _MAPPING_RULE
 
+class TestCommonMacros:
+    """Test Common macros."""
+
+    def test_common_macros(self):
+        from torchada._mapping import _MAPPING_RULE
+
+        assert _MAPPING_RULE["CUDA_VERSION"] == "MUSA_VERSION"
+
 
 class TestIncludeMappings:
     """Test header include mappings."""

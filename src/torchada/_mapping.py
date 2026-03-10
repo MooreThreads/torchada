@@ -449,6 +449,7 @@ _MAPPING_RULE = {
     "CUDA_1D_KERNEL_LOOP": "MUSA_1D_KERNEL_LOOP",
     "CUDA_2D_KERNEL_LOOP": "MUSA_2D_KERNEL_LOOP",
     "CUDA_NUM_THREADS": "MUSA_NUM_THREADS",
+    "CUDA_VERSION": "MUSA_VERSION",
     # =========================================================================
     # PyTorch C++ API
     # =========================================================================
