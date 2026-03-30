@@ -1233,6 +1233,37 @@ def _patch_validate_device():
     torch.nn.attention.flex_attention._validate_device = _validate_device
 
 
+@patch_function
+@requires_import("flash_attn")
+def _patch_flash_attn():
+    """
+    Redirect sgl_kernel.flash_attn imports to the MUSA flash_attn package.
+
+    On CUDA (NVIDIA), sgl_kernel provides its own flash_attn submodule:
+        from sgl_kernel.flash_attn import flash_attn_varlen_func
+
+    On MUSA, the mate package provides an equivalent flash_attn package.
+    This patch registers flash_attn as sgl_kernel.flash_attn in sys.modules
+    so that code using sgl_kernel.flash_attn works transparently on MUSA.
+
+    If sgl_kernel is not installed, a stub module is created so that
+    sgl_kernel.flash_attn imports still resolve correctly.
+    """
+    import flash_attn
+
+    # Ensure sgl_kernel package exists in sys.modules (create stub if needed)
+    if "sgl_kernel" not in sys.modules:
+        sgl_kernel_stub = ModuleType("sgl_kernel")
+        sgl_kernel_stub.__path__ = []  # Make it a package
+        sgl_kernel_stub.__package__ = "sgl_kernel"
+        sys.modules["sgl_kernel"] = sgl_kernel_stub
+
+    # Register flash_attn as sgl_kernel.flash_attn submodule
+    sgl_kernel = sys.modules["sgl_kernel"]
+    sgl_kernel.flash_attn = flash_attn
+    sys.modules["sgl_kernel.flash_attn"] = flash_attn
+
+
 class _CDLLWrapper:
     """
     Wrapper for ctypes.CDLL that automatically translates CUDA/NCCL function names
