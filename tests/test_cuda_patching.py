@@ -2069,6 +2069,55 @@ class TestFlashAttnPatching:
         assert hasattr(sgl_kernel, "flash_attn")
         assert sgl_kernel.flash_attn is flash_attn
 
+    def test_real_sgl_kernel_not_replaced_by_stub(self):
+        """Test that a real sgl_kernel module already in sys.modules is preserved,
+        not replaced by a stub. The patch should only add flash_attn to it."""
+        import sys
+        from types import ModuleType
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        try:
+            import flash_attn
+        except ImportError:
+            pytest.skip("flash_attn not installed")
+
+        from torchada._patch import _patch_flash_attn
+
+        # Save original state
+        orig_sgl_kernel = sys.modules.pop("sgl_kernel", None)
+        orig_sgl_kernel_fa = sys.modules.pop("sgl_kernel.flash_attn", None)
+
+        try:
+            # Simulate a real sgl_kernel package already imported with a custom attribute
+            fake_sgl_kernel = ModuleType("sgl_kernel")
+            fake_sgl_kernel.__path__ = ["/some/real/path"]
+            fake_sgl_kernel.__package__ = "sgl_kernel"
+            fake_sgl_kernel.some_other_api = lambda: "real"
+            sys.modules["sgl_kernel"] = fake_sgl_kernel
+
+            # Run the patch
+            _patch_flash_attn()
+
+            # The same module object should still be in sys.modules (not replaced)
+            assert sys.modules["sgl_kernel"] is fake_sgl_kernel
+            # The original attribute should still be there
+            assert fake_sgl_kernel.some_other_api() == "real"
+            # flash_attn should have been added
+            assert fake_sgl_kernel.flash_attn is flash_attn
+            assert sys.modules["sgl_kernel.flash_attn"] is flash_attn
+        finally:
+            # Restore original state
+            sys.modules.pop("sgl_kernel", None)
+            sys.modules.pop("sgl_kernel.flash_attn", None)
+            if orig_sgl_kernel is not None:
+                sys.modules["sgl_kernel"] = orig_sgl_kernel
+            if orig_sgl_kernel_fa is not None:
+                sys.modules["sgl_kernel.flash_attn"] = orig_sgl_kernel_fa
+
     def test_flash_attn_direct_import_still_works(self):
         """Test backward compatibility: 'from flash_attn import flash_attn_varlen_func'
         still works after patching."""

@@ -1251,12 +1251,16 @@ def _patch_flash_attn():
     """
     import flash_attn
 
-    # Ensure sgl_kernel package exists in sys.modules (create stub if needed)
+    # Ensure sgl_kernel package exists in sys.modules.
+    # First try to import the real package; only create a stub if it's truly not installed.
     if "sgl_kernel" not in sys.modules:
-        sgl_kernel_stub = ModuleType("sgl_kernel")
-        sgl_kernel_stub.__path__ = []  # Make it a package
-        sgl_kernel_stub.__package__ = "sgl_kernel"
-        sys.modules["sgl_kernel"] = sgl_kernel_stub
+        try:
+            import sgl_kernel  # noqa: F401
+        except ImportError:
+            sgl_kernel_stub = ModuleType("sgl_kernel")
+            sgl_kernel_stub.__path__ = []  # Make it a package
+            sgl_kernel_stub.__package__ = "sgl_kernel"
+            sys.modules["sgl_kernel"] = sgl_kernel_stub
 
     # Register flash_attn as sgl_kernel.flash_attn submodule
     sgl_kernel = sys.modules["sgl_kernel"]
