@@ -828,6 +828,61 @@ class TestTorchGenerator:
         assert not isinstance(None, torch.Generator)
         assert not isinstance(torch.tensor([1, 2, 3]), torch.Generator)
 
+    def test_generator_class_is_picklable(self):
+        """Test that torch.Generator class can be pickled.
+
+        This is a regression test for multiprocessing serialization.
+        When GeneratorWrapper was a local class inside _patch_torch_generator(),
+        pickle.dumps(torch.Generator) would fail with:
+            Can't pickle local object '_patch_torch_generator.<locals>.GeneratorWrapper'
+        """
+        import pickle
+
+        import torch
+
+        import torchada  # noqa: F401
+
+        # The class itself must be picklable for multiprocessing RPC
+        data = pickle.dumps(torch.Generator)
+        restored = pickle.loads(data)
+        assert restored is torch.Generator
+
+    @pytest.mark.gpu
+    def test_generator_instance_is_picklable(self):
+        """Test that torch.Generator instances can be pickled.
+
+        Generators created via torch.Generator(device='cuda') on MUSA must
+        survive pickle round-trips used by multiprocessing executors.
+        """
+        import pickle
+
+        import torch
+
+        import torchada  # noqa: F401
+
+        gen = torch.Generator(device="cuda").manual_seed(42)
+        data = pickle.dumps(gen)
+        restored = pickle.loads(data)
+        assert isinstance(restored, torch.Generator)
+
+    def test_generator_picklable_in_container(self):
+        """Test that a generator stored in a container can be pickled.
+
+        Simulates the real-world pattern where a generator is passed inside a
+        sampling params dict/tuple that gets serialized for multiprocessing RPC.
+        """
+        import pickle
+
+        import torch
+
+        import torchada  # noqa: F401
+
+        gen = torch.Generator().manual_seed(123)
+        params = {"generator": gen, "height": 512, "width": 512}
+        data = pickle.dumps(params)
+        restored = pickle.loads(data)
+        assert isinstance(restored["generator"], torch.Generator)
+
 
 class TestTorchVersionCuda:
     """Test torch.version.cuda is NOT patched.
@@ -1135,8 +1190,9 @@ class TestIsCompiledAndBackends:
 
         # Save original state
         original = torch.backends.cuda.matmul.fp32_precision
-        assert original in valid_precisions, \
-            f"fp32_precision value '{original}' not in expected set {valid_precisions}"
+        assert (
+            original in valid_precisions
+        ), f"fp32_precision value '{original}' not in expected set {valid_precisions}"
 
         # Test setting values
         for test_value in test_values:
@@ -1414,8 +1470,9 @@ class TestLibraryImpl:
 
         def identity_allow_override_1(x: torch.Tensor) -> torch.Tensor:
             return x
+
         def doubled_allow_override_2(x: torch.Tensor) -> torch.Tensor:
-            return 2*x
+            return 2 * x
 
         test_lib.define("test_op(Tensor x) -> Tensor")
         test_lib.impl("test_op", identity_allow_override_1, "CPU")
@@ -1477,12 +1534,19 @@ class TestLibraryImpl:
 
         def identity_allow_override_with_keyset_1(keyset, x: torch.Tensor) -> torch.Tensor:
             return x
+
         def doubled_allow_override_with_keyset_2(keyset, x: torch.Tensor) -> torch.Tensor:
-            return 2*x
+            return 2 * x
 
         test_lib.define("test_op(Tensor x) -> Tensor")
         test_lib.impl("test_op", identity_allow_override_with_keyset_1, "CPU", with_keyset=True)
-        test_lib.impl("test_op", doubled_allow_override_with_keyset_2, "CPU", with_keyset=True, allow_override=True)
+        test_lib.impl(
+            "test_op",
+            doubled_allow_override_with_keyset_2,
+            "CPU",
+            with_keyset=True,
+            allow_override=True,
+        )
 
         x = torch.randn(3)
         op = getattr(torch.ops, lib_name)

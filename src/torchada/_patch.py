@@ -324,6 +324,36 @@ _original_torch_generator = None
 _original_c_generator = None
 
 
+class _GeneratorMeta(type):
+    """Metaclass that properly implements __instancecheck__ for isinstance() to work."""
+
+    def __instancecheck__(cls, instance):
+        if _original_c_generator is not None:
+            return isinstance(instance, _original_c_generator)
+        return False
+
+    def __subclasscheck__(cls, subclass):
+        if _original_c_generator is not None:
+            if subclass is _original_c_generator:
+                return True
+        return super().__subclasscheck__(subclass)
+
+
+class GeneratorWrapper(metaclass=_GeneratorMeta):
+    """Wrapper for torch.Generator that translates cuda -> musa."""
+
+    _original = None
+
+    def __new__(cls, device=None):
+        original = cls._original
+        if original is None:
+            raise RuntimeError("GeneratorWrapper not initialized")
+        # Translate device if needed
+        if device is not None:
+            device = _translate_device(device)
+        return original(device=device)
+
+
 @patch_function
 def _patch_torch_generator():
     """
@@ -346,31 +376,10 @@ def _patch_torch_generator():
     # of type torch._C.Generator
     _original_c_generator = torch._C.Generator
 
-    class GeneratorMeta(type):
-        """Metaclass that properly implements __instancecheck__ for isinstance() to work."""
+    GeneratorWrapper._original = _original_torch_generator
 
-        def __instancecheck__(cls, instance):
-            # Check if instance is a torch._C.Generator (the actual C class)
-            return isinstance(instance, _original_c_generator)
-
-        def __subclasscheck__(cls, subclass):
-            # Check if subclass is or inherits from torch._C.Generator
-            if subclass is _original_c_generator:
-                return True
-            return super().__subclasscheck__(subclass)
-
-    class GeneratorWrapper(metaclass=GeneratorMeta):
-        """Wrapper for torch.Generator that translates cuda -> musa."""
-
-        def __new__(cls, device=None):
-            # Translate device if needed
-            if device is not None:
-                device = _translate_device(device)
-            return _original_torch_generator(device=device)
-
-    # Copy over class attributes
+    # Copy over doc but keep __module__ as torchada._patch so pickle can find the class
     GeneratorWrapper.__doc__ = _original_torch_generator.__doc__
-    GeneratorWrapper.__module__ = _original_torch_generator.__module__
 
     torch.Generator = GeneratorWrapper
 
@@ -1053,8 +1062,8 @@ def _patch_library_impl():
         bound = sig.bind(self, *args, **kwargs)
         bound.apply_defaults()
 
-        if bound.arguments.get('dispatch_key') in cuda_dispatch_key_map:
-            bound.arguments['dispatch_key'] = cuda_dispatch_key_map[bound.arguments['dispatch_key']]
+        if bound.arguments.get("dispatch_key") in cuda_dispatch_key_map:
+            bound.arguments["dispatch_key"] = cuda_dispatch_key_map[bound.arguments["dispatch_key"]]
 
         return original_impl(*bound.args, **bound.kwargs)
 
