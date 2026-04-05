@@ -732,7 +732,6 @@ class TestTorchCudaMemory:
 
     def test_import_pluggable_allocator(self):
         """Test that CUDAPluggableAllocator can be imported from torch.cuda.memory."""
-        import torch
 
         import torchada
 
@@ -2159,6 +2158,10 @@ class TestValidateDevice:
 
     def test_patch_when_attribute_missing(self, monkeypatch):
         """Verify the fallback implementation is installed when the attribute is absent."""
+        # _patch_validate_device is gated by @requires_import("torch_musa", ...),
+        # so it is a no-op without torch_musa.
+        pytest.importorskip("torch_musa")
+
         import torch.nn.attention.flex_attention as flex_attention
 
         from torchada._patch import _patch_validate_device
