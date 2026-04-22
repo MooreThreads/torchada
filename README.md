@@ -298,7 +298,7 @@ if is_nvidia() or is_musa():
 | [Chitu](https://github.com/thu-pacman/chitu) | Model Serving | ✅ Merged | — |
 | [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | Model Serving | ✅ Merged | — |
 | [SGLang](https://github.com/sgl-project/sglang) | Model Serving | 🚧 In Progress | [SGLang#16565](https://github.com/sgl-project/sglang/issues/16565) |
-| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | Image/Video Generation | 🚧 In Progress | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
+| [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | Image/Video Generation | 🚧 In Progress | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
 | [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | 🚧 In Progress | [vLLM-Omni#2347](https://github.com/vllm-project/vllm-omni/issues/2347) |
 
 ## License

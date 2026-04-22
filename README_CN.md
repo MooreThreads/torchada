@@ -290,14 +290,16 @@ if is_nvidia() or is_musa():
 
 ## 使用 torchada 的项目
 
-| 项目 | 类别 | 状态 |
-|------|------|------|
-| [Xinference](https://github.com/xorbitsai/inference) | 模型服务 | ✅ 已合并 |
-| [LightLLM](https://github.com/ModelTC/LightLLM) | 模型服务 | ✅ 已合并 |
-| [LightX2V](https://github.com/ModelTC/LightX2V) | 图像/视频生成 | ✅ 已合并 |
-| [赤兔](https://github.com/thu-pacman/chitu) | 模型服务 | ✅ 已合并 |
-| [SGLang](https://github.com/sgl-project/sglang) | 模型服务 | 进行中 |
-| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | 图像/视频生成 | 进行中 |
+| 项目 | 类别 | 状态 | 跟踪 |
+|------|------|------|------|
+| [Xinference](https://github.com/xorbitsai/inference) | 模型服务 | ✅ 已合并 | — |
+| [LightLLM](https://github.com/ModelTC/LightLLM) | 模型服务 | ✅ 已合并 | — |
+| [LightX2V](https://github.com/ModelTC/LightX2V) | 图像/视频生成 | ✅ 已合并 | — |
+| [赤兔](https://github.com/thu-pacman/chitu) | 模型服务 | ✅ 已合并 | — |
+| [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | 模型服务 | ✅ 已合并 | — |
+| [SGLang](https://github.com/sgl-project/sglang) | 模型服务 | 🚧 进行中 | [SGLang#16565](https://github.com/sgl-project/sglang/issues/16565) |
+| [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | 图像/视频生成 | 🚧 进行中 | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
+| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | 模型服务 (Omni) | 🚧 进行中 | [vLLM-Omni#2347](https://github.com/vllm-project/vllm-omni/issues/2347) |
 
 ## 许可证
 
