@@ -2399,3 +2399,235 @@ class TestFlashAttnPatching:
         for func_name in expected_funcs:
             assert hasattr(sgl_flash_attn, func_name), f"Missing {func_name}"
             assert callable(getattr(sgl_flash_attn, func_name)), f"{func_name} not callable"
+
+
+class TestAcceleratorModuleWrapper:
+    """Test the _AcceleratorModuleWrapper priority / fallback logic in isolation.
+
+    These tests use mock modules instead of the real torch.accelerator so the
+    priority rules can be verified deterministically across PyTorch versions
+    (including the forward-compat behavior expected when torch 2.9+ lands
+    official implementations of APIs that currently fall back to torch.musa).
+    """
+
+    def _make_wrapper(self, accel_attrs=None, musa_attrs=None):
+        from types import ModuleType
+
+        from torchada._patch import _AcceleratorModuleWrapper
+
+        accel = ModuleType("fake_torch_accelerator")
+        for k, v in (accel_attrs or {}).items():
+            setattr(accel, k, v)
+
+        musa = ModuleType("fake_torch_musa")
+        for k, v in (musa_attrs or {}).items():
+            setattr(musa, k, v)
+
+        return _AcceleratorModuleWrapper(accel, musa), accel, musa
+
+    def test_original_accelerator_takes_precedence_over_musa(self):
+        """Official torch.accelerator implementations must win over torch.musa.
+
+        This is the forward-compat guarantee: when PyTorch 2.9+ adds an
+        official implementation of an API (e.g. empty_cache), the wrapper
+        must return the official one, not the torch.musa fallback.
+        """
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"empty_cache": "official_impl"},
+            musa_attrs={"empty_cache": "musa_fallback"},
+        )
+        assert wrapper.empty_cache == "official_impl"
+
+    def test_fallback_to_musa_when_accelerator_missing(self):
+        """Attributes absent from torch.accelerator must fall back to torch.musa."""
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={},
+            musa_attrs={"empty_cache": "musa_fallback"},
+        )
+        assert wrapper.empty_cache == "musa_fallback"
+
+    def test_override_takes_precedence_over_everything(self):
+        """Explicit overrides must win over both original and fallback."""
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"synchronize": "official_impl"},
+            musa_attrs={"synchronize": "musa_impl"},
+        )
+        wrapper._set_override("synchronize", "patched_impl")
+        assert wrapper.synchronize == "patched_impl"
+
+    def test_missing_everywhere_raises_attribute_error(self):
+        """Attribute missing from both modules must raise AttributeError."""
+        wrapper, _, _ = self._make_wrapper()
+        with pytest.raises(AttributeError):
+            _ = wrapper.no_such_attribute
+
+    def test_resolved_attribute_is_cached(self):
+        """Subsequent lookups must hit __dict__ and skip __getattr__."""
+        wrapper, _, musa = self._make_wrapper(musa_attrs={"empty_cache": "v1"})
+        _ = wrapper.empty_cache  # first access resolves and caches
+        # Replace the musa attribute; wrapper must still return the cached value
+        musa.empty_cache = "v2"
+        assert wrapper.empty_cache == "v1"
+        assert "empty_cache" in wrapper.__dict__
+
+    def test_dir_includes_attributes_from_both_modules(self):
+        """dir() must surface attributes from both wrapped modules and overrides."""
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"is_available": lambda: True},
+            musa_attrs={"empty_cache": lambda: None},
+        )
+        wrapper._set_override("synchronize", lambda: None)
+        names = set(dir(wrapper))
+        assert "is_available" in names
+        assert "empty_cache" in names
+        assert "synchronize" in names
+
+
+class TestTorchAcceleratorPatching:
+    """Test torch.accelerator patching on the MUSA platform."""
+
+    def test_accelerator_is_wrapped_on_musa(self):
+        """torch.accelerator must be replaced by _AcceleratorModuleWrapper on MUSA."""
+        import sys
+
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert type(torch.accelerator).__name__ == "_AcceleratorModuleWrapper"
+        assert sys.modules["torch.accelerator"] is torch.accelerator
+
+    def test_existing_accelerator_apis_preserved(self):
+        """Original torch.accelerator APIs must still resolve to the official module."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        # These APIs exist in torch 2.7 torch.accelerator and must be the real ones
+        assert torch.accelerator.is_available() is True
+        assert isinstance(torch.accelerator.device_count(), int)
+        assert isinstance(torch.accelerator.current_device_index(), int)
+        # Function objects should come from the real torch.accelerator module
+        assert torch.accelerator.is_available.__module__ == "torch.accelerator"
+
+    def test_empty_cache_falls_back_to_musa(self):
+        """torch.accelerator.empty_cache() must work via torch.musa fallback.
+
+        Regression test for the user-reported AttributeError:
+            >>> torch.accelerator.empty_cache()
+            AttributeError: module 'torch.accelerator' has no attribute 'empty_cache'
+        """
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        # Must not raise
+        torch.accelerator.empty_cache()
+        assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
+
+    def test_memory_apis_fall_back_to_musa(self):
+        """Memory query APIs missing from torch.accelerator must work via fallback."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert isinstance(torch.accelerator.memory_allocated(), int)
+        assert isinstance(torch.accelerator.max_memory_allocated(), int)
+        assert isinstance(torch.accelerator.memory_reserved(), int)
+        assert isinstance(torch.accelerator.max_memory_reserved(), int)
+        assert isinstance(torch.accelerator.memory_stats(), dict)
+        torch.accelerator.reset_peak_memory_stats()
+
+    def test_rng_apis_fall_back_to_musa(self):
+        """RNG APIs missing from torch.accelerator must work via fallback."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        torch.accelerator.manual_seed(12345)
+        assert torch.accelerator.initial_seed() == 12345
+
+    def test_stream_and_event_classes_fall_back_to_musa(self):
+        """Stream / Event types missing from torch.accelerator must work via fallback."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        s = torch.accelerator.Stream()
+        e = torch.accelerator.Event()
+        assert s is not None
+        assert e is not None
+
+    def test_synchronize_override_handles_multiple_device_types(self):
+        """The patched synchronize must accept None, int, str, and torch.device."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        torch.accelerator.synchronize()
+        torch.accelerator.synchronize(0)
+        torch.accelerator.synchronize("musa:0")
+        torch.accelerator.synchronize(torch.device("musa:0"))
+
+    def test_device_index_context_manager(self):
+        """device_index context manager must restore the previous device."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        before = torch.accelerator.current_device_index()
+        with torch.accelerator.device_index(0):
+            assert torch.accelerator.current_device_index() == 0
+        assert torch.accelerator.current_device_index() == before
+
+    def test_stream_context_manager(self):
+        """stream context manager must restore the previous stream."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        before = torch.accelerator.current_stream()
+        with torch.accelerator.stream(torch.musa.Stream()):
+            pass
+        after = torch.accelerator.current_stream()
+        assert before == after
+
+    def test_from_import_resolves_through_wrapper(self):
+        """`from torch.accelerator import X` must resolve against the wrapper."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        from torch.accelerator import empty_cache, memory_allocated, synchronize
+
+        empty_cache()
+        assert isinstance(memory_allocated(), int)
+        synchronize()

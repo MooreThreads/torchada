@@ -63,6 +63,7 @@ That's it! All `torch.cuda.*` APIs are automatically redirected to `torch.musa.*
 | C++ Extensions | `CUDAExtension`, `BuildExtension`, `load()` |
 | FlexAttention | `torch.nn.attention.flex_attention` works on MUSA |
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
+| Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `Stream`, `Event`, ... |
 
 ## Examples
 
@@ -162,6 +163,47 @@ func = lib.cudaMalloc  # Automatically translates to musaMalloc
 nccl_lib = ctypes.CDLL("libmccl.so")
 func = nccl_lib.ncclAllReduce  # Automatically translates to mcclAllReduce
 ```
+
+### Unified Accelerator API (`torch.accelerator`)
+
+`torch.accelerator` is PyTorch's unified backend-agnostic entry point. Its API
+surface is expanding across PyTorch releases, so APIs such as `empty_cache()`,
+`memory_stats()`, `Stream`, and `Event` are not yet present in torch 2.7 even
+though they exist on `torch.musa`. torchada wraps `torch.accelerator` so code
+written against the newer unified API works today:
+
+```python
+import torchada
+import torch
+
+# APIs that exist in torch 2.7 keep their official implementation
+torch.accelerator.is_available()
+torch.accelerator.device_count()
+
+# APIs missing from torch 2.7 transparently fall back to torch.musa
+torch.accelerator.empty_cache()
+torch.accelerator.memory_allocated()
+torch.accelerator.memory_stats()
+torch.accelerator.manual_seed(42)
+s = torch.accelerator.Stream()
+e = torch.accelerator.Event()
+
+# Patched to delegate to torch.musa.synchronize() (the default MUSA
+# implementation does not support synchronizing all streams on a device)
+torch.accelerator.synchronize()
+
+# Context managers for forward compatibility with PyTorch 2.9+
+with torch.accelerator.device_index(0):
+    ...
+with torch.accelerator.stream(torch.musa.Stream()):
+    ...
+```
+
+**Forward compatibility:** The wrapper always prefers the real
+`torch.accelerator` implementation and only falls back to `torch.musa` when an
+attribute is missing, so upgrading to a future PyTorch release that ships
+official implementations requires no changes on your side — you will
+automatically get the upstream version.
 
 ## Platform Detection
 

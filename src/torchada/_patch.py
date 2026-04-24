@@ -1382,6 +1382,179 @@ class _CDLLWrapper:
 _original_ctypes_CDLL = None
 
 
+class _AcceleratorModuleWrapper(ModuleType):
+    """
+    Wrapper module that extends torch.accelerator with fallbacks to torch.musa.
+
+    torch.accelerator is the unified accelerator abstraction being built up over
+    successive PyTorch releases. Many APIs scheduled for PyTorch 2.9+
+    (e.g. empty_cache, memory_stats, memory_allocated, Stream, Event,
+    manual_seed, get_device_name, ...) do not yet exist on torch.accelerator
+    in torch 2.7 / torch_musa, but do exist on torch.musa. This wrapper lets
+    user code written against the newer unified API work on current MUSA builds
+    by falling back to torch.musa for any attribute missing from the original
+    torch.accelerator module.
+
+    Resolution order for attribute access:
+        1. Explicit overrides installed by torchada (e.g. patched synchronize,
+           device_index / stream context managers)
+        2. The original torch.accelerator module (so existing APIs keep their
+           real implementations)
+        3. torch.musa as a fallback for APIs that have not yet been added to
+           torch.accelerator upstream
+
+    Resolved attributes are cached in __dict__ for fast subsequent access,
+    matching the pattern used by _CudaModuleWrapper.
+    """
+
+    def __init__(self, original_accel, musa_module):
+        super().__init__("torch.accelerator")
+        self._original_accel = original_accel
+        self._musa_module = musa_module
+        self._overrides = {}
+
+    def _set_override(self, name, value):
+        """Install an override that takes precedence over the wrapped modules."""
+        self._overrides[name] = value
+        object.__setattr__(self, name, value)
+
+    def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
+        try:
+            value = getattr(self._original_accel, name)
+        except AttributeError:
+            value = getattr(self._musa_module, name)
+        object.__setattr__(self, name, value)
+        return value
+
+    def __dir__(self):
+        attrs = set(dir(self._original_accel))
+        attrs.update(dir(self._musa_module))
+        attrs.update(self._overrides.keys())
+        return list(attrs)
+
+
+# Store original torch.accelerator module before patching
+_original_torch_accelerator = None
+
+
+def _make_patched_accelerator_synchronize(musa_module):
+    """Build a torch.accelerator.synchronize replacement that delegates to torch.musa."""
+
+    def patched_synchronize(device=None):
+        """
+        Patched synchronize that redirects to torch.musa.synchronize().
+
+        The MUSA backend does not implement synchronization of all streams on a
+        device, so the default torch.accelerator.synchronize() raises at runtime.
+        Redirecting to torch.musa.synchronize() restores the expected behavior.
+
+        Args:
+            device: torch.device, str, int, or None. If None, synchronizes the
+                current device.
+        """
+        if device is None:
+            musa_module.synchronize()
+            return
+
+        if isinstance(device, torch.device):
+            device_idx = device.index if device.index is not None else 0
+        elif isinstance(device, str):
+            if ":" in device:
+                device_idx = int(device.split(":")[1])
+            else:
+                device_idx = 0
+        elif isinstance(device, int):
+            device_idx = device
+        else:
+            device_idx = 0
+
+        musa_module.synchronize(device_idx)
+
+    return patched_synchronize
+
+
+def _make_accelerator_context_managers(accel_module):
+    """Build device_index / stream context managers that bind to accel_module."""
+
+    class device_index:
+        """Context manager to temporarily set the current device index."""
+
+        def __init__(self, idx):
+            self.idx = idx
+            self.prev_idx = None
+
+        def __enter__(self):
+            self.prev_idx = accel_module.current_device_index()
+            accel_module.set_device_index(self.idx)
+            return self
+
+        def __exit__(self, *args):
+            if self.prev_idx is not None:
+                accel_module.set_device_index(self.prev_idx)
+
+    class stream:
+        """Context manager to temporarily set the current stream."""
+
+        def __init__(self, stream_obj):
+            self.stream = stream_obj
+            self.prev_stream = None
+
+        def __enter__(self):
+            self.prev_stream = accel_module.current_stream()
+            accel_module.set_stream(self.stream)
+            return self
+
+        def __exit__(self, *args):
+            if self.prev_stream is not None:
+                accel_module.set_stream(self.prev_stream)
+
+    return device_index, stream
+
+
+@patch_function
+@requires_import("torch_musa", "torch.accelerator")
+def _patch_torch_accelerator():
+    """
+    Wrap torch.accelerator with an _AcceleratorModuleWrapper on MUSA platform.
+
+    This provides:
+
+    1. A fix for torch.accelerator.synchronize() - the MUSA backend does not
+       implement the all-streams synchronization hook, so the default
+       implementation raises. The wrapper installs a patched synchronize that
+       delegates to torch.musa.synchronize().
+
+    2. Forward compatibility for APIs that PyTorch is expected to add to
+       torch.accelerator in future releases (empty_cache, memory_stats,
+       memory_allocated, Stream, Event, manual_seed, get_device_name, ...).
+       Any attribute missing from the current torch.accelerator module is
+       looked up on torch.musa instead.
+
+    3. device_index(idx) and stream(s) context managers, which are not yet
+       present on torch.accelerator in torch 2.7.
+    """
+    global _original_torch_accelerator
+
+    import torch.accelerator as accel
+
+    if _original_torch_accelerator is None:
+        _original_torch_accelerator = accel
+
+    wrapper = _AcceleratorModuleWrapper(_original_torch_accelerator, torch.musa)
+
+    wrapper._set_override("synchronize", _make_patched_accelerator_synchronize(torch.musa))
+    device_index_cm, stream_cm = _make_accelerator_context_managers(wrapper)
+    if not hasattr(_original_torch_accelerator, "device_index"):
+        wrapper._set_override("device_index", device_index_cm)
+    if not hasattr(_original_torch_accelerator, "stream"):
+        wrapper._set_override("stream", stream_cm)
+
+    sys.modules["torch.accelerator"] = wrapper
+    torch.accelerator = wrapper
+
+
 @patch_function
 def _patch_ctypes_cdll():
     """
@@ -1466,6 +1639,8 @@ def apply_patches():
     - torch.amp.autocast(device_type='cuda') -> 'musa'
     - torch.utils.cpp_extension (CUDAExtension, BuildExtension) -> MUSA versions
     - torch._inductor.autotune_process.CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES
+    - torch.accelerator.synchronize() -> torch.musa.synchronize()
+    - torch.accelerator context managers (device_index, stream) for forward compatibility
     - ctypes.CDLL function name translation for MUSA libraries:
         - cudaXxx -> musaXxx (for libmusart)
         - ncclXxx -> mcclXxx (for libmccl)

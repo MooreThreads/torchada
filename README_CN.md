@@ -63,6 +63,7 @@ torch.cuda.synchronize()
 | C++ 扩展 | `CUDAExtension`, `BuildExtension`, `load()` |
 | FlexAttention | `torch.nn.attention.flex_attention` 支持 MUSA 设备 |
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
+| 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`Stream`、`Event` 等 |
 
 ## 示例
 
@@ -162,6 +163,42 @@ func = lib.cudaMalloc  # 自动转换为 musaMalloc
 nccl_lib = ctypes.CDLL("libmccl.so")
 func = nccl_lib.ncclAllReduce  # 自动转换为 mcclAllReduce
 ```
+
+### 统一加速器 API（`torch.accelerator`）
+
+`torch.accelerator` 是 PyTorch 的统一后端无关入口。它的 API 在不同的 PyTorch 版本中逐步扩展，
+因此像 `empty_cache()`、`memory_stats()`、`Stream` 和 `Event` 等 API 在 torch 2.7 中尚未存在，
+即使它们已经在 `torch.musa` 中提供。torchada 封装了 `torch.accelerator`，使得针对更新统一 API
+编写的代码可以立即使用：
+
+```python
+import torchada
+import torch
+
+# torch 2.7 中已存在的 API 保持使用官方实现
+torch.accelerator.is_available()
+torch.accelerator.device_count()
+
+# torch 2.7 中缺失的 API 透明地回退到 torch.musa
+torch.accelerator.empty_cache()
+torch.accelerator.memory_allocated()
+torch.accelerator.memory_stats()
+torch.accelerator.manual_seed(42)
+s = torch.accelerator.Stream()
+e = torch.accelerator.Event()
+
+# 修复为委托给 torch.musa.synchronize()（默认 MUSA 实现不支持同步设备上的所有流）
+torch.accelerator.synchronize()
+
+# 前向兼容 PyTorch 2.9+ 的上下文管理器
+with torch.accelerator.device_index(0):
+    ...
+with torch.accelerator.stream(torch.musa.Stream()):
+    ...
+```
+
+**前向兼容性：** 包装器始终优先使用真正的 `torch.accelerator` 实现，只有在缺少属性时才回退到
+`torch.musa`，因此升级到提供官方实现的未来 PyTorch 版本时无需任何更改 —— 您将自动获得上游版本。
 
 ## 平台检测
 
