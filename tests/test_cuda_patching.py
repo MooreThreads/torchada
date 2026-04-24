@@ -2585,10 +2585,35 @@ class TestTorchAcceleratorPatching:
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
+        # None: synchronize current device
         torch.accelerator.synchronize()
+        torch.accelerator.synchronize(None)
+
+        # int: synchronize device at index
         torch.accelerator.synchronize(0)
+
+        # str: both index-less (current device) and indexed forms
+        torch.accelerator.synchronize("musa")
         torch.accelerator.synchronize("musa:0")
+
+        # torch.device: both index-less (current device) and indexed forms
+        torch.accelerator.synchronize(torch.device("musa"))
         torch.accelerator.synchronize(torch.device("musa:0"))
+
+    def test_synchronize_override_rejects_invalid_types(self):
+        """The patched synchronize must reject invalid device types."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        with pytest.raises(TypeError, match="expected device to be"):
+            torch.accelerator.synchronize([1, 2, 3])
+
+        with pytest.raises(TypeError, match="expected device to be"):
+            torch.accelerator.synchronize({"device": 0})
 
     def test_device_index_context_manager(self):
         """device_index context manager must restore the previous device."""

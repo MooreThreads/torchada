@@ -1453,24 +1453,24 @@ def _make_patched_accelerator_synchronize(musa_module):
         Args:
             device: torch.device, str, int, or None. If None, synchronizes the
                 current device.
+
+        Raises:
+            TypeError: If device is not a valid type (torch.device, str, int, or None).
         """
-        if device is None:
-            musa_module.synchronize()
-            return
+        # Validate the device type to catch invalid inputs early
+        if device is not None and not isinstance(device, (torch.device, str, int)):
+            raise TypeError(
+                f"synchronize() expected device to be torch.device, str, int, or None, "
+                f"but got {type(device).__name__}"
+            )
 
-        if isinstance(device, torch.device):
-            device_idx = device.index if device.index is not None else 0
-        elif isinstance(device, str):
-            if ":" in device:
-                device_idx = int(device.split(":")[1])
-            else:
-                device_idx = 0
-        elif isinstance(device, int):
-            device_idx = device
-        else:
-            device_idx = 0
-
-        musa_module.synchronize(device_idx)
+        # torch.musa.synchronize natively handles all valid device types:
+        # - None: synchronizes the current device
+        # - int: synchronizes device at that index
+        # - str: handles both "musa" (current device) and "musa:N" (specific device)
+        # - torch.device: handles both torch.device("musa") and torch.device("musa:N")
+        # Delegate directly instead of manually parsing to preserve upstream semantics.
+        musa_module.synchronize(device)
 
     return patched_synchronize
 
