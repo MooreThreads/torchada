@@ -297,7 +297,7 @@ See `src/torchada/_mapping.py` for the complete mapping table (380+ mappings).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.51
+torchada>=0.1.52
 ```
 
 ### Step 2: Conditional Import

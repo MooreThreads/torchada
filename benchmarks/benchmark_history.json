@@ -3,7 +3,7 @@
   "description": "Historical benchmark results for torchada performance tracking",
   "results": [
     {
-      "version": "0.1.51",
+      "version": "0.1.52",
       "date": "2026-01-29",
       "platform": "MUSA",
       "pytorch_version": "2.7.1",
