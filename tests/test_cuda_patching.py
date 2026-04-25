@@ -2482,6 +2482,69 @@ class TestAcceleratorModuleWrapper:
         assert "empty_cache" in names
         assert "synchronize" in names
 
+    def test_remap_used_when_accel_and_musa_lack_index_suffix_name(self):
+        """torch.accelerator *_index APIs must remap to torch.musa equivalents.
+
+        Reproduces the vllm-omni failure: on PyTorch builds where the original
+        torch.accelerator module does not expose set_device_index, a naive
+        fallback to torch.musa.set_device_index raises AttributeError because
+        torch.musa only exposes set_device. The wrapper must consult
+        _REMAP_ATTRS so the call resolves to torch.musa.set_device.
+        """
+        sentinel = object()
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={},
+            musa_attrs={"set_device": sentinel, "current_device": sentinel},
+        )
+        assert wrapper.set_device_index is sentinel
+        assert wrapper.set_device_idx is sentinel
+        assert wrapper.current_device_index is sentinel
+        assert wrapper.current_device_idx is sentinel
+
+    def test_remap_not_used_when_accelerator_has_official_impl(self):
+        """Remap must never override an official torch.accelerator implementation."""
+        official = object()
+        musa_set_device = object()
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"set_device_index": official},
+            musa_attrs={"set_device": musa_set_device},
+        )
+        assert wrapper.set_device_index is official
+
+    def test_remap_keys_listed_in_dir(self):
+        """dir() must surface remapped names so callers can discover them."""
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={},
+            musa_attrs={"set_device": lambda d: None, "current_device": lambda: 0},
+        )
+        names = set(dir(wrapper))
+        assert "set_device_index" in names
+        assert "current_device_index" in names
+
+    def test_special_attrs_for_nested_lookups(self):
+        """_SPECIAL_ATTRS must enable nested attribute lookups (e.g., StreamContext)."""
+        from types import ModuleType
+
+        from torchada._patch import _AcceleratorModuleWrapper
+
+        # Build a nested module structure: musa.core.stream.StreamContext
+        sentinel = object()
+        stream_mod = ModuleType("stream")
+        stream_mod.StreamContext = sentinel
+
+        core_mod = ModuleType("core")
+        core_mod.stream = stream_mod
+
+        musa = ModuleType("torch_musa")
+        musa.core = core_mod
+
+        accel = ModuleType("torch_accelerator")
+        wrapper = _AcceleratorModuleWrapper(accel, musa)
+
+        # StreamContext should resolve to the nested object
+        assert wrapper.StreamContext is sentinel
+        assert "StreamContext" in dir(wrapper)
+
 
 class TestTorchAcceleratorPatching:
     """Test torch.accelerator patching on the MUSA platform."""
@@ -2615,6 +2678,43 @@ class TestTorchAcceleratorPatching:
         with pytest.raises(TypeError, match="expected device to be"):
             torch.accelerator.synchronize({"device": 0})
 
+    def test_set_device_index_works_when_missing_from_original(self, monkeypatch):
+        """Reproduces vllm-omni failure: torch.accelerator.set_device_index(device).
+
+        When the original torch.accelerator does not expose set_device_index
+        (older PyTorch builds), the wrapper must remap the call to
+        torch.musa.set_device instead of failing with AttributeError on
+        torch.musa.set_device_index.
+        """
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        # Simulate a PyTorch build whose torch.accelerator lacks the
+        # *_index APIs by stripping them from the wrapped original module
+        # and clearing the wrapper cache entry.
+        original = torch.accelerator._original_accel
+        for name in (
+            "set_device_index",
+            "set_device_idx",
+            "current_device_index",
+            "current_device_idx",
+        ):
+            monkeypatch.delattr(original, name, raising=False)
+            torch.accelerator.__dict__.pop(name, None)
+
+        # The exact vllm-omni call pattern: passing a torch.device
+        torch.accelerator.set_device_index(torch.device("musa:0"))
+        assert torch.accelerator.current_device_index() == 0
+
+        # Other accepted argument types still work via the remap
+        torch.accelerator.set_device_index(0)
+        torch.accelerator.set_device_idx(0)
+        assert torch.accelerator.current_device_idx() == 0
+
     def test_device_index_context_manager(self):
         """device_index context manager must restore the previous device."""
         import torch
@@ -2656,3 +2756,17 @@ class TestTorchAcceleratorPatching:
         empty_cache()
         assert isinstance(memory_allocated(), int)
         synchronize()
+
+    def test_stream_context_falls_back_to_nested_musa_attr(self):
+        """torch.accelerator.StreamContext must fall back to torch_musa.core.stream.StreamContext."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        # StreamContext is not in torch.accelerator 2.7 but exists in torch_musa
+        stream_ctx = torch.accelerator.StreamContext
+        assert stream_ctx.__name__ == "StreamContext"
+        assert "torch_musa.core.stream" in stream_ctx.__module__

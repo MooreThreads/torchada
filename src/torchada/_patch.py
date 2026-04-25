@@ -1401,11 +1401,31 @@ class _AcceleratorModuleWrapper(ModuleType):
         2. The original torch.accelerator module (so existing APIs keep their
            real implementations)
         3. torch.musa as a fallback for APIs that have not yet been added to
-           torch.accelerator upstream
+           torch.accelerator upstream, applying _REMAP_ATTRS for APIs whose
+           torch.musa equivalent has a different name
 
     Resolved attributes are cached in __dict__ for fast subsequent access,
     matching the pattern used by _CudaModuleWrapper.
     """
+
+    # Attribute name remappings (torch.accelerator name -> torch.musa name).
+    # torch.accelerator uses an *_index / *_idx naming convention introduced in
+    # newer PyTorch releases, while torch.musa keeps the older torch.cuda style
+    # without the suffix. When the original torch.accelerator module does not
+    # expose these names (e.g. older PyTorch builds), the wrapper falls back to
+    # torch.musa using the remapped name so callers still get a working API.
+    _REMAP_ATTRS = {
+        "set_device_index": "set_device",
+        "set_device_idx": "set_device",
+        "current_device_index": "current_device",
+        "current_device_idx": "current_device",
+    }
+
+    # Special attribute mappings for attributes not at top level of torch_musa.
+    # Maps attribute name -> dot-separated path within torch_musa.
+    _SPECIAL_ATTRS = {
+        "StreamContext": "core.stream.StreamContext",
+    }
 
     def __init__(self, original_accel, musa_module):
         super().__init__("torch.accelerator")
@@ -1424,13 +1444,29 @@ class _AcceleratorModuleWrapper(ModuleType):
         try:
             value = getattr(self._original_accel, name)
         except AttributeError:
-            value = getattr(self._musa_module, name)
+            # Fall back to torch.musa with several strategies in order:
+            # 1. Same-name lookup (e.g., empty_cache)
+            # 2. Special nested attributes (e.g., StreamContext -> core.stream.StreamContext)
+            # 3. Name remapping (e.g., set_device_index -> set_device)
+            if hasattr(self._musa_module, name):
+                value = getattr(self._musa_module, name)
+            elif name in self._SPECIAL_ATTRS:
+                obj = self._musa_module
+                for part in self._SPECIAL_ATTRS[name].split("."):
+                    obj = getattr(obj, part)
+                value = obj
+            elif name in self._REMAP_ATTRS:
+                value = getattr(self._musa_module, self._REMAP_ATTRS[name])
+            else:
+                raise AttributeError(f"module 'torch.accelerator' has no attribute '{name}'")
         object.__setattr__(self, name, value)
         return value
 
     def __dir__(self):
         attrs = set(dir(self._original_accel))
         attrs.update(dir(self._musa_module))
+        attrs.update(self._REMAP_ATTRS.keys())
+        attrs.update(self._SPECIAL_ATTRS.keys())
         attrs.update(self._overrides.keys())
         return list(attrs)
 
