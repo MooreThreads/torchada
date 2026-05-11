@@ -167,3 +167,97 @@ class TestMusaPatches:
             assert rules.get("cudaStream_t") == "musaStream_t"
             assert rules.get("at::cuda") == "at::musa"
             assert rules.get("c10::cuda") == "c10::musa"
+
+
+class TestSimplePortingExcludeDirs:
+    """Test directory exclusion helpers used with SimplePorting."""
+
+    def test_get_env_exclude_dirs_uses_path_separator(self, monkeypatch, tmp_path):
+        """TORCHADA_EXCLUDE_DIRS should accept multiple pathsep-delimited paths."""
+        from torchada.utils.cpp_extension import _get_env_exclude_dirs
+
+        first = tmp_path / "vendor"
+        second = tmp_path / "third_party"
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", f"{first}{os.pathsep}{second}")
+
+        result = _get_env_exclude_dirs()
+
+        assert os.path.realpath(str(first)) in result
+        assert os.path.realpath(str(second)) in result
+
+    def test_get_env_exclude_dirs_ignores_whitespace_entries(self, monkeypatch):
+        """Whitespace-only env entries must not resolve to the current directory."""
+        from torchada.utils.cpp_extension import _get_env_exclude_dirs
+
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", f"   {os.pathsep}\t")
+
+        assert _get_env_exclude_dirs() == []
+
+    def test_is_path_in_dir_does_not_match_prefix_siblings(self, tmp_path):
+        """A sibling with a shared prefix must not be treated as excluded."""
+        from torchada.utils.cpp_extension import _is_path_in_dir
+
+        excluded = tmp_path / "vendor"
+        sibling = tmp_path / "vendor_extra"
+
+        assert _is_path_in_dir(str(excluded), str(excluded))
+        assert not _is_path_in_dir(str(sibling), str(excluded))
+
+    def test_same_real_path_matches_equivalent_paths(self, tmp_path):
+        """Equivalent absolute paths should be recognized before adding includes."""
+        from torchada.utils.cpp_extension import _same_real_path
+
+        include_dir = tmp_path / "include"
+        include_dir.mkdir()
+
+        assert _same_real_path(str(include_dir), str(include_dir / ".." / "include"))
+
+    def test_collect_simple_porting_ignore_dirs_includes_nested_dirs(self, tmp_path):
+        """SimplePorting needs exact ignore entries for nested excluded dirs."""
+        from torchada.utils.cpp_extension import _collect_simple_porting_ignore_dirs
+
+        source_dir = tmp_path / "csrc"
+        excluded = source_dir / "vendor"
+        nested = excluded / "cub"
+        nested.mkdir(parents=True)
+
+        result = _collect_simple_porting_ignore_dirs(str(source_dir), [str(excluded)])
+
+        assert os.path.realpath(str(excluded)) in result
+        assert os.path.realpath(str(nested)) in result
+
+    def test_collect_simple_porting_ignore_dirs_ignores_outside_dirs(self, tmp_path):
+        """Only excludes inside the ported source root should be passed down."""
+        from torchada.utils.cpp_extension import _collect_simple_porting_ignore_dirs
+
+        source_dir = tmp_path / "csrc"
+        outside = tmp_path / "other_vendor"
+        source_dir.mkdir()
+        outside.mkdir()
+
+        result = _collect_simple_porting_ignore_dirs(str(source_dir), [str(outside)])
+
+        assert result == []
+
+    def test_subclass_can_override_get_exclude_dirs(self, monkeypatch, tmp_path):
+        """BuildExtension subclasses can merge env and project-specific excludes."""
+        if not torchada.is_musa_platform():
+            return
+
+        from torchada.utils.cpp_extension import _get_build_extension_class
+
+        env_exclude = tmp_path / "env_vendor"
+        custom_exclude = tmp_path / "custom_vendor"
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", str(env_exclude))
+
+        BaseClass = _get_build_extension_class()
+
+        class CustomBuildExt(BaseClass):
+            def get_exclude_dirs(self):
+                return super().get_exclude_dirs() + [str(custom_exclude)]
+
+        instance = CustomBuildExt.__new__(CustomBuildExt)
+        result = instance.get_exclude_dirs()
+
+        assert os.path.realpath(str(env_exclude)) in result
+        assert str(custom_exclude) in result

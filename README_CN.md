@@ -125,6 +125,21 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 ext = CUDAExtension("my_ext", sources=["kernel.cu"])
 ```
 
+如果特定的目录不需要 CUDA→MUSA 源码转换，可以在构建前设置
+`TORCHADA_EXCLUDE_DIRS`。多个目录使用 `os.pathsep` 分隔；Linux 上分隔符是 `:`。
+
+```bash
+export TORCHADA_EXCLUDE_DIRS=/path/to/dir0:/path/to/dir1
+```
+
+项目也可以继承 `BuildExtension`，在代码中追加排除目录：
+
+```python
+class MyBuildExt(BuildExtension):
+    def get_exclude_dirs(self):
+        return super().get_exclude_dirs() + ["/path/to/dir"]
+```
+
 ### 自定义算子
 
 ```python

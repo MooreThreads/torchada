@@ -125,6 +125,22 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 ext = CUDAExtension("my_ext", sources=["kernel.cu"])
 ```
 
+To skip CUDA→MUSA source porting for specified directories, set
+`TORCHADA_EXCLUDE_DIRS` to an `os.pathsep`-delimited directory list before
+building the extension. On Linux this separator is `:`.
+
+```bash
+export TORCHADA_EXCLUDE_DIRS=/path/to/dir0:/path/to/dir1
+```
+
+Projects can also extend `BuildExtension` for code-level configuration:
+
+```python
+class MyBuildExt(BuildExtension):
+    def get_exclude_dirs(self):
+        return super().get_exclude_dirs() + ["/path/to/dir"]
+```
+
 ### Custom Ops
 
 ```python
