@@ -16,6 +16,21 @@ torchada 是一个适配器，让 [torch_musa](https://github.com/MooreThreads/t
 
 许多 PyTorch 项目使用 `torch.cuda.*` API 为 NVIDIA GPU 编写。要在摩尔线程 GPU 上运行这些项目，通常需要把每个 `cuda` 引用改成 `musa`。torchada 通过在运行时自动将 CUDA API 调用转换为 MUSA 等效调用来消除这一问题。
 
+## 架构
+
+torchada 位于用户代码和 PyTorch MUSA 后端之间。用户应用只需导入一次 `torchada`，之后继续使用标准 `torch.cuda.*` API。兼容层会修补 CUDA 入口点，将 CUDA 设备引用转换为 MUSA，安装 CUDA 形态的兼容模块，并为 MUSA 工具链转换 CUDA 扩展源码和符号。在 MUSA 平台上，调用会重定向到 `torch.musa`，自定义算子使用 `PrivateUse1` 调度键，分布式 NCCL 请求映射到 MCCL，运行时调用则落到 MUSA 运行时。
+
+导入时的初始化流程很短：
+
+- 检测当前平台（`MUSA`、原生 `CUDA` 或 `CPU`）。
+- 在 MUSA 平台上加载可选的 C++/MUSA 算子覆盖。
+- 通过 `_patch.py` 注册表应用 PyTorch 兼容性补丁。
+- 为 SGLang 和 vLLM 设置内置 Triton/MoE 默认配置。
+
+主要兼容模块包括 `_device_compat.py`、`_cuda_compat.py`、`_runtime.py`、`_ctypes_compat.py`、`_accelerator_compat.py`、`utils/cpp_extension.py`、`_mapping.py`、`_cpp_ops.py`、`csrc/`、`cuda/` 和 `triton/`。
+
+为了保持下游项目的平台检测逻辑，`torch.cuda.is_available()` 和 `torch.version.cuda` 会有意保持不修补，这样项目仍然可以区分原生 CUDA 环境和 MUSA 环境。
+
 ## 前置条件
 
 - **torch_musa**：必须安装 [torch_musa](https://github.com/MooreThreads/torch_musa)（提供 PyTorch 的 MUSA 支持）
@@ -53,9 +68,11 @@ torch.cuda.synchronize()
 | 设备操作 | `tensor.cuda()`, `model.cuda()`, `torch.device("cuda")` |
 | 显存管理 | `torch.cuda.memory_allocated()`, `empty_cache()` |
 | 同步 | `torch.cuda.synchronize()`, `Stream`, `Event` |
+| 兼容别名 | `memory_cached()`、`torch.cuda.streams`、`torch.cuda.sparse` |
 | 混合精度 | `torch.cuda.amp.autocast()`, `GradScaler()` |
 | CUDA Graphs | `torch.cuda.CUDAGraph`, `torch.cuda.graph()` |
 | CUDA 运行时 | `torch.cuda.cudart()` → 使用 MUSA 运行时 |
+| CUDA 自省/调试 | `get_gencode_flags()`、`get_sync_debug_mode()`、`set_sync_debug_mode()` |
 | 性能分析 | `ProfilerActivity.CUDA` → 使用 PrivateUse1 |
 | 自定义算子 | `Library.impl(..., "CUDA")` → 使用 PrivateUse1 |
 | 分布式训练 | `dist.init_process_group(backend='nccl')` → 使用 MCCL |
@@ -197,8 +214,8 @@ with torch.accelerator.stream(torch.musa.Stream()):
     ...
 ```
 
-**前向兼容性：** 包装器始终优先使用真正的 `torch.accelerator` 实现，只有在缺少属性时才回退到
-`torch.musa`，因此升级到提供官方实现的未来 PyTorch 版本时无需任何更改 —— 您将自动获得上游版本。
+**前向兼容性：** 包装器会先应用 torchada 针对 MUSA 的修复（例如同步和显存 API），然后优先使用真正的
+`torch.accelerator` 实现，最后在属性缺失时回退到 `torch.musa`。
 
 ## 平台检测
 

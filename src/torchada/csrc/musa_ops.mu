@@ -12,10 +12,7 @@
 
 namespace torchada {
 
-// ============================================================================
-// Example: MUSA kernel for neg (negation)
-// This demonstrates how to override aten::neg for PrivateUse1 (MUSA) tensors
-// ============================================================================
+// Example MUSA kernel for overriding aten::neg on PrivateUse1 tensors.
 
 template <typename scalar_t>
 __global__ void neg_kernel(
@@ -31,20 +28,20 @@ __global__ void neg_kernel(
 at::Tensor neg_musa_impl(const at::Tensor& self) {
     log_op_call("neg");
 
-    // Ensure contiguous tensor
+    // Ensure the input is contiguous.
     auto self_contig = self.contiguous();
 
-    // Allocate output tensor
+    // Allocate the output tensor.
     auto output = at::empty_like(self_contig);
 
     if (self_contig.numel() == 0) {
         return output;
     }
 
-    // Get MUSA stream
+    // Use the current MUSA stream.
     musaStream_t stream = at::musa::getCurrentMUSAStream();
 
-    // Launch kernel
+    // Launch the kernel.
     const int64_t numel = self_contig.numel();
     const int threads = 256;
     const int blocks = (numel + threads - 1) / threads;
@@ -58,7 +55,7 @@ at::Tensor neg_musa_impl(const at::Tensor& self) {
                 numel);
         });
 
-    // Check for launch errors
+    // Check launch errors.
     musaError_t err = musaGetLastError();
     if (err != musaSuccess) {
         TORCH_CHECK(false, "MUSA kernel launch failed: ", musaGetErrorString(err));
@@ -69,18 +66,15 @@ at::Tensor neg_musa_impl(const at::Tensor& self) {
 
 }  // namespace torchada
 
-// ============================================================================
-// Register operator overrides for PrivateUse1 (MUSA)
+// Register operator overrides for PrivateUse1 (MUSA).
 //
 // Each operator checks TORCHADA_DISABLE_OP_OVERRIDE_<OP_NAME>=1 at registration
-// time. If set, the override is not registered and torch_musa's default
-// implementation is used.
+// time. If set, torch_musa's default implementation remains active.
 //
 // Uncomment m.impl() lines to activate custom implementations.
-// ============================================================================
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-    // Example: Register neg override only if not disabled
+    // Example: register neg override only when enabled.
     // if (torchada::is_override_enabled("neg")) {
     //     m.impl("neg", torchada::neg_musa_impl);
     // }

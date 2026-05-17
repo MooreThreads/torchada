@@ -4,8 +4,8 @@
 // Custom operator implementations can be added here or in separate files.
 //
 // To add a new operator override:
-//   1. Write the implementation function
-//   2. Register it using TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)
+//   1. Write the implementation function.
+//   2. Register it using TORCH_LIBRARY_IMPL(aten, PrivateUse1, m).
 //
 // Note: Operators registered here will override torch_musa's implementations.
 // Use with caution and ensure correctness.
@@ -19,9 +19,7 @@
 
 namespace torchada {
 
-// ============================================================================
-// Memory pool allocation functions (CUDA-compatible API on MUSA)
-// ============================================================================
+// CUDA-compatible memory pool allocation functions on MUSA.
 
 static void _musa_beginAllocateCurrentThreadToPool(
     c10::DeviceIndex device,
@@ -47,9 +45,7 @@ static void _musa_releasePool(
   c10::musa::MUSACachingAllocator::releasePool(device, mempool_id);
 }
 
-// ============================================================================
-// Utility functions exposed to Python
-// ============================================================================
+// Utility functions exposed to Python.
 
 static bool cpp_ops_loaded = false;
 
@@ -68,9 +64,7 @@ void mark_loaded() {
 }  // namespace torchada
 
 
-// ============================================================================
-// Python bindings
-// ============================================================================
+// Python bindings.
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "torchada C++ operator overrides";

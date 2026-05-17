@@ -13,10 +13,11 @@ def _get_amp_backend():
 
     if platform == Platform.MUSA:
         import torch
+        import torch_musa  # noqa: F401 - registers torch.musa
 
         if hasattr(torch.musa, "amp"):
             return torch.musa.amp
-        # Fallback to torch.cuda.amp for API compatibility
+        # Fall back to torch.cuda.amp for API compatibility.
         return torch.cuda.amp
     else:
         import torch
@@ -24,7 +25,7 @@ def _get_amp_backend():
         return torch.cuda.amp
 
 
-# Re-export common AMP classes and functions
+# Re-export common AMP classes and functions.
 def autocast(enabled=True, dtype=None, cache_enabled=True):
     """
     Context manager for automatic mixed precision.
@@ -38,7 +39,7 @@ def autocast(enabled=True, dtype=None, cache_enabled=True):
     if hasattr(backend, "autocast"):
         return backend.autocast(enabled=enabled, dtype=dtype, cache_enabled=cache_enabled)
     else:
-        # Use torch.autocast with appropriate device type
+        # Use torch.autocast with the detected device type.
         import torch
 
         from .._platform import get_device_name
@@ -75,6 +76,13 @@ class GradScaler:
             growth_interval=growth_interval,
             enabled=enabled,
         )
+
+    def __getattr__(self, name):
+        """Delegate backend-specific GradScaler APIs not wrapped explicitly."""
+        scaler = self.__dict__.get("_scaler")
+        if scaler is None:
+            raise AttributeError(name)
+        return getattr(scaler, name)
 
     def scale(self, outputs):
         """Scale the outputs."""

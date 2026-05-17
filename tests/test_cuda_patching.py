@@ -449,6 +449,22 @@ class TestNCCLModule:
         if torchada.is_musa_platform():
             assert hasattr(torch.cuda, "mccl")
 
+    def test_nccl_module_alias_available(self):
+        """Test torch.cuda.nccl attribute and import both resolve to torch.musa.mccl."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert hasattr(torch.cuda, "nccl")
+        assert torch.cuda.nccl is torch.musa.mccl
+
+        import torch.cuda.nccl as nccl
+
+        assert nccl is torch.musa.mccl
+
 
 class TestRNGFunctions:
     """Test RNG functions are available through torch.cuda."""
@@ -513,6 +529,12 @@ class TestRandomFunctions:
         assert hasattr(torch.cuda.random, "seed")
         assert hasattr(torch.cuda.random, "initial_seed")
 
+    def test_cuda_random_module_import_available(self):
+        import torch
+        import torch.cuda.random as cuda_random
+
+        assert cuda_random is torch.cuda.random
+
     def test_cuda_random_aliases_musa(self):
         import torch
 
@@ -539,6 +561,190 @@ class TestRandomFunctions:
         torch.cuda.random.set_rng_state_all(state_all)
 
         assert isinstance(torch.cuda.random.initial_seed(), int)
+
+
+class TestTorchadaCudaDirectModule:
+    """Test direct torchada.cuda compatibility wrappers."""
+
+    def test_tensor_cuda_wrapper_translates_explicit_device(self, monkeypatch):
+        import torchada._device_compat as device_compat
+
+        calls = {}
+
+        class FakeTensor:
+            def musa(self, device=None, non_blocking=False):
+                calls["musa"] = (device, non_blocking)
+                return "musa-result"
+
+        def original_cuda(self, device=None, non_blocking=False):
+            raise AssertionError("original CUDA path should not be used on MUSA")
+
+        monkeypatch.setattr(device_compat, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+
+        wrapped = device_compat._wrap_tensor_cuda(original_cuda)
+
+        assert wrapped(FakeTensor(), device="cuda:1", non_blocking=True) == "musa-result"
+        assert calls["musa"] == ("musa:1", True)
+
+    def test_cuda_wrapper_to_fallback_uses_translated_device(self, monkeypatch):
+        import torch
+
+        import torchada._device_compat as device_compat
+
+        calls = {}
+
+        class FakeObject:
+            def to(self, device, **kwargs):
+                calls["to"] = (device, kwargs)
+                return "to-result"
+
+        def original_cuda(self, device=None, non_blocking=False):
+            raise AssertionError("original CUDA path should not be used on MUSA")
+
+        monkeypatch.setattr(device_compat, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+
+        tensor_cuda = device_compat._wrap_tensor_cuda(original_cuda)
+        assert tensor_cuda(FakeObject(), device="cuda:1", non_blocking=True) == "to-result"
+        assert calls["to"] == (
+            "musa:1",
+            {"non_blocking": True, "memory_format": torch.preserve_format},
+        )
+
+        calls.clear()
+        module_cuda = device_compat._wrap_module_cuda(original_cuda)
+        assert module_cuda(FakeObject(), device=2) == "to-result"
+        assert calls["to"] == ("musa:2", {})
+
+    def test_tensor_cuda_wrapper_preserves_memory_format(self, monkeypatch):
+        import torch
+
+        import torchada._device_compat as device_compat
+
+        calls = {}
+
+        class FakeTensor:
+            def musa(self, **kwargs):
+                calls["musa"] = kwargs
+                return "musa-result"
+
+        def original_cuda(self, device=None, non_blocking=False, memory_format=None):
+            raise AssertionError("original CUDA path should not be used on MUSA")
+
+        monkeypatch.setattr(device_compat, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+
+        wrapped = device_compat._wrap_tensor_cuda(original_cuda)
+
+        assert (
+            wrapped(FakeTensor(), device="cuda", memory_format=torch.channels_last) == "musa-result"
+        )
+        assert calls["musa"] == {
+            "device": "musa",
+            "non_blocking": False,
+            "memory_format": torch.channels_last,
+        }
+
+    def test_device_arguments_translate_for_direct_cuda_module(self, monkeypatch):
+        import torchada._device_compat as device_compat
+        import torchada.cuda as torchada_cuda
+
+        calls = {}
+
+        class Backend:
+            def set_device(self, device):
+                calls["set_device"] = device
+
+            def get_device_name(self, device=None):
+                calls["get_device_name"] = device
+                return "MUSA"
+
+            def memory_allocated(self, device=None):
+                calls["memory_allocated"] = device
+                return 0
+
+            def synchronize(self, device=None):
+                calls["synchronize"] = device
+
+        backend = Backend()
+
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+        monkeypatch.setattr(torchada_cuda, "_get_backend", lambda: backend)
+
+        torchada_cuda.set_device("cuda:1")
+        assert calls["set_device"] == "musa:1"
+
+        assert torchada_cuda.get_device_name("cuda") == "MUSA"
+        assert calls["get_device_name"] == "musa"
+
+        assert torchada_cuda.memory_allocated("cuda:0") == 0
+        assert calls["memory_allocated"] == "musa:0"
+
+        torchada_cuda.synchronize("cuda")
+        assert calls["synchronize"] == "musa"
+
+    def test_memory_cached_falls_back_to_reserved_names(self, monkeypatch):
+        import torchada._device_compat as device_compat
+        import torchada.cuda as torchada_cuda
+
+        calls = {}
+
+        class Backend:
+            def memory_reserved(self, device=None):
+                calls["memory_reserved"] = device
+                return 123
+
+            def max_memory_reserved(self, device=None):
+                calls["max_memory_reserved"] = device
+                return 456
+
+            def reset_peak_memory_stats(self, device=None):
+                calls["reset_peak_memory_stats"] = device
+
+        backend = Backend()
+
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+        monkeypatch.setattr(torchada_cuda, "_get_backend", lambda: backend)
+
+        assert torchada_cuda.memory_cached("cuda") == 123
+        assert calls["memory_reserved"] == "musa"
+
+        assert torchada_cuda.max_memory_cached("cuda:1") == 456
+        assert calls["max_memory_reserved"] == "musa:1"
+
+        torchada_cuda.reset_max_memory_cached("cuda")
+        assert calls["reset_peak_memory_stats"] == "musa"
+
+
+class TestTorchadaCudaRandomStub:
+    """Test direct torchada.cuda.random stub behavior."""
+
+    def test_rng_state_device_argument_is_translated(self, monkeypatch):
+        import torchada._device_compat as device_compat
+        import torchada.cuda.random as cuda_random
+
+        calls = {}
+        expected_state = object()
+
+        class Backend:
+            def get_rng_state(self, device):
+                calls["get_rng_state"] = device
+                return expected_state
+
+            def set_rng_state(self, state, device):
+                calls["set_rng_state"] = (state, device)
+
+        backend = Backend()
+
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+        monkeypatch.setattr(cuda_random, "_get_musa_backend", lambda: backend)
+
+        assert cuda_random.get_rng_state("cuda:0") is expected_state
+        assert calls["get_rng_state"] == "musa:0"
+
+        cuda_random.set_rng_state(expected_state)
+        assert calls["set_rng_state"] == (expected_state, "musa")
 
 
 class TestMemoryFunctions:
@@ -595,6 +801,137 @@ class TestMemoryFunctions:
                 if "MUSA" in str(e):
                     pytest.skip(f"MUSA driver issue: {e}")
                 raise
+
+
+class TestCudaPublicApiAliases:
+    """Test CUDA public API aliases that are absent from torch.musa."""
+
+    def test_deprecated_memory_cached_aliases(self):
+        """Deprecated CUDA memory_cached names should map to MUSA reserved memory APIs."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert torch.cuda.memory_cached() == torch.cuda.memory_reserved()
+        assert torch.cuda.max_memory_cached() == torch.cuda.max_memory_reserved()
+
+        from torch.cuda.memory import max_memory_cached, memory_cached
+
+        assert memory_cached() == torch.cuda.memory_reserved()
+        assert max_memory_cached() == torch.cuda.max_memory_reserved()
+
+    def test_host_memory_stats_noops(self):
+        """CUDA host allocator stat APIs should be importable and harmless on MUSA."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert dict(torch.cuda.host_memory_stats()) == {}
+        assert torch.cuda.host_memory_stats_as_nested_dict() == {}
+        torch.cuda.reset_accumulated_host_memory_stats()
+        torch.cuda.reset_peak_host_memory_stats()
+
+        from torch.cuda.memory import (
+            host_memory_stats,
+            host_memory_stats_as_nested_dict,
+            reset_accumulated_host_memory_stats,
+            reset_peak_host_memory_stats,
+        )
+
+        assert dict(host_memory_stats()) == {}
+        assert host_memory_stats_as_nested_dict() == {}
+        reset_accumulated_host_memory_stats()
+        reset_peak_host_memory_stats()
+
+    def test_static_cuda_build_flags(self):
+        """CUDA static build flags should remain available after redirection."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert torch.cuda.has_half is True
+        assert torch.cuda.has_magma is False
+
+    def test_cuda_pluggable_allocator_top_level_alias(self):
+        """Top-level CUDAPluggableAllocator should alias MUSAPluggableAllocator."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        if not hasattr(torch.musa.memory, "MUSAPluggableAllocator"):
+            pytest.skip("MUSAPluggableAllocator not available")
+
+        assert torch.cuda.CUDAPluggableAllocator is torch.musa.memory.MUSAPluggableAllocator
+
+    def test_streams_module_alias(self):
+        """torch.cuda.streams imports should resolve to MUSA stream classes."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        import torch.cuda.streams as streams
+
+        assert torch.cuda.streams is streams
+        assert streams.Stream is torch.musa.Stream
+        assert streams.Event is torch.musa.Event
+        assert streams.ExternalStream is torch.musa.ExternalStream
+
+    def test_sparse_module_alias(self):
+        """torch.cuda.sparse tensor aliases should resolve to MUSA tensor aliases."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        import torch.cuda.sparse as sparse
+
+        assert torch.cuda.sparse is sparse
+        assert sparse.FloatTensor is torch.musa.FloatTensor
+        assert sparse.HalfTensor is torch.musa.HalfTensor
+        assert sparse.BFloat16Tensor is torch.musa.BFloat16Tensor
+
+    def test_init_and_default_generators_available(self):
+        """torch.cuda.init and default_generators should be available on MUSA."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        torch.cuda.init()
+        assert isinstance(torch.cuda.default_generators, tuple)
+        assert len(torch.cuda.default_generators) == torch.cuda.device_count()
+
+    def test_get_stream_from_external_wraps_musa_stream(self):
+        """torch.cuda.get_stream_from_external should return a MUSA ExternalStream."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        stream = torch.musa.current_stream()
+        wrapped = torch.cuda.get_stream_from_external(stream.musa_stream, device=0)
+        assert isinstance(wrapped, torch.musa.ExternalStream)
 
 
 class TestStreamAndEvent:
@@ -1313,6 +1650,62 @@ class TestIsCompiledAndBackends:
 
             assert use_count is not None
             assert callable(use_count)
+
+
+class TestCudaBuildAndDebugIntrospection:
+    """Test top-level torch.cuda build/debug helpers missing from torch.musa."""
+
+    def test_get_gencode_flags_available_on_musa(self):
+        """torch.cuda.get_gencode_flags() should exist after CUDA->MUSA redirection."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        flags = torch.cuda.get_gencode_flags()
+        assert isinstance(flags, str)
+        # NVCC gencode flags are CUDA-specific, so the MUSA shim returns the
+        # same safe value as a PyTorch build with no CUDA architectures.
+        assert flags == ""
+
+        from torch.cuda import get_gencode_flags
+
+        assert get_gencode_flags() == flags
+
+    def test_sync_debug_mode_available_on_musa(self):
+        """torch.cuda sync debug mode getters/setters should not require CUDA C hooks."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        original = torch.cuda.get_sync_debug_mode()
+        try:
+            torch.cuda.set_sync_debug_mode("warn")
+            assert torch.cuda.get_sync_debug_mode() == 1
+
+            torch.cuda.set_sync_debug_mode("error")
+            assert torch.cuda.get_sync_debug_mode() == 2
+
+            torch.cuda.set_sync_debug_mode("default")
+            assert torch.cuda.get_sync_debug_mode() == 0
+
+            torch.cuda.set_sync_debug_mode(1)
+            assert torch.cuda.get_sync_debug_mode() == 1
+
+            with pytest.raises(RuntimeError, match="invalid value of debug_mode"):
+                torch.cuda.set_sync_debug_mode("invalid")
+
+            from torch.cuda import get_sync_debug_mode, set_sync_debug_mode
+
+            set_sync_debug_mode(2)
+            assert get_sync_debug_mode() == 2
+        finally:
+            torch.cuda.set_sync_debug_mode(original)
 
 
 class TestProfilerActivity:
@@ -2185,6 +2578,31 @@ class TestCppOpsInfrastructure:
         assert osp.isfile(ops_h), f"ops.h not found: {ops_h}"
         assert osp.isfile(ops_cpp), f"ops.cpp not found: {ops_cpp}"
 
+    def test_cpp_ops_source_discovery_groups_files(self, tmp_path):
+        """C++ ops source discovery should separate host and MUSA sources."""
+        from torchada._cpp_ops import _discover_extension_sources
+
+        for name in ["z_kernel.mu", "a_ops.cpp", "b_kernel.cu", "ignore.txt"]:
+            (tmp_path / name).write_text("")
+
+        sources = _discover_extension_sources(str(tmp_path))
+
+        assert [p.rsplit("/", 1)[-1] for p in sources.cpp_sources] == ["a_ops.cpp"]
+        assert [p.rsplit("/", 1)[-1] for p in sources.musa_sources] == [
+            "b_kernel.cu",
+            "z_kernel.mu",
+        ]
+        assert sources.has_sources
+        assert sources.needs_musa_loader
+
+    def test_cpp_ops_musa_arch_flag_prefers_env(self, monkeypatch):
+        """MTGPU_TARGET should override runtime architecture detection."""
+        from torchada._cpp_ops import _get_musa_arch_flag
+
+        monkeypatch.setenv("MTGPU_TARGET", "mp_test")
+
+        assert _get_musa_arch_flag() == "--offload-arch=mp_test"
+
     def test_cpp_ops_header_content(self):
         """Test that the C++ header has expected content."""
         import os.path as osp
@@ -2547,6 +2965,24 @@ class TestAcceleratorModuleWrapper:
         )
         wrapper._set_override("synchronize", "patched_impl")
         assert wrapper.synchronize == "patched_impl"
+
+    def test_synchronize_override_translates_cuda_device_strings(self, monkeypatch):
+        """The synchronize override must accept CUDA spellings before calling MUSA."""
+        import torchada._device_compat as device_compat
+        from torchada._accelerator_compat import _make_patched_accelerator_synchronize
+
+        calls = []
+
+        class FakeMusa:
+            def synchronize(self, device=None):
+                calls.append(device)
+
+        monkeypatch.setattr(device_compat, "_is_musa_platform_cached", True)
+        synchronize = _make_patched_accelerator_synchronize(FakeMusa())
+
+        synchronize("cuda:1")
+
+        assert calls == ["musa:1"]
 
     def test_missing_everywhere_raises_attribute_error(self):
         """Attribute missing from both modules must raise AttributeError."""

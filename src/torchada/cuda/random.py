@@ -7,7 +7,7 @@ On a MUSA platform, behavior is provided by `torch.musa`; on non-MUSA
 platforms, this module is only reachable when torchada patching is active.
 
 Usage:
-    import torchada  # Apply patches first
+    import torchada  # Apply patches first.
     import torch.cuda.random as cuda_random
 
     cuda_random.manual_seed(1234)
@@ -18,6 +18,8 @@ from typing import Iterable, List, Union
 
 import torch
 from torch import Tensor
+
+from .._device_compat import _translate_device
 
 __all__ = [
     "get_rng_state",
@@ -32,33 +34,40 @@ __all__ = [
 ]
 
 
-def get_rng_state(device: Union[int, str, torch.device] = "musa") -> Tensor:
+def _get_musa_backend():
+    """Return torch.musa, importing torch_musa first so the module is registered."""
+    import torch_musa  # noqa: F401
+
+    return torch.musa
+
+
+def get_rng_state(device: Union[int, str, torch.device] = "cuda") -> Tensor:
     r"""Return the random number generator state of the specified GPU as a ByteTensor.
 
     Args:
         device (torch.device or int, optional): The device to return the RNG state of.
-            Default: ``'musa'`` for the current device.
+            Default: ``'cuda'`` for CUDA API compatibility.
 
     .. warning::
         This function eagerly initializes the backend device.
     """
-    return torch.musa.get_rng_state(device)
+    return _get_musa_backend().get_rng_state(_translate_device(device))
 
 
 def get_rng_state_all() -> List[Tensor]:
     r"""Return a list of ByteTensor representing the random number states of all devices."""
-    return torch.musa.get_rng_state_all()
+    return _get_musa_backend().get_rng_state_all()
 
 
-def set_rng_state(new_state: Tensor, device: Union[int, str, torch.device] = "musa") -> None:
+def set_rng_state(new_state: Tensor, device: Union[int, str, torch.device] = "cuda") -> None:
     r"""Set the random number generator state of the specified GPU.
 
     Args:
         new_state (torch.ByteTensor): The desired state
         device (torch.device or int, optional): The device to set the RNG state.
-            Default: ``'musa'`` for the current device.
+            Default: ``'cuda'`` for CUDA API compatibility.
     """
-    return torch.musa.set_rng_state(new_state, device)
+    return _get_musa_backend().set_rng_state(new_state, _translate_device(device))
 
 
 def set_rng_state_all(new_states: Iterable[Tensor]) -> None:
@@ -67,7 +76,7 @@ def set_rng_state_all(new_states: Iterable[Tensor]) -> None:
     Args:
         new_states (Iterable of torch.ByteTensor): The desired state for each device.
     """
-    return torch.musa.set_rng_state_all(new_states)
+    return _get_musa_backend().set_rng_state_all(new_states)
 
 
 def manual_seed(seed: int) -> None:
@@ -83,7 +92,7 @@ def manual_seed(seed: int) -> None:
         If you are working with a multi-GPU model, this function is insufficient
         to get determinism.  To seed all GPUs, use :func:`manual_seed_all`.
     """
-    return torch.musa.manual_seed(seed)
+    return _get_musa_backend().manual_seed(seed)
 
 
 def manual_seed_all(seed: int) -> None:
@@ -95,7 +104,7 @@ def manual_seed_all(seed: int) -> None:
     Args:
         seed (int): The desired seed.
     """
-    return torch.musa.manual_seed_all(seed)
+    return _get_musa_backend().manual_seed_all(seed)
 
 
 def seed() -> None:
@@ -104,7 +113,7 @@ def seed() -> None:
     It's safe to call this function if the backend is unavailable; in that
     case, behavior is backend-defined.
     """
-    return torch.musa.seed()
+    return _get_musa_backend().seed()
 
 
 def seed_all() -> None:
@@ -113,7 +122,7 @@ def seed_all() -> None:
     It's safe to call this function if the backend is unavailable; in that
     case, behavior is backend-defined.
     """
-    return torch.musa.seed_all()
+    return _get_musa_backend().seed_all()
 
 
 def initial_seed() -> int:
@@ -122,4 +131,4 @@ def initial_seed() -> int:
     .. warning::
         This function eagerly initializes the backend device.
     """
-    return torch.musa.initial_seed()
+    return _get_musa_backend().initial_seed()

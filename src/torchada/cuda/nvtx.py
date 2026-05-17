@@ -5,16 +5,16 @@ This module provides no-op implementations of NVTX (NVIDIA Tools Extension)
 functions for profiling. On MUSA platform, these are stubs that do nothing.
 
 Usage:
-    import torchada  # Apply patches first
+    import torchada  # Apply patches first.
     import torch.cuda.nvtx as nvtx
 
     nvtx.range_push("my_range")
-    # ... code to profile ...
+    # Code to profile.
     nvtx.range_pop()
 
-    # Or use the context manager
+    # Or use the context manager.
     with nvtx.range("my_range"):
-        # ... code to profile ...
+        # Code to profile.
 """
 
 from contextlib import contextmanager

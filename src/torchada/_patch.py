@@ -1,24 +1,24 @@
 """
-Automatic patching module for torchada.
+Automatic patch orchestration for torchada.
 
 This module patches PyTorch to automatically translate 'cuda' device strings
 to 'musa' when running on Moore Threads hardware.
 
 Usage:
-    import torchada  # This applies all patches automatically
+    import torchada  # Apply all patches automatically.
     import torch
 
-    # Then use torch.cuda as normal - it will work on MUSA
+    # Use torch.cuda APIs normally; they resolve to MUSA on MUSA platforms.
     torch.cuda.is_available()
     x = torch.randn(3, 3).cuda()
     from torch.cuda.amp import autocast, GradScaler
 
-    # Distributed training with NCCL also works transparently
+    # Distributed training with NCCL resolves to MCCL on MUSA platforms.
     import torch.distributed as dist
-    dist.init_process_group(backend="nccl")  # Uses MCCL on MUSA
+    dist.init_process_group(backend="nccl")  # Uses MCCL on MUSA.
 
-    # CUDA Graphs work transparently
-    g = torch.cuda.CUDAGraph()  # Uses MUSAGraph on MUSA
+    # CUDA graph APIs resolve to MUSA graph APIs on MUSA platforms.
+    g = torch.cuda.CUDAGraph()  # Uses MUSAGraph on MUSA.
 """
 
 import functools
@@ -26,17 +26,55 @@ import inspect
 import sys
 import warnings
 from types import ModuleType
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 import torch
 
+from . import _accelerator_compat as _accelerator_compat
+from . import _ctypes_compat as _ctypes_compat
+from . import _device_compat as _device_compat
+from ._accelerator_compat import patch_torch_accelerator
 from ._cpp_ops import get_module
+from ._ctypes_compat import patch_ctypes_cdll
+from ._cuda_compat import (
+    _CudaModuleWrapper,
+    install_cuda_memory_compat,
+    install_cuda_module_aliases,
+    install_cuda_public_api_shims,
+)
+from ._device_compat import (
+    _FACTORY_FUNCTIONS,
+    _translate_device,
+    _wrap_factory_function,
+    _wrap_module_cuda,
+    _wrap_tensor_cuda,
+    _wrap_to_method,
+    patch_torch_device,
+    patch_torch_generator,
+)
 from ._platform import is_musa_platform
 
 _patched = False
 _original_init_process_group = None
 
-# Registry for patch functions
+_DYNAMIC_COMPAT_ATTRS = {
+    "_original_torch_device": _device_compat.get_original_torch_device,
+    "_original_torch_generator": _device_compat.get_original_torch_generator,
+    "_original_c_generator": _device_compat.get_original_c_generator,
+    "_original_ctypes_CDLL": _ctypes_compat.get_original_ctypes_cdll,
+    "_original_torch_accelerator": _accelerator_compat.get_original_torch_accelerator,
+}
+
+
+def __getattr__(name: str):
+    """Expose moved compatibility state for existing internal imports/tests."""
+    getter = _DYNAMIC_COMPAT_ATTRS.get(name)
+    if getter is not None:
+        return getter()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Patch registry.
 _patch_registry: List[Callable[[], None]] = []
 
 
@@ -51,7 +89,7 @@ def patch_function(func: Callable[[], None]) -> Callable[[], None]:
     Usage:
         @patch_function
         def _patch_something():
-            # patching logic
+            # Patching logic.
             pass
 
     The decorated function will be called by apply_patches() in registration order.
@@ -71,15 +109,15 @@ def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
         @patch_function
         @requires_import('torch_musa')
         def _patch_something():
-            # This only runs if torch_musa is importable
+            # This only runs if torch_musa is importable.
             import torch_musa
-            # ... patching logic
+            # Patching logic.
 
         @patch_function
         @requires_import('torch._inductor.autotune_process')
         def _patch_autotune():
             import torch._inductor.autotune_process as ap
-            # ... patching logic
+            # Patching logic.
 
     Args:
         *module_names: Variable number of module names to check for importability
@@ -103,13 +141,6 @@ def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
     return decorator
 
 
-# Cache for translated device strings - avoids repeated string operations
-_device_str_cache = {}
-
-# Cache for is_musa_platform result - computed once on first call
-_is_musa_platform_cached = None
-
-
 def _has_param(func: Callable, param_name: str) -> bool:
     """
     Check if a function has a specific parameter in its signature.
@@ -128,178 +159,6 @@ def _has_param(func: Callable, param_name: str) -> bool:
         return False
 
 
-def _translate_device(device: Any) -> Any:
-    """
-    Translate 'cuda' device references to 'musa' on MUSA platform.
-
-    Args:
-        device: Device specification (string, torch.device, int, or None)
-
-    Returns:
-        Translated device specification
-
-    Performance: Platform check and string translations are cached.
-    """
-    global _is_musa_platform_cached
-
-    # Cache the platform check result (computed once)
-    if _is_musa_platform_cached is None:
-        _is_musa_platform_cached = is_musa_platform()
-
-    if not _is_musa_platform_cached:
-        return device
-
-    if device is None:
-        return device
-
-    if isinstance(device, str):
-        # Check cache first for common strings
-        if device in _device_str_cache:
-            return _device_str_cache[device]
-
-        # Handle 'cuda', 'cuda:0', 'cuda:1', etc.
-        if device == "cuda" or device.startswith("cuda:"):
-            result = device.replace("cuda", "musa")
-            _device_str_cache[device] = result
-            return result
-        # Cache non-cuda strings too to avoid repeated startswith checks
-        _device_str_cache[device] = device
-        return device
-
-    if isinstance(device, torch.device):
-        if device.type == "cuda":
-            return torch.device("musa", device.index)
-        return device
-
-    # For integer device IDs, keep as-is (context determines device type)
-    return device
-
-
-def _wrap_to_method(original_to: Callable) -> Callable:
-    """Wrap tensor.to() to translate device strings."""
-
-    @functools.wraps(original_to)
-    def wrapped_to(self, *args, **kwargs):
-        # Translate device in positional args
-        if args and len(args) >= 1:
-            first_arg = args[0]
-            # Check if first arg looks like a device
-            if isinstance(first_arg, (str, torch.device)):
-                args = (_translate_device(first_arg),) + args[1:]
-            elif isinstance(first_arg, torch.dtype):
-                # .to(dtype) case, check for device in kwargs or second arg
-                if len(args) >= 2:
-                    args = (first_arg, _translate_device(args[1])) + args[2:]
-
-        # Translate device in keyword args
-        if "device" in kwargs:
-            kwargs["device"] = _translate_device(kwargs["device"])
-
-        return original_to(self, *args, **kwargs)
-
-    return wrapped_to
-
-
-def _wrap_tensor_cuda(original_cuda: Callable) -> Callable:
-    """Wrap tensor.cuda() to use musa on MUSA platform."""
-    # Cache platform check at wrapper creation time
-    _is_musa = is_musa_platform()
-
-    @functools.wraps(original_cuda)
-    def wrapped_cuda(self, device=None, non_blocking=False):
-        if _is_musa:
-            # Use .musa() instead
-            if hasattr(self, "musa"):
-                return self.musa(device=device, non_blocking=non_blocking)
-            else:
-                # Fallback to .to()
-                target_device = f"musa:{device}" if device is not None else "musa"
-                return self.to(target_device, non_blocking=non_blocking)
-        return original_cuda(self, device=device, non_blocking=non_blocking)
-
-    return wrapped_cuda
-
-
-def _wrap_module_cuda(original_cuda: Callable) -> Callable:
-    """Wrap nn.Module.cuda() to use musa on MUSA platform."""
-    # Cache platform check at wrapper creation time
-    _is_musa = is_musa_platform()
-
-    @functools.wraps(original_cuda)
-    def wrapped_cuda(self, device=None):
-        if _is_musa:
-            if hasattr(self, "musa"):
-                return self.musa(device=device)
-            else:
-                target_device = f"musa:{device}" if device is not None else "musa"
-                return self.to(target_device)
-        return original_cuda(self, device=device)
-
-    return wrapped_cuda
-
-
-_original_torch_device = None
-
-
-class _DeviceFactoryMeta(type):
-    """Metaclass to make isinstance(x, torch.device) work with our factory."""
-
-    def __instancecheck__(cls, instance):
-        if _original_torch_device is not None:
-            return isinstance(instance, _original_torch_device)
-        return False
-
-    def __subclasscheck__(cls, subclass):
-        if _original_torch_device is not None:
-            return issubclass(subclass, _original_torch_device)
-        return False
-
-
-class DeviceFactoryWrapper(metaclass=_DeviceFactoryMeta):
-    """
-    A wrapper class that acts as torch.device but translates cuda to musa.
-
-    Uses a metaclass to properly handle isinstance() checks.
-
-    Supports all calling conventions of torch.device:
-        torch.device("cuda:0")
-        torch.device("cuda", 0)
-        torch.device(type="cuda", index=0)
-        torch.device(device="cuda:0")
-    """
-
-    _original = None
-
-    def __new__(cls, device=None, index=None, *, type=None):
-        original = cls._original
-        if original is None:
-            raise RuntimeError("DeviceFactoryWrapper not initialized")
-
-        # Handle 'type' keyword argument (alias for device in original torch.device)
-        if type is not None:
-            device = type
-
-        # Handle the case where device is already a torch.device
-        if isinstance(device, original):
-            if device.type == "cuda":
-                index = device.index if index is None else index
-                device = "musa"
-            else:
-                return device
-
-        # Handle string device
-        if isinstance(device, str):
-            device = _translate_device(device)
-
-        # Create the actual device
-        if index is not None:
-            return original(device, index)
-        elif device is not None:
-            return original(device)
-        else:
-            return original()
-
-
 @patch_function
 def _patch_torch_device():
     """
@@ -307,52 +166,7 @@ def _patch_torch_device():
 
     This ensures that torch.device("cuda:0") creates a musa device when on MUSA.
     """
-    global _original_torch_device
-
-    if _original_torch_device is not None:
-        return  # Already patched
-
-    _original_torch_device = torch.device
-    DeviceFactoryWrapper._original = _original_torch_device
-
-    # Replace torch.device with our wrapper
-    torch.device = DeviceFactoryWrapper
-
-
-# Store original torch.Generator for patching
-_original_torch_generator = None
-# Store the underlying C Generator class for isinstance checks
-_original_c_generator = None
-
-
-class _GeneratorMeta(type):
-    """Metaclass that properly implements __instancecheck__ for isinstance() to work."""
-
-    def __instancecheck__(cls, instance):
-        if _original_c_generator is not None:
-            return isinstance(instance, _original_c_generator)
-        return False
-
-    def __subclasscheck__(cls, subclass):
-        if _original_c_generator is not None:
-            if subclass is _original_c_generator:
-                return True
-        return super().__subclasscheck__(subclass)
-
-
-class GeneratorWrapper(metaclass=_GeneratorMeta):
-    """Wrapper for torch.Generator that translates cuda -> musa."""
-
-    _original = None
-
-    def __new__(cls, device=None):
-        original = cls._original
-        if original is None:
-            raise RuntimeError("GeneratorWrapper not initialized")
-        # Translate device if needed
-        if device is not None:
-            device = _translate_device(device)
-        return original(device=device)
+    patch_torch_device(torch)
 
 
 @patch_function
@@ -366,26 +180,10 @@ def _patch_torch_generator():
     Uses a metaclass to properly implement __instancecheck__ so that
     isinstance(gen, torch.Generator) works correctly.
     """
-    global _original_torch_generator, _original_c_generator
-
-    if _original_torch_generator is not None:
-        return  # Already patched
-
-    _original_torch_generator = torch.Generator
-    # Get the underlying C Generator class for isinstance checks
-    # torch_musa may have already wrapped torch.Generator, but instances are still
-    # of type torch._C.Generator
-    _original_c_generator = torch._C.Generator
-
-    GeneratorWrapper._original = _original_torch_generator
-
-    # Copy over doc but keep __module__ as torchada._patch so pickle can find the class
-    GeneratorWrapper.__doc__ = _original_torch_generator.__doc__
-
-    torch.Generator = GeneratorWrapper
+    patch_torch_generator(torch)
 
 
-# Store original graph class for patching
+# Saved graph class used by the graph context-manager patch.
 _original_graph_class = None
 
 
@@ -400,9 +198,9 @@ def _patch_graph_context_manager():
     global _original_graph_class
 
     if _original_graph_class is not None:
-        return  # Already patched
+        return
 
-    # Get the graph class from torch.cuda (which is torch.musa after patching)
+    # Read from torch.cuda after module redirection so this is torch.musa on MUSA.
     if not hasattr(torch.cuda, "graph"):
         return
 
@@ -411,7 +209,7 @@ def _patch_graph_context_manager():
     class GraphWrapper:
         """Wrapper for torch.cuda.graph that accepts cuda_graph= keyword argument."""
 
-        # Preserve class attributes
+        # Preserve class attributes used by callers.
         default_capture_stream = None
 
         def __init__(
@@ -421,14 +219,13 @@ def _patch_graph_context_manager():
             stream=None,
             capture_error_mode: str = "global",
             *,
-            musa_graph=None,  # Also accept musa_graph for compatibility
+            musa_graph=None,  # Also accept musa_graph for compatibility.
         ):
-            # Allow either cuda_graph= or musa_graph= or positional argument
+            # Accept CUDA and MUSA keyword spellings.
             graph_obj = cuda_graph if cuda_graph is not None else musa_graph
             if graph_obj is None:
                 raise TypeError("graph() missing required argument: 'cuda_graph'")
 
-            # Create the original graph instance
             self._wrapped = _original_graph_class(
                 graph_obj,
                 pool=pool,
@@ -442,229 +239,18 @@ def _patch_graph_context_manager():
         def __exit__(self, exc_type, exc_value, traceback):
             return self._wrapped.__exit__(exc_type, exc_value, traceback)
 
-    # Copy over class attributes and docstring
+    # Preserve metadata for introspection.
     GraphWrapper.__doc__ = _original_graph_class.__doc__
     GraphWrapper.__module__ = _original_graph_class.__module__
 
-    # Replace torch.cuda.graph with our wrapper
     torch.cuda.graph = GraphWrapper
 
-    # Also update torch.musa.graph if it exists
+    # Keep the backend module consistent when it exposes graph directly.
     if hasattr(torch, "musa") and hasattr(torch.musa, "graph"):
         torch.musa.graph = GraphWrapper
 
 
-def _wrap_factory_function(original_fn: Callable) -> Callable:
-    """Wrap tensor factory functions (empty, zeros, ones, etc.) to translate device."""
-
-    @functools.wraps(original_fn)
-    def wrapped_fn(*args, **kwargs):
-        if "device" in kwargs:
-            kwargs["device"] = _translate_device(kwargs["device"])
-        return original_fn(*args, **kwargs)
-
-    return wrapped_fn
-
-
-# List of torch factory functions that accept a device argument
-_FACTORY_FUNCTIONS = [
-    # Basic tensor creation
-    "tensor",
-    "as_tensor",
-    "asarray",
-    # Uninitialized/initialized tensors
-    "empty",
-    "zeros",
-    "ones",
-    "full",
-    # Random tensors
-    "rand",
-    "randn",
-    "randint",
-    "randperm",
-    "normal",
-    # Sequences
-    "arange",
-    "range",
-    "linspace",
-    "logspace",
-    # Special tensors
-    "eye",
-    "empty_strided",
-    "empty_permuted",
-    # From file
-    "from_file",
-    # Like variants
-    "empty_like",
-    "zeros_like",
-    "ones_like",
-    "full_like",
-    "rand_like",
-    "randn_like",
-    "randint_like",
-    # Sparse tensors
-    "sparse_coo_tensor",
-    "sparse_csr_tensor",
-    "sparse_csc_tensor",
-    "sparse_bsr_tensor",
-    "sparse_bsc_tensor",
-    "sparse_compressed_tensor",
-    # Index tensors
-    "tril_indices",
-    "triu_indices",
-    # Window functions
-    "bartlett_window",
-    "blackman_window",
-    "hamming_window",
-    "hann_window",
-    "kaiser_window",
-]
-
-
-class _CudartWrapper:
-    """
-    Wrapper for CUDA runtime that translates calls to MUSA runtime.
-
-    This allows code like `torch.cuda.cudart().cudaHostRegister(...)` to work
-    on MUSA by translating to `torch_musa.musart().musaHostRegister(...)`.
-
-    Performance optimization: Resolved attributes are cached in __dict__ to avoid
-    repeated __getattr__ calls.
-    """
-
-    # Mapping from CUDA runtime function names to MUSA equivalents
-    _CUDA_TO_MUSA = {
-        "cudaHostRegister": "musaHostRegister",
-        "cudaHostUnregister": "musaHostUnregister",
-        "cudaMemGetInfo": "musaMemGetInfo",
-        "cudaGetErrorString": "musaGetErrorString",
-        "cudaStreamCreate": "musaStreamCreate",
-        "cudaStreamDestroy": "musaStreamDestroy",
-    }
-
-    def __init__(self, musart_module):
-        self._musart = musart_module
-
-    def __getattr__(self, name):
-        # Translate CUDA runtime function names to MUSA equivalents
-        if name in self._CUDA_TO_MUSA:
-            musa_name = self._CUDA_TO_MUSA[name]
-            value = getattr(self._musart, musa_name)
-            # Cache in __dict__ for faster subsequent access
-            object.__setattr__(self, name, value)
-            return value
-
-        # Try direct access (for any functions with same name)
-        if hasattr(self._musart, name):
-            value = getattr(self._musart, name)
-            # Cache in __dict__ for faster subsequent access
-            object.__setattr__(self, name, value)
-            return value
-
-        raise AttributeError(f"CUDA runtime has no attribute '{name}'")
-
-
-class _CudaModuleWrapper(ModuleType):
-    """
-    A wrapper module that redirects torch.cuda to torch.musa,
-    but keeps certain attributes (like is_available) pointing to the original.
-
-    This allows downstream projects to detect MUSA platform using:
-        torch.cuda.is_available()  # Returns False on MUSA (original behavior)
-    While still using torch.cuda.* APIs that redirect to torch.musa.
-
-    Performance optimization: Resolved attributes are cached in __dict__ to avoid
-    repeated __getattr__ calls. This reduces overhead from ~800ns to ~50ns for
-    cached attributes.
-    """
-
-    # Attributes that should NOT be redirected to torch.musa
-    _NO_REDIRECT = {"is_available"}
-
-    # Special attribute mappings for attributes not at top level of torch_musa
-    # Maps attribute name -> dot-separated path within torch_musa
-    _SPECIAL_ATTRS = {
-        "StreamContext": "core.stream.StreamContext",
-    }
-
-    # Attribute name remappings (CUDA name -> MUSA name)
-    # For CUDA-specific APIs that have different names in MUSA
-    _REMAP_ATTRS = {
-        "_device_count_nvml": "device_count",  # NVML is NVIDIA-specific
-    }
-
-    # Attributes that should NOT be cached (functions that may return different values)
-    # Most functions are safe to cache since they're module-level functions
-    _NO_CACHE = {
-        # These are typically not called in hot paths anyway
-    }
-
-    def __init__(self, original_cuda, musa_module):
-        super().__init__("torch.cuda")
-        self._original_cuda = original_cuda
-        self._musa_module = musa_module
-        self._cudart_wrapper = None
-
-    def cudart(self):
-        """
-        Return a CUDA runtime wrapper that translates to MUSA runtime.
-
-        This allows code like `torch.cuda.cudart().cudaHostRegister(...)` to work
-        on MUSA by translating to the equivalent MUSA runtime calls.
-        """
-        if self._cudart_wrapper is None:
-            if hasattr(self._musa_module, "musart"):
-                musart_module = self._musa_module.musart()
-                self._cudart_wrapper = _CudartWrapper(musart_module)
-            else:
-                # Fallback to original if musart not available
-                return self._original_cuda.cudart()
-        return self._cudart_wrapper
-
-    def __getattr__(self, name):
-        # Keep original is_available behavior
-        if name in self._NO_REDIRECT:
-            value = getattr(self._original_cuda, name)
-            # Cache in __dict__ for faster subsequent access
-            if name not in self._NO_CACHE:
-                object.__setattr__(self, name, value)
-            return value
-
-        # Handle special attributes that need nested lookup
-        if name in self._SPECIAL_ATTRS:
-            obj = self._musa_module
-            for part in self._SPECIAL_ATTRS[name].split("."):
-                obj = getattr(obj, part)
-            # Cache the resolved value
-            if name not in self._NO_CACHE:
-                object.__setattr__(self, name, obj)
-            return obj
-
-        # Handle attribute name remapping (CUDA-specific names -> MUSA equivalents)
-        if name in self._REMAP_ATTRS:
-            value = getattr(self._musa_module, self._REMAP_ATTRS[name])
-            # Cache the resolved value
-            if name not in self._NO_CACHE:
-                object.__setattr__(self, name, value)
-            return value
-
-        # Redirect everything else to torch.musa
-        value = getattr(self._musa_module, name)
-        # Cache the resolved value for faster subsequent access
-        # This is safe because module attributes don't change at runtime
-        if name not in self._NO_CACHE:
-            object.__setattr__(self, name, value)
-        return value
-
-    def __dir__(self):
-        # Combine attributes from both modules
-        attrs = set(dir(self._musa_module))
-        attrs.update(self._NO_REDIRECT)
-        attrs.add("cudart")
-        return list(attrs)
-
-
-# Store original torch.cuda module before patching
+# Saved original torch.cuda module.
 _original_torch_cuda = None
 
 
@@ -681,111 +267,24 @@ def _patch_torch_cuda_module():
     """
     global _original_torch_cuda
 
-    # torch_musa registers itself as torch.musa when imported
-    # Now patch torch.cuda to point to torch.musa (which is torch_musa)
+    # torch_musa registers itself as torch.musa when imported.
     if hasattr(torch, "musa"):
-        # Save original torch.cuda before patching
         if _original_torch_cuda is None:
             _original_torch_cuda = torch.cuda
 
-        # Create wrapper module that redirects most things to torch.musa
-        # but keeps is_available pointing to the original
+        # Preserve CUDA-only detection APIs while redirecting the rest to MUSA.
         cuda_wrapper = _CudaModuleWrapper(_original_torch_cuda, torch.musa)
 
-        # Replace torch.cuda with our wrapper in sys.modules
-        # This makes 'from torch.cuda import ...' work
+        # Keep import statements and attribute access on the same wrapper.
         sys.modules["torch.cuda"] = cuda_wrapper
-
-        # Also patch torch.cuda attribute directly
         torch.cuda = cuda_wrapper
 
-        # Patch torch.cuda.amp
-        if hasattr(torch.musa, "amp"):
-            sys.modules["torch.cuda.amp"] = torch.musa.amp
+        install_cuda_module_aliases(torch)
+        install_cuda_memory_compat(torch, get_module(), _translate_device)
 
-        # Patch torch.cuda.graphs - MUSAGraph should be accessible as CUDAGraph
-        if hasattr(torch.musa, "graphs"):
-            sys.modules["torch.cuda.graphs"] = torch.musa.graphs
-
-        # Add CUDAGraph alias pointing to MUSAGraph
-        if hasattr(torch.musa, "MUSAGraph") and not hasattr(torch.musa, "CUDAGraph"):
-            torch.musa.CUDAGraph = torch.musa.MUSAGraph
-
-        # Patch torch.cuda.memory
-        if hasattr(torch.musa, "memory"):
-            musa_memory_module = torch.musa.memory
-            if musa_memory_module is not None:
-                sys.modules["torch.cuda.memory"] = musa_memory_module
-                # Add CUDAPluggableAllocator alias pointing to MUSAPluggableAllocator
-                if hasattr(musa_memory_module, "MUSAPluggableAllocator"):
-                    musa_memory_module.CUDAPluggableAllocator = (
-                        musa_memory_module.MUSAPluggableAllocator
-                    )
-
-                # Inject CUDA-compatible memory pool functions from C++ extension
-                # These functions (_cuda_beginAllocateCurrentThreadToPool, etc.) are
-                # implemented in torchada's C++ extension to provide CUDA API compatibility
-                # for torch_musa's memory pool allocator.
-                cpp_ops_module = get_module()
-                if cpp_ops_module is not None:
-                    for func_name in [
-                        "_cuda_beginAllocateCurrentThreadToPool",
-                        "_cuda_endAllocateToPool",
-                        "_cuda_releasePool",
-                    ]:
-                        func = getattr(cpp_ops_module, func_name, None)
-                        if func is not None:
-                            setattr(musa_memory_module, func_name, func)
-
-        # Patch torch.cuda.graph context manager to accept cuda_graph= keyword
-        # MUSA's graph class uses musa_graph= but CUDA code uses cuda_graph=
+        # Accept CUDA graph keyword spelling on top of the MUSA graph class.
         _patch_graph_context_manager()
-
-        # Patch torch.cuda.nccl -> torch.musa.mccl
-        if hasattr(torch.musa, "mccl"):
-            sys.modules["torch.cuda.nccl"] = torch.musa.mccl
-
-        # Patch torch.cuda.profiler
-        if hasattr(torch.musa, "profiler"):
-            sys.modules["torch.cuda.profiler"] = torch.musa.profiler
-
-        # Patch torch.cuda.nvtx - use our stub since MUSA doesn't have nvtx
-        try:
-            from .cuda import nvtx as nvtx_stub
-
-            sys.modules["torch.cuda.nvtx"] = nvtx_stub
-            torch.musa.nvtx = nvtx_stub
-        except ImportError:
-            pass
-
-        # Patch torch.cuda.random - use torchada.cuda.random module
-        if not hasattr(torch.musa, "random"):
-            try:
-                from .cuda import random as random_stub
-
-                sys.modules["torch.cuda.random"] = random_stub
-                torch.musa.random = random_stub
-            except ImportError:
-                pass
-
-        # Patch missing _lazy_call from torch_musa.core._lazy_init
-        # torch_musa only maps _lazy_init but not _lazy_call
-        # This is needed for code that does: from torch.cuda import _lazy_call
-        # We add it to torch.musa so _CudaModuleWrapper can redirect it
-        try:
-            from torch_musa.core._lazy_init import _lazy_call
-
-            # Only add if not already present (forward compatible with torch_musa fix)
-            if not hasattr(torch.musa, "_lazy_call"):
-                torch.musa._lazy_call = _lazy_call
-        except ImportError:
-            pass
-
-        # Add _is_compiled to torch_musa if not present
-        # This is needed for code that checks torch.cuda._is_compiled()
-        # (e.g., vLLM's CUDA kernel availability checks)
-        if not hasattr(torch.musa, "_is_compiled"):
-            torch.musa._is_compiled = lambda: True
+        install_cuda_public_api_shims(torch, _translate_device)
 
 
 @patch_function
@@ -801,7 +300,6 @@ def _patch_distributed_backend():
     import torch.distributed as dist
 
     if _original_init_process_group is not None:
-        # Already patched
         return
 
     _original_init_process_group = dist.init_process_group
@@ -818,16 +316,16 @@ def _patch_distributed_backend():
         pg_options=None,
         device_id=None,
     ):
-        # Translate 'nccl' to 'mccl' on MUSA platform
+        # Translate NCCL backend requests to MCCL on MUSA.
         if is_musa_platform() and backend is not None:
             if backend.lower() == "nccl":
                 backend = "mccl"
 
-        # Translate device_id if it's a cuda device
+        # Translate CUDA device IDs before delegating.
         if device_id is not None:
             device_id = _translate_device(device_id)
 
-        # Build kwargs for the original function
+        # Preserve the original signature while allowing version-specific args.
         kwargs = {
             "backend": backend,
             "init_method": init_method,
@@ -845,10 +343,10 @@ def _patch_distributed_backend():
 
     dist.init_process_group = patched_init_process_group
 
-    # Also patch new_group to translate 'nccl' to 'mccl'
+    # Patch new_group with the same backend and device translation.
     original_new_group = dist.new_group
 
-    # Cache the check for device_id support (added in torch 2.6)
+    # Cache device_id support because it was added in PyTorch 2.6.
     _new_group_has_device_id = _has_param(original_new_group, "device_id")
 
     @functools.wraps(original_new_group)
@@ -861,12 +359,12 @@ def _patch_distributed_backend():
         group_desc=None,
         device_id=None,
     ):
-        # Translate 'nccl' to 'mccl' on MUSA platform
+        # Translate NCCL backend requests to MCCL on MUSA.
         if is_musa_platform() and backend is not None:
             if isinstance(backend, str) and backend.lower() == "nccl":
                 backend = "mccl"
 
-        # Build kwargs for the original function
+        # Preserve the original signature while allowing version-specific args.
         kwargs = {
             "ranks": ranks,
             "backend": backend,
@@ -875,7 +373,7 @@ def _patch_distributed_backend():
             "group_desc": group_desc,
         }
 
-        # Translate device_id if it's a cuda device (only if supported by torch version)
+        # Translate CUDA device IDs only when the installed PyTorch accepts them.
         if device_id is not None and _new_group_has_device_id:
             kwargs["device_id"] = _translate_device(device_id)
 
@@ -898,25 +396,22 @@ def _patch_tensor_is_cuda():
     Performance: Uses try/except with direct attribute access for speed.
     Benchmarks show getattr(self, 'is_musa', False) is faster than self.device.type.
     """
-    # Store the original is_cuda property (it's a getset_descriptor)
+    # Keep the descriptor so CUDA tensors retain their native fast path.
     original_is_cuda = torch.Tensor.is_cuda
 
     @property
     def patched_is_cuda(self):
         """Return True if tensor is on CUDA or MUSA device."""
-        # Check original is_cuda first (fast path for actual CUDA tensors)
-        # Use direct property access - original_is_cuda is a getset_descriptor
+        # Use direct descriptor access for actual CUDA tensors.
         result = original_is_cuda.__get__(self)
         if result:
             return True
-        # Check if tensor is on MUSA device
-        # Use try/except with direct attribute access - faster than getattr with default
+        # Direct attribute access is faster than getattr with a default here.
         try:
             return self.is_musa
         except AttributeError:
             return False
 
-    # Replace is_cuda with our patched version
     torch.Tensor.is_cuda = patched_is_cuda
 
 
@@ -931,12 +426,11 @@ def _patch_stream_cuda_stream():
     """
     from torch_musa.core.stream import Stream as MUSAStream
 
-    # Add cuda_stream property that returns musa_stream
     if not hasattr(MUSAStream, "cuda_stream"):
 
         @property
         def cuda_stream(self):
-            """Return the underlying stream pointer (same as musa_stream)."""
+            """Return the underlying stream pointer, matching ``musa_stream``."""
             return self.musa_stream
 
         MUSAStream.cuda_stream = cuda_stream
@@ -955,7 +449,7 @@ def _patch_autocast():
 
     class PatchedAutocast(original_autocast):
         def __init__(self, device_type, *args, **kwargs):
-            # Translate 'cuda' to 'musa'
+            # Translate CUDA autocast contexts to MUSA contexts.
             if device_type == "cuda":
                 device_type = "musa"
             super().__init__(device_type, *args, **kwargs)
@@ -987,7 +481,7 @@ def _patch_profiler_activity():
         translated = []
         for activity in activities:
             if activity == torch.profiler.ProfilerActivity.CUDA:
-                # On MUSA, use PrivateUse1 instead of CUDA
+                # MUSA profiler events use PrivateUse1 rather than CUDA.
                 translated.append(torch.profiler.ProfilerActivity.PrivateUse1)
             else:
                 translated.append(activity)
@@ -1024,16 +518,14 @@ def _patch_musa_warnings():
 
     We suppress them using Python's warnings.filterwarnings().
     """
-    # Suppress autocast dtype warning from torch/amp/autocast_mode.py
-    # This happens when autocast is used with unsupported dtypes on MUSA
+    # Suppress autocast dtype warnings for unsupported MUSA dtypes.
     warnings.filterwarnings(
         "ignore",
         message=r"In musa autocast, but the target dtype is not supported.*",
         category=UserWarning,
     )
 
-    # Suppress FlashAttention unsupported dimension warning from torch_musa
-    # This happens when SDP attention is used with unsupported head dimensions
+    # Suppress FlashAttention dimension warnings for unsupported MUSA head sizes.
     warnings.filterwarnings(
         "ignore",
         message=r"Unsupported qk_head_dim:.*for FlashAttention in MUSA backend.*",
@@ -1062,16 +554,16 @@ def _patch_library_impl():
     This patch preserves the full original signature including the with_keyset parameter.
 
     Example of code that needs this patch:
-        my_lib.impl(op_name, op_func, "CUDA")  # Now works on MUSA!
-        my_lib.impl(op_name, op_func, "Autograd", with_keyset=True)  # Also works!
-        my_lib.impl(op_name, op_func, "Autograd", with_keyset=True, allow_override=True)  # Also works!
+        my_lib.impl(op_name, op_func, "CUDA")  # Works on MUSA.
+        my_lib.impl(op_name, op_func, "Autograd", with_keyset=True)  # Works on MUSA.
+        my_lib.impl(op_name, op_func, "Autograd", with_keyset=True, allow_override=True)
     """
     if not hasattr(torch, "library") or not hasattr(torch.library, "Library"):
         return
 
     original_impl = torch.library.Library.impl
 
-    # Mapping of CUDA dispatch keys to PrivateUse1 equivalents
+    # CUDA dispatch keys that should register against PrivateUse1 on MUSA.
     cuda_dispatch_key_map = {
         "CUDA": "PrivateUse1",
         "AutogradCUDA": "AutogradPrivateUse1",
@@ -1083,7 +575,7 @@ def _patch_library_impl():
     }
 
     def patched_impl(self, *args, **kwargs):
-        # Translate CUDA dispatch keys to PrivateUse1 equivalents for MUSA compatibility
+        # Translate CUDA dispatch keys before registering custom operators.
         sig = inspect.signature(original_impl)
         bound = sig.bind(self, *args, **kwargs)
         bound.apply_defaults()
@@ -1116,11 +608,9 @@ def _patch_torch_c_exports():
 
     musac = torch_musa._MUSAC
 
-    # List of functions/classes to copy from _MUSAC to torch._C
-    # These are commonly imported by downstream code
+    # Common downstream imports that torch_musa exposes under _MUSAC only.
     _MUSAC_EXPORTS = [
         "_storage_Use_Count",
-        # Add more as needed
     ]
 
     for name in _MUSAC_EXPORTS:
@@ -1142,18 +632,15 @@ def _patch_backends_cuda():
     if not hasattr(torch, "backends") or not hasattr(torch.backends, "cuda"):
         return
 
-    # Patch is_built() to return True when MUSA is available
-    # This allows code that checks torch.backends.cuda.is_built() to proceed
+    # Let CUDA build checks pass when torchada is redirecting CUDA APIs to MUSA.
     original_is_built = torch.backends.cuda.is_built
 
-    # Cache the result since it won't change at runtime
+    # Cache the result because platform state does not change at runtime.
     _is_built_cache = {}
 
     def patched_is_built():
         if "result" not in _is_built_cache:
-            # On MUSA platform, report as "built" since we redirect cuda->musa.
-            # Use is_musa_platform() instead of torch.musa.is_available() so this
-            # works even when no GPU card is present (build-only environments).
+            # Treat MUSA as CUDA-built even in build-only environments.
             if is_musa_platform():
                 _is_built_cache["result"] = True
             else:
@@ -1202,7 +689,6 @@ def _patch_backends_cuda():
     matmul_class.__setattr__ = patched_setattr
 
 
-
 @patch_function
 @requires_import("torchada.utils.cpp_extension", "torch.utils.cpp_extension")
 def _patch_cpp_extension():
@@ -1222,17 +708,16 @@ def _patch_cpp_extension():
 
     from .utils import cpp_extension as torchada_cpp_ext
 
-    # Patch the key classes and functions
+    # Patch the key classes and constants.
     torch_cpp_ext.CUDAExtension = torchada_cpp_ext.CUDAExtension
     torch_cpp_ext.BuildExtension = torchada_cpp_ext.BuildExtension
     torch_cpp_ext.CUDA_HOME = torchada_cpp_ext.CUDA_HOME
 
-    # Patch include_paths and library_paths to handle both old and new signatures
-    # and to correctly translate "cuda" to MUSA on MUSA platform
+    # Delegate include/library path handling to the torchada compatibility layer.
     torch_cpp_ext.include_paths = torchada_cpp_ext.include_paths
     torch_cpp_ext.library_paths = torchada_cpp_ext.library_paths
 
-    # Also update sys.modules entry
+    # Keep future imports on the patched module object.
     sys.modules["torch.utils.cpp_extension"] = torch_cpp_ext
 
 
@@ -1249,7 +734,7 @@ def _patch_autotune_process():
     """
     import torch._inductor.autotune_process as autotune_process
 
-    # Patch the CUDA_VISIBLE_DEVICES constant to use MUSA_VISIBLE_DEVICES
+    # Use the MUSA visibility environment variable in autotune subprocesses.
     if hasattr(autotune_process, "CUDA_VISIBLE_DEVICES"):
         autotune_process.CUDA_VISIBLE_DEVICES = "MUSA_VISIBLE_DEVICES"
 
@@ -1297,304 +782,20 @@ def _patch_flash_attn():
     """
     import flash_attn_interface
 
-    # Ensure sgl_kernel package exists in sys.modules.
-    # First try to import the real package; only create a stub if it's truly not installed.
+    # Prefer the real package; create a stub only when sgl_kernel is absent.
     if "sgl_kernel" not in sys.modules:
         try:
             import sgl_kernel  # noqa: F401
         except ImportError:
             sgl_kernel_stub = ModuleType("sgl_kernel")
-            sgl_kernel_stub.__path__ = []  # Make it a package
+            sgl_kernel_stub.__path__ = []  # Mark the stub as a package.
             sgl_kernel_stub.__package__ = "sgl_kernel"
             sys.modules["sgl_kernel"] = sgl_kernel_stub
 
-    # Register flash_attn_interface as sgl_kernel.flash_attn submodule
+    # Register flash_attn_interface as the sgl_kernel.flash_attn submodule.
     sgl_kernel = sys.modules["sgl_kernel"]
     sgl_kernel.flash_attn = flash_attn_interface
     sys.modules["sgl_kernel.flash_attn"] = flash_attn_interface
-
-
-class _CDLLWrapper:
-    """
-    Wrapper for ctypes.CDLL that automatically translates CUDA/NCCL function names
-    to MUSA/MCCL equivalents when accessing library functions.
-
-    This allows code that uses ctypes to load CUDA libraries (libcudart, libnccl) and
-    access CUDA-named functions to work transparently on MUSA without code changes.
-
-    Example:
-        # Original code uses CUDA function names:
-        lib = ctypes.CDLL("libmusart.so")
-        func = lib.cudaIpcOpenMemHandle  # Automatically translates to musaIpcOpenMemHandle
-
-        lib = ctypes.CDLL("libmccl.so")
-        func = lib.ncclAllReduce  # Automatically translates to mcclAllReduce
-    """
-
-    # Detect library type from filename patterns
-    _MUSART_PATTERNS = ("libmusart", "musart.so", "libmusa_runtime")
-    _MCCL_PATTERNS = ("libmccl", "mccl.so")
-    _MUBLAS_PATTERNS = ("libmublas", "mublas.so")
-    _MURAND_PATTERNS = ("libmurand", "murand.so")
-
-    def __init__(self, cdll_instance, lib_path: str):
-        # Store the original CDLL instance
-        object.__setattr__(self, "_cdll", cdll_instance)
-        object.__setattr__(self, "_lib_path", lib_path)
-        object.__setattr__(self, "_lib_type", self._detect_lib_type(lib_path))
-
-    def _detect_lib_type(self, lib_path: str) -> str:
-        """Detect the type of library from its path."""
-        lib_path_lower = lib_path.lower()
-        if any(p in lib_path_lower for p in self._MUSART_PATTERNS):
-            return "musart"
-        elif any(p in lib_path_lower for p in self._MCCL_PATTERNS):
-            return "mccl"
-        elif any(p in lib_path_lower for p in self._MUBLAS_PATTERNS):
-            return "mublas"
-        elif any(p in lib_path_lower for p in self._MURAND_PATTERNS):
-            return "murand"
-        return "unknown"
-
-    def _translate_name(self, name: str) -> str:
-        """Translate CUDA/NCCL function name to MUSA/MCCL equivalent."""
-        lib_type = object.__getattribute__(self, "_lib_type")
-
-        if lib_type == "musart":
-            # cudaXxx -> musaXxx
-            if name.startswith("cuda"):
-                return "musa" + name[4:]
-        elif lib_type == "mccl":
-            # ncclXxx -> mcclXxx
-            if name.startswith("nccl"):
-                return "mccl" + name[4:]
-        elif lib_type == "mublas":
-            # cublasXxx -> mublasXxx
-            if name.startswith("cublas"):
-                return "mublas" + name[6:]
-        elif lib_type == "murand":
-            # curandXxx -> murandXxx
-            if name.startswith("curand"):
-                return "murand" + name[6:]
-
-        return name
-
-    def __getattr__(self, name: str):
-        cdll = object.__getattribute__(self, "_cdll")
-        translated_name = self._translate_name(name)
-        value = getattr(cdll, translated_name)
-        # Cache in __dict__ for faster subsequent access
-        object.__setattr__(self, name, value)
-        return value
-
-    def __setattr__(self, name: str, value):
-        cdll = object.__getattribute__(self, "_cdll")
-        translated_name = self._translate_name(name)
-        setattr(cdll, translated_name, value)
-
-    def __getitem__(self, name: str):
-        cdll = object.__getattribute__(self, "_cdll")
-        translated_name = self._translate_name(name)
-        return cdll[translated_name]
-
-
-# Store original ctypes.CDLL for patching
-_original_ctypes_CDLL = None
-
-
-class _AcceleratorModuleWrapper(ModuleType):
-    """
-    Wrapper module that extends torch.accelerator with fallbacks to torch.musa.
-
-    torch.accelerator is the unified accelerator abstraction being built up over
-    successive PyTorch releases. Many APIs scheduled for PyTorch 2.9+
-    (e.g. empty_cache, memory_stats, memory_allocated, Stream, Event,
-    manual_seed, get_device_name, ...) do not yet exist on torch.accelerator
-    in torch 2.7 / torch_musa, but do exist on torch.musa. This wrapper lets
-    user code written against the newer unified API work on current MUSA builds
-    by falling back to torch.musa for any attribute missing from the original
-    torch.accelerator module.
-
-    Resolution order for attribute access:
-        1. Explicit overrides installed by torchada (e.g. patched synchronize,
-           device_index / stream context managers, and memory APIs that exist
-           upstream but are broken on MUSA)
-        2. The original torch.accelerator module (so existing APIs keep their
-           real implementations)
-        3. torch.musa as a fallback for APIs that have not yet been added to
-           torch.accelerator upstream, applying _REMAP_ATTRS for APIs whose
-           torch.musa equivalent has a different name
-
-    Resolved attributes are cached in __dict__ for fast subsequent access,
-    matching the pattern used by _CudaModuleWrapper.
-    """
-
-    # Attribute name remappings (torch.accelerator name -> torch.musa name).
-    # torch.accelerator uses an *_index / *_idx naming convention introduced in
-    # newer PyTorch releases, while torch.musa keeps the older torch.cuda style
-    # without the suffix. When the original torch.accelerator module does not
-    # expose these names (e.g. older PyTorch builds), the wrapper falls back to
-    # torch.musa using the remapped name so callers still get a working API.
-    _REMAP_ATTRS = {
-        "set_device_index": "set_device",
-        "set_device_idx": "set_device",
-        "current_device_index": "current_device",
-        "current_device_idx": "current_device",
-    }
-
-    # Special attribute mappings for attributes not at top level of torch_musa.
-    # Maps attribute name -> dot-separated path within torch_musa.
-    _SPECIAL_ATTRS = {
-        "StreamContext": "core.stream.StreamContext",
-    }
-
-    # Memory APIs that exist on torch.accelerator (PyTorch 2.9+) but internally
-    # call torch._C._accelerator_* C++ functions which fail on MUSA because the
-    # MUSA allocator is not a CUDA DeviceAllocator. These are overridden to
-    # delegate to torch.musa, following the same pattern as synchronize().
-    # When an API in this list exists on the original torch.accelerator AND on
-    # torch.musa, we install an override that prefers torch.musa over the
-    # upstream implementation.
-    _MUSA_OVERRIDES = (
-        "empty_cache",
-        "empty_host_cache",
-        "memory_stats",
-        "memory_allocated",
-        "max_memory_allocated",
-        "memory_reserved",
-        "max_memory_reserved",
-        "reset_accumulated_memory_stats",
-        "reset_peak_memory_stats",
-        "get_memory_info",
-    )
-
-    def __init__(self, original_accel, musa_module):
-        super().__init__("torch.accelerator")
-        self._original_accel = original_accel
-        self._musa_module = musa_module
-        self._overrides = {}
-
-        # Apply MUSA overrides for memory APIs that exist upstream but are
-        # broken on MUSA (they route through torch._C._accelerator_* which
-        # doesn't dispatch to the MUSA allocator).
-        for name in self._MUSA_OVERRIDES:
-            if hasattr(original_accel, name) and hasattr(musa_module, name):
-                self._set_override(name, getattr(musa_module, name))
-
-    def _set_override(self, name, value):
-        """Install an override that takes precedence over the wrapped modules."""
-        self._overrides[name] = value
-        object.__setattr__(self, name, value)
-
-    def __getattr__(self, name):
-        if name in self._overrides:
-            return self._overrides[name]
-        try:
-            value = getattr(self._original_accel, name)
-        except AttributeError:
-            # Fall back to torch.musa with several strategies in order:
-            # 1. Same-name lookup (e.g., empty_cache)
-            # 2. Special nested attributes (e.g., StreamContext -> core.stream.StreamContext)
-            # 3. Name remapping (e.g., set_device_index -> set_device)
-            if hasattr(self._musa_module, name):
-                value = getattr(self._musa_module, name)
-            elif name in self._SPECIAL_ATTRS:
-                obj = self._musa_module
-                for part in self._SPECIAL_ATTRS[name].split("."):
-                    obj = getattr(obj, part)
-                value = obj
-            elif name in self._REMAP_ATTRS:
-                value = getattr(self._musa_module, self._REMAP_ATTRS[name])
-            else:
-                raise AttributeError(f"module 'torch.accelerator' has no attribute '{name}'")
-        object.__setattr__(self, name, value)
-        return value
-
-    def __dir__(self):
-        attrs = set(dir(self._original_accel))
-        attrs.update(dir(self._musa_module))
-        attrs.update(self._REMAP_ATTRS.keys())
-        attrs.update(self._SPECIAL_ATTRS.keys())
-        attrs.update(self._overrides.keys())
-        return list(attrs)
-
-
-# Store original torch.accelerator module before patching
-_original_torch_accelerator = None
-
-
-def _make_patched_accelerator_synchronize(musa_module):
-    """Build a torch.accelerator.synchronize replacement that delegates to torch.musa."""
-
-    def patched_synchronize(device=None):
-        """
-        Patched synchronize that redirects to torch.musa.synchronize().
-
-        The MUSA backend does not implement synchronization of all streams on a
-        device, so the default torch.accelerator.synchronize() raises at runtime.
-        Redirecting to torch.musa.synchronize() restores the expected behavior.
-
-        Args:
-            device: torch.device, str, int, or None. If None, synchronizes the
-                current device.
-
-        Raises:
-            TypeError: If device is not a valid type (torch.device, str, int, or None).
-        """
-        # Validate the device type to catch invalid inputs early
-        if device is not None and not isinstance(device, (torch.device, str, int)):
-            raise TypeError(
-                f"synchronize() expected device to be torch.device, str, int, or None, "
-                f"but got {type(device).__name__}"
-            )
-
-        # torch.musa.synchronize natively handles all valid device types:
-        # - None: synchronizes the current device
-        # - int: synchronizes device at that index
-        # - str: handles both "musa" (current device) and "musa:N" (specific device)
-        # - torch.device: handles both torch.device("musa") and torch.device("musa:N")
-        # Delegate directly instead of manually parsing to preserve upstream semantics.
-        musa_module.synchronize(device)
-
-    return patched_synchronize
-
-
-def _make_accelerator_context_managers(accel_module):
-    """Build device_index / stream context managers that bind to accel_module."""
-
-    class device_index:
-        """Context manager to temporarily set the current device index."""
-
-        def __init__(self, idx):
-            self.idx = idx
-            self.prev_idx = None
-
-        def __enter__(self):
-            self.prev_idx = accel_module.current_device_index()
-            accel_module.set_device_index(self.idx)
-            return self
-
-        def __exit__(self, *args):
-            if self.prev_idx is not None:
-                accel_module.set_device_index(self.prev_idx)
-
-    class stream:
-        """Context manager to temporarily set the current stream."""
-
-        def __init__(self, stream_obj):
-            self.stream = stream_obj
-            self.prev_stream = None
-
-        def __enter__(self):
-            self.prev_stream = accel_module.current_stream()
-            accel_module.set_stream(self.stream)
-            return self
-
-        def __exit__(self, *args):
-            if self.prev_stream is not None:
-                accel_module.set_stream(self.prev_stream)
-
-    return device_index, stream
 
 
 @patch_function
@@ -1623,32 +824,8 @@ def _patch_torch_accelerator():
 
     4. device_index(idx) and stream(s) context managers, which are not yet
        present on torch.accelerator in torch 2.7.
-
-    TODO(torchada): README.md / README_CN.md claim "the wrapper always prefers
-    the real torch.accelerator implementation and only falls back to torch.musa
-    when an attribute is missing". That is no longer accurate after adding the
-    memory API overrides (point 2 above). Update those documents to describe
-    the actual resolution order: (1) torchada overrides, (2) real torch.accelerator,
-    (3) fallback to torch.musa.
     """
-    global _original_torch_accelerator
-
-    import torch.accelerator as accel
-
-    if _original_torch_accelerator is None:
-        _original_torch_accelerator = accel
-
-    wrapper = _AcceleratorModuleWrapper(_original_torch_accelerator, torch.musa)
-
-    wrapper._set_override("synchronize", _make_patched_accelerator_synchronize(torch.musa))
-    device_index_cm, stream_cm = _make_accelerator_context_managers(wrapper)
-    if not hasattr(_original_torch_accelerator, "device_index"):
-        wrapper._set_override("device_index", device_index_cm)
-    if not hasattr(_original_torch_accelerator, "stream"):
-        wrapper._set_override("stream", stream_cm)
-
-    sys.modules["torch.accelerator"] = wrapper
-    torch.accelerator = wrapper
+    patch_torch_accelerator(torch)
 
 
 @patch_function
@@ -1669,48 +846,10 @@ def _patch_ctypes_cdll():
 
     Example (in sglang):
         lib = ctypes.CDLL("libmusart.so")
-        # This will automatically find musaIpcOpenMemHandle:
+        # This lookup resolves to musaIpcOpenMemHandle:
         func = lib.cudaIpcOpenMemHandle
     """
-    import ctypes
-
-    global _original_ctypes_CDLL
-
-    # Only patch once
-    if _original_ctypes_CDLL is not None:
-        return
-
-    _original_ctypes_CDLL = ctypes.CDLL
-
-    class PatchedCDLL:
-        """Patched CDLL that wraps MUSA libraries with function name translation."""
-
-        def __new__(cls, name, *args, **kwargs):
-            # Create the original CDLL instance
-            cdll_instance = _original_ctypes_CDLL(name, *args, **kwargs)
-
-            # Check if this is a MUSA library that needs wrapping
-            name_str = str(name) if name else ""
-            if any(
-                pattern in name_str.lower()
-                for pattern in (
-                    "libmusart",
-                    "musart.so",
-                    "libmusa_runtime",
-                    "libmccl",
-                    "mccl.so",
-                    "libmublas",
-                    "mublas.so",
-                    "libmurand",
-                    "murand.so",
-                )
-            ):
-                return _CDLLWrapper(cdll_instance, name_str)
-
-            # For non-MUSA libraries, return the original CDLL instance
-            return cdll_instance
-
-    ctypes.CDLL = PatchedCDLL
+    patch_ctypes_cdll()
 
 
 def apply_patches():
@@ -1756,34 +895,27 @@ def apply_patches():
         _patched = True
         return
 
-    # Import torch_musa to ensure it's initialized
+    # Import torch_musa so torch.musa is registered before applying patches.
     try:
         import torch_musa  # noqa: F401
     except ImportError:
         _patched = True
         return
 
-    # Apply all registered patch functions
-    # These are registered via @patch_function decorator in definition order
+    # Apply registered patch functions in definition order.
     for patch_fn in _patch_registry:
         patch_fn()
 
-    # Patch torch.Tensor.to()
     if hasattr(torch.Tensor, "to"):
         torch.Tensor.to = _wrap_to_method(torch.Tensor.to)
 
-    # Patch torch.Tensor.cuda()
     if hasattr(torch.Tensor, "cuda"):
         torch.Tensor.cuda = _wrap_tensor_cuda(torch.Tensor.cuda)
 
-    # Patch torch.nn.Module.cuda()
     if hasattr(torch.nn.Module, "cuda"):
         torch.nn.Module.cuda = _wrap_module_cuda(torch.nn.Module.cuda)
 
-    # Patch tensor factory functions to translate device argument
-    # We also need to update _device_constructors cache to include
-    # the original (unwrapped) functions, because PyTorch's __torch_function__
-    # dispatch receives the original C function, not our Python wrapper.
+    # Wrap tensor factories and keep originals for PyTorch device-context dispatch.
     original_fns = []
     for fn_name in _FACTORY_FUNCTIONS:
         if hasattr(torch, fn_name):
@@ -1791,22 +923,17 @@ def apply_patches():
             original_fns.append(original_fn)
             setattr(torch, fn_name, _wrap_factory_function(original_fn))
 
-    # Update _device_constructors to include original functions
-    # This ensures the device context manager (with torch.device(...):) works
-    # because __torch_function__ receives the original C function
+    # PyTorch's __torch_function__ path receives original C functions, not our wrappers.
     try:
         from torch.utils._device import _device_constructors
 
-        # Get the current set of constructors
         constructors = _device_constructors()
 
-        # Add original (unwrapped) functions to the constructors set
-        # PyTorch's __torch_function__ receives these, not our wrappers
         for orig_fn in original_fns:
             constructors.add(orig_fn)
 
     except (ImportError, AttributeError):
-        pass  # Older PyTorch versions may not have this
+        pass  # Older PyTorch versions may not expose this helper.
 
     _patched = True
 
@@ -1816,7 +943,7 @@ def is_patched() -> bool:
     return _patched
 
 
-# Additional exports for advanced usage
+# Additional exports for advanced usage.
 def get_original_init_process_group():
     """Get the original torch.distributed.init_process_group function."""
     return _original_init_process_group

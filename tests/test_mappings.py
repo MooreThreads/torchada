@@ -775,6 +775,47 @@ class TestRuntimeNameConversion:
         # Non-curand names should be unchanged
         assert curand_to_murand_name("someOtherFunc") == "someOtherFunc"
 
+    def test_runtime_library_translation_table(self):
+        """Runtime library detection and symbol translation should share one table."""
+        from torchada._runtime import (
+            detect_musa_library_type,
+            is_musa_runtime_library_path,
+            translate_runtime_symbol_name,
+        )
+
+        assert detect_musa_library_type("/usr/local/musa/lib/libmusart.so") == "musart"
+        assert detect_musa_library_type("/usr/local/musa/lib/libmccl.so") == "mccl"
+        assert detect_musa_library_type("/usr/local/musa/lib/libmublas.so") == "mublas"
+        assert detect_musa_library_type("/usr/local/musa/lib/libmurand.so") == "murand"
+        assert detect_musa_library_type("libc.so.6") == "unknown"
+
+        assert is_musa_runtime_library_path("/usr/local/musa/lib/libmusa_runtime.so")
+        assert not is_musa_runtime_library_path("libc.so.6")
+
+        assert translate_runtime_symbol_name("cudaMalloc", "musart") == "musaMalloc"
+        assert translate_runtime_symbol_name("ncclAllReduce", "mccl") == "mcclAllReduce"
+        assert translate_runtime_symbol_name("cublasCreate", "mublas") == "mublasCreate"
+        assert translate_runtime_symbol_name("curandCreate", "murand") == "murandCreate"
+        assert translate_runtime_symbol_name("cudaMalloc", "unknown") == "cudaMalloc"
+
+    def test_cudart_wrapper_uses_runtime_translation(self):
+        """torch.cuda.cudart() wrapper should use generic cuda->musa translation."""
+        from torchada._cuda_compat import _CudartWrapper
+
+        class FakeMusart:
+            musaMalloc = object()
+            unchanged = object()
+
+        fake_musart = FakeMusart()
+        wrapper = _CudartWrapper(fake_musart)
+
+        assert wrapper.cudaMalloc is fake_musart.musaMalloc
+        assert wrapper.__dict__["cudaMalloc"] is fake_musart.musaMalloc
+        assert wrapper.unchanged is fake_musart.unchanged
+
+        with pytest.raises(AttributeError):
+            _ = wrapper.cudaMissing
+
 
 class TestCDLLWrapper:
     """Test ctypes.CDLL wrapper for automatic function name translation.

@@ -1,7 +1,9 @@
 """
-Platform detection module for torchada.
+Platform detection utilities.
 
-Detects whether the current environment supports CUDA (NVIDIA) or MUSA (Moore Threads).
+MUSA is treated as a platform when torch_musa is installed, even when no Moore
+Threads GPU is currently available. That keeps build-only environments on the
+same compatibility path as runtime GPU environments.
 """
 
 import os
@@ -31,7 +33,7 @@ def detect_platform() -> Platform:
     Returns:
         Platform: The detected or configured platform.
     """
-    # Check for forced platform via environment variable
+    # Honor explicit platform overrides first.
     forced_platform = os.environ.get("TORCHADA_PLATFORM", "").lower()
     if forced_platform == "cuda":
         return Platform.CUDA
@@ -40,22 +42,20 @@ def detect_platform() -> Platform:
     elif forced_platform == "cpu":
         return Platform.CPU
 
-    # Auto-detect platform
-    # Check MUSA first (Moore Threads)
+    # Prefer MUSA before CUDA so torch_musa installations take the adapter path.
     if _is_musa_available():
         return Platform.MUSA
 
-    # Check CUDA (NVIDIA)
+    # Fall back to native CUDA only when MUSA is not present.
     if _is_cuda_available():
         return Platform.CUDA
 
-    # Fallback to CPU
     return Platform.CPU
 
 
 def _is_musa_available() -> bool:
     """
-    Check if this is a MUSA (Moore Threads) platform.
+    Return whether the environment should use the MUSA compatibility path.
 
     Detects the MUSA platform by checking if torch_musa is installed,
     rather than requiring a GPU to be present. This allows torchada to
@@ -70,13 +70,12 @@ def _is_musa_available() -> bool:
     try:
         import torch
 
-        # Primary signal: torch.version.musa is set by torch_musa at build time.
-        # This is the most reliable indicator that we're on a MUSA platform,
+        # Primary signal: torch.version.musa is set by torch_musa at build time,
         # regardless of whether a GPU card is present.
         if hasattr(torch.version, "musa") and torch.version.musa is not None:
             return True
 
-        # Secondary signal: torch_musa is importable
+        # Secondary signal: torch_musa is importable.
         try:
             import torch_musa  # noqa: F401
 
@@ -90,7 +89,7 @@ def _is_musa_available() -> bool:
 
 
 def _is_cuda_available() -> bool:
-    """Check if CUDA (NVIDIA) is available."""
+    """Return whether native CUDA is available."""
     try:
         import torch
 
@@ -100,22 +99,22 @@ def _is_cuda_available() -> bool:
 
 
 def is_musa_platform() -> bool:
-    """Check if we're on MUSA platform."""
+    """Return whether the detected platform is MUSA."""
     return detect_platform() == Platform.MUSA
 
 
 def is_cuda_platform() -> bool:
-    """Check if we're on CUDA platform."""
+    """Return whether the detected platform is native CUDA."""
     return detect_platform() == Platform.CUDA
 
 
 def is_cpu_platform() -> bool:
-    """Check if we're on CPU-only platform."""
+    """Return whether the detected platform is CPU-only."""
     return detect_platform() == Platform.CPU
 
 
 def get_device_name() -> str:
-    """Get the device name string ('cuda', 'musa', or 'cpu')."""
+    """Return the detected device type string."""
     return detect_platform().value
 
 
@@ -145,7 +144,7 @@ def get_torch_device_module():
 
 def is_gpu_device(device) -> bool:
     """
-    Check if a device is a GPU device (either CUDA or MUSA).
+    Return whether a device is a CUDA-like GPU device.
 
     This is a helper function for code that needs to check if a device
     is a GPU device. On MUSA platform, device.type == "cuda" comparisons
@@ -160,23 +159,20 @@ def is_gpu_device(device) -> bool:
         True if the device is cuda or musa, False otherwise
 
     Example:
-        # Instead of:
-        #   if tensor.device.type == "cuda":
-        # Use:
-        #   if torchada.is_gpu_device(tensor.device):
-        #       ...
+        if torchada.is_gpu_device(tensor.device):
+            ...
     """
     import torch
 
-    # Handle tensors, modules, etc. that have a .device attribute
+    # Accept tensors, modules, and other objects exposing ``.device``.
     if hasattr(device, "device"):
         device = device.device
 
-    # Handle torch.device objects
+    # Accept torch.device objects directly.
     if isinstance(device, torch.device):
         return device.type in ("cuda", "musa")
 
-    # Handle string device specs
+    # Accept string device specifications.
     if isinstance(device, str):
         return (
             device == "cuda"
@@ -189,5 +185,5 @@ def is_gpu_device(device) -> bool:
 
 
 def is_cuda_like_device(device) -> bool:
-    """Alias for is_gpu_device() for clarity."""
+    """Return whether ``device`` names a CUDA-like GPU device."""
     return is_gpu_device(device)

@@ -1,15 +1,15 @@
 """
-CUDA to MUSA mapping rules for source code porting.
+CUDA-to-MUSA source-porting mappings.
 
-This module contains the comprehensive mapping dictionary for converting
-CUDA-specific symbols to their MUSA equivalents during extension builds.
+The extension builder applies these rules before handing CUDA-oriented source
+trees to the MUSA toolchain.
 """
 
-# Extension file suffix mappings
-# Convert .cu/.cuh to .mu/.muh so torch_musa's musa_compile rule works correctly
-# The musa_compile rule in torch_musa only adds -x musa for .mu/.muh files
-# Without this conversion, .cu files would be treated as CUDA files by mcc
-# and the --offload-arch=mp_XX flag would fail with clang's CUDA support
+# File suffixes that require MUSA compilation mode.
+#
+# torch_musa's musa_compile rule only adds ``-x musa`` for ``.mu`` and ``.muh``
+# files. Converting CUDA suffixes first keeps ``mcc`` from treating those files
+# as NVIDIA CUDA sources.
 EXT_REPLACED_MAPPING = {
     "cuh": "muh",
     "cu": "mu",
@@ -18,11 +18,9 @@ EXT_REPLACED_MAPPING = {
     "cxx": "cxx",
 }
 
-# Comprehensive CUDA to MUSA symbol mapping
+# CUDA-to-MUSA symbol mappings grouped by source family.
 _MAPPING_RULE = {
-    # =========================================================================
-    # ATen mappings
-    # =========================================================================
+    # ATen mappings.
     "#include <ATen/cuda/Atomic.cuh>": '#include "torch_musa/share/generated_cuda_compatible/include/ATen/musa/Atomic.muh"',
     "#include <ATen/cuda/CUDAContext.h>": '#include "torch_musa/csrc/aten/musa/MUSAContext.h"',
     "#include <ATen/cuda/CUDADataType.h>": '#include "torch_musa/csrc/aten/musa/MUSADtype.muh"',
@@ -31,12 +29,10 @@ _MAPPING_RULE = {
     "#include <ATen/cuda/detail/UnpackRaw.cuh>": '#include "torch_musa/csrc/aten/musa/UnpackRaw.muh"',
     "#include <ATen/cuda/Exceptions.h>": '#include "torch_musa/csrc/aten/musa/Exceptions.h"',
     "at::cuda": "at::musa",
-    # File extension mappings for include statements (.cuh -> .muh)
+    # Include suffix mappings for CUDA headers.
     '.cuh"': '.muh"',
     ".cuh>": ".muh>",
-    # =========================================================================
-    # C10 mappings
-    # =========================================================================
+    # C10 mappings.
     "#include <c10/cuda/CUDAException.h>": '#include "torch_musa/csrc/core/MUSAException.h"',
     "#include <c10/cuda/CUDAGuard.h>": '#include "torch_musa/csrc/core/MUSAGuard.h"',
     "#include <c10/cuda/CUDAStream.h>": '#include "torch_musa/csrc/core/MUSAStream.h"',
@@ -45,7 +41,7 @@ _MAPPING_RULE = {
     "C10_CUDA_CHECK": "C10_MUSA_CHECK",
     "C10_CUDA_ERROR_HANDLED": "C10_MUSA_ERROR_HANDLED",
     "C10_CUDA_IGNORE_ERROR": "C10_MUSA_IGNORE_ERROR",
-    # Header file mappings (must come before generic c10/cuda mapping)
+    # Header mappings must come before the generic c10/cuda path mapping.
     "c10/cuda/CUDAException.h": "c10/musa/MUSAException.h",
     "c10/cuda/CUDAStream.h": "c10/musa/MUSAStream.h",
     "c10/cuda/CUDAGuard.h": "c10/musa/MUSAGuard.h",
@@ -54,27 +50,22 @@ _MAPPING_RULE = {
     "c10/cuda/CUDACachingAllocator.h": "c10/musa/MUSACachingAllocator.h",
     "<c10/cuda/CUDAStream.h>": '"torch_musa/csrc/core/MUSAStream.h"',
     "c10/cuda": "c10/musa",
-    # =========================================================================
-    # CUDA standard library
-    # =========================================================================
+    # CUDA standard library mappings.
     "cuda/std": "musa/std",
     "<cuda/functional>": "<musa/functional>",
     "<cuda/std/": "<musa/std/",
     "#include <cuda/": "#include <musa/",
-    # =========================================================================
-    # CUDA namespaces and device types
-    # Note: MUSA uses PrivateUse1 as its device type, not a separate MUSA type.
-    # torch_musa defines: constexpr DeviceType kMUSA = DeviceType::PrivateUse1;
-    # We use at::kPrivateUse1 which is available in standard PyTorch headers.
-    # =========================================================================
+    # CUDA namespaces and device types.
+    #
+    # MUSA uses PrivateUse1 as its device type rather than a separate public
+    # MUSA enum. torch_musa defines ``kMUSA`` as ``DeviceType::PrivateUse1``,
+    # while ``at::kPrivateUse1`` is available from standard PyTorch headers.
     "torch::cuda": "torch::musa",
     "torch.cuda": "torch.musa",
     "at::kCUDA": "at::kPrivateUse1",
     "at::DeviceType::CUDA": "at::DeviceType::PrivateUse1",
     "c10::DeviceType::CUDA": "c10::DeviceType::PrivateUse1",
-    # =========================================================================
-    # cuBLAS -> muBLAS
-    # =========================================================================
+    # cuBLAS to muBLAS mappings.
     "cublas": "mublas",
     "CUBLAS": "MUBLAS",
     "cublasHandle_t": "mublasHandle_t",
@@ -93,7 +84,7 @@ _MAPPING_RULE = {
     "cublasDgemmBatched": "mublasDgemmBatched",
     "cublasSgemmStridedBatched": "mublasSgemmStridedBatched",
     "cublasDgemmStridedBatched": "mublasDgemmStridedBatched",
-    # cuBLASLt
+    # cuBLASLt mappings.
     "CUBLASLT_MATMUL_DESC_A_SCALE_POINTER": "MUBLASLT_MATMUL_DESC_A_SCALE_POINTER",
     "CUBLASLT_MATMUL_DESC_B_SCALE_POINTER": "MUBLASLT_MATMUL_DESC_B_SCALE_POINTER",
     "CUBLASLT_MATMUL_DESC_FAST_ACCUM": "MUBLASLT_MATMUL_DESC_FAST_ACCUM",
@@ -131,9 +122,7 @@ _MAPPING_RULE = {
     "cublasLtMatrixLayoutOpaque_t": "mublasLtMatrixLayoutOpaque_t",
     "cublasLtMatrixLayoutSetAttribute": "mublasLtMatrixLayoutSetAttribute",
     "cublasLtMatrixLayout_t": "mublasLtMatrixLayout_t",
-    # =========================================================================
-    # cuRAND -> muRAND
-    # =========================================================================
+    # cuRAND to muRAND mappings.
     "curand": "murand",
     "CURAND": "MURAND",
     "curandState": "murandState",
@@ -143,17 +132,13 @@ _MAPPING_RULE = {
     "curand_uniform4": "murand_uniform4",
     "curand_normal": "murand_normal",
     "curand_normal4": "murand_normal4",
-    # =========================================================================
-    # cuDNN -> muDNN
-    # =========================================================================
+    # cuDNN to muDNN mappings.
     "cudnn": "mudnn",
     "CUDNN": "MUDNN",
     "cudnnHandle_t": "mudnnHandle_t",
     "cudnnCreate": "mudnnCreate",
     "cudnnDestroy": "mudnnDestroy",
-    # =========================================================================
-    # CUDA Runtime API
-    # =========================================================================
+    # CUDA runtime API mappings.
     "cudaMalloc": "musaMalloc",
     "cudaFree": "musaFree",
     "cudaMemcpy": "musaMemcpy",
@@ -167,7 +152,7 @@ _MAPPING_RULE = {
     "cudaGetDeviceCount": "musaGetDeviceCount",
     "cudaGetDeviceProperties": "musaGetDeviceProperties",
     "cudaDeviceGetAttribute": "musaDeviceGetAttribute",
-    # Stream/Event
+    # Stream and event mappings.
     "cudaStream_t": "musaStream_t",
     "cudaEvent_t": "musaEvent_t",
     "cudaStreamCreate": "musaStreamCreate",
@@ -178,37 +163,35 @@ _MAPPING_RULE = {
     "cudaEventSynchronize": "musaEventSynchronize",
     "cudaEventElapsedTime": "musaEventElapsedTime",
     "cudaStreamWaitEvent": "musaStreamWaitEvent",
-    # Error handling
+    # Error handling mappings.
     "cudaError_t": "musaError_t",
     "cudaSuccess": "musaSuccess",
     "cudaGetLastError": "musaGetLastError",
     "cudaGetErrorString": "musaGetErrorString",
     "cudaPeekAtLastError": "musaPeekAtLastError",
-    # Memory types
+    # Memory type mappings.
     "cudaMemcpyHostToDevice": "musaMemcpyHostToDevice",
     "cudaMemcpyDeviceToHost": "musaMemcpyDeviceToHost",
     "cudaMemcpyDeviceToDevice": "musaMemcpyDeviceToDevice",
     "cudaMemcpyHostToHost": "musaMemcpyHostToHost",
-    # Constants - memory allocation
+    # Memory allocation constants.
     "cudaFuncAttributeMaxDynamicSharedMemorySize": "musaFuncAttributeMaxDynamicSharedMemorySize",
-    # Unsupported APIs - map to no-ops or placeholders
+    # Unsupported runtime APIs mapped to no-ops.
     "cudaGridDependencySynchronize()": "((void)0)",
     "cudaTriggerProgrammaticLaunchCompletion()": "((void)0)",
-    # =========================================================================
-    # Data types
-    # =========================================================================
-    # BFloat16 types (Note: __half and half are the same in MUSA, no mapping needed)
+    # Data type mappings.
+    # BFloat16 types; ``__half`` and ``half`` use the same spelling in MUSA.
     "__nv_bfloat16": "__mt_bfloat16",
     "__nv_bfloat162": "__mt_bfloat162",
     "__nv_half": "__half",
     "nv_bfloat16": "__mt_bfloat16",
     "nv_bfloat162": "__mt_bfloat162",
     "nv_half": "__half",
-    # FP8 data types - constants
+    # FP8 data type constants.
     "__NV_E4M3": "__MT_E4M3",
     "__NV_E5M2": "__MT_E5M2",
     "__NV_SATFINITE": "__MT_SATFINITE",
-    # FP8 data types - types (alphabetical)
+    # FP8 data types.
     "__nv_fp8_e4m3": "__mt_fp8_e4m3",
     "__nv_fp8_e5m2": "__mt_fp8_e5m2",
     "__nv_fp8_interpretation_t": "__mt_fp8_interpretation_t",
@@ -219,19 +202,17 @@ _MAPPING_RULE = {
     "__nv_fp8x4_e4m3": "__mt_fp8x4_e4m3",
     "__nv_fp8x4_e5m2": "__mt_fp8x4_e5m2",
     "__nv_fp8x4_storage_t": "__mt_fp8x4_storage_t",
-    # FP8 data types - conversion functions (alphabetical)
+    # FP8 conversion functions.
     "__nv_cvt_bfloat16raw_to_fp8": "__musa_cvt_bfloat16raw_to_fp8",
     "__nv_cvt_float2_to_fp8x2": "__musa_cvt_float2_to_fp8x2",
     "__nv_cvt_float_to_fp8": "__musa_cvt_float_to_fp8",
     "__nv_cvt_fp8_to_halfraw": "__musa_cvt_fp8_to_halfraw",
     "__nv_cvt_fp8x2_to_halfraw2": "__musa_cvt_fp8x2_to_halfraw2",
-    # FP8 data types - includes and enums
+    # FP8 includes and enums.
     "#include <cuda_fp8.h>": "#include <musa_fp8.h>",
     "CUDA_R_8F_E4M3": "MUSA_R_8F_E4M3",
     "CUDA_R_8F_E5M2": "MUSA_R_8F_E5M2",
-    # =========================================================================
-    # Cutlass -> Mutlass
-    # =========================================================================
+    # Cutlass to Mutlass mappings.
     '#include "cutlass/array.h"': "#include <mutlass/array.h>",
     "#include <cutlass/array.h>": "#include <mutlass/array.h>",
     "#include <cutlass/cutlass.h>": "#include <mutlass/mutlass.h>",
@@ -243,14 +224,9 @@ _MAPPING_RULE = {
     "CUTLASS": "MUTLASS",
     "cutlass/": "mutlass/",
     "cutlass::": "mutlass::",
-    # =========================================================================
-    # Thrust
-    # =========================================================================
-    # CUB - MUSA provides cub directly, no conversion needed
+    # Thrust mappings; CUB is provided directly by MUSA.
     "thrust::cuda": "thrust::musa",
-    # =========================================================================
-    # NCCL -> MCCL
-    # =========================================================================
+    # NCCL to MCCL mappings.
     "nccl": "mccl",
     "NCCL": "MCCL",
     "ncclComm_t": "mcclComm_t",
@@ -258,25 +234,19 @@ _MAPPING_RULE = {
     "ncclRedOp_t": "mcclRedOp_t",
     "ncclResult_t": "mcclResult_t",
     "ncclSuccess": "mcclSuccess",
-    # =========================================================================
-    # cuSPARSE -> muSPARSE
-    # =========================================================================
+    # cuSPARSE to muSPARSE mappings.
     "cusparse": "musparse",
     "CUSPARSE": "MUSPARSE",
     "cusparseHandle_t": "musparseHandle_t",
     "cusparseCreate": "musparseCreate",
     "cusparseDestroy": "musparseDestroy",
-    # =========================================================================
-    # cuSOLVER -> muSOLVER
-    # =========================================================================
+    # cuSOLVER to muSOLVER mappings.
     "cusolver": "musolver",
     "CUSOLVER": "MUSOLVER",
     "cusolverDnHandle_t": "musolverDnHandle_t",
     "cusolverDnCreate": "musolverDnCreate",
     "cusolverDnDestroy": "musolverDnDestroy",
-    # =========================================================================
-    # cuFFT -> muFFT
-    # =========================================================================
+    # cuFFT to muFFT mappings.
     "cufft": "mufft",
     "CUFFT": "MUFFT",
     "cufftHandle": "mufftHandle",
@@ -286,9 +256,7 @@ _MAPPING_RULE = {
     "cufftExecC2C": "mufftExecC2C",
     "cufftExecR2C": "mufftExecR2C",
     "cufftExecC2R": "mufftExecC2R",
-    # =========================================================================
-    # CUDA device attributes
-    # =========================================================================
+    # CUDA device attribute mappings.
     "cudaDevAttrMaxThreadsPerBlock": "musaDevAttrMaxThreadsPerBlock",
     "cudaDevAttrMaxBlockDimX": "musaDevAttrMaxBlockDimX",
     "cudaDevAttrMaxBlockDimY": "musaDevAttrMaxBlockDimY",
@@ -299,9 +267,7 @@ _MAPPING_RULE = {
     "cudaDevAttrMaxSharedMemoryPerBlock": "musaDevAttrMaxSharedMemoryPerBlock",
     "cudaDevAttrWarpSize": "musaDevAttrWarpSize",
     "cudaDevAttrMultiProcessorCount": "musaDevAttrMultiProcessorCount",
-    # =========================================================================
-    # PyTorch CUDA utilities
-    # =========================================================================
+    # PyTorch CUDA utility mappings.
     "getCurrentCUDAStream": "getCurrentMUSAStream",
     "getDefaultCUDAStream": "getDefaultMUSAStream",
     "CUDAStream": "MUSAStream",
@@ -309,17 +275,13 @@ _MAPPING_RULE = {
     "OptionalCUDAGuard": "OptionalMUSAGuard",
     "CUDAStreamGuard": "MUSAStreamGuard",
     "CUDAEvent": "MUSAEvent",
-    # =========================================================================
-    # CUDA header includes
-    # =========================================================================
+    # CUDA header include mappings.
     "cuda_runtime.h": "musa_runtime.h",
     "cuda_runtime_api.h": "musa_runtime_api.h",
     "cuda.h": "musa.h",
     "cuda_fp16.h": "musa_fp16.h",
     "cuda_bf16.h": "musa_bf16.h",
-    # =========================================================================
-    # Additional CUDA runtime functions
-    # =========================================================================
+    # Additional CUDA runtime function mappings.
     "cudaHostAlloc": "musaHostAlloc",
     "cudaHostFree": "musaHostFree",
     "cudaMallocHost": "musaMallocHost",
@@ -334,7 +296,7 @@ _MAPPING_RULE = {
     "cudaMemGetInfo": "musaMemGetInfo",
     "cudaMemPrefetchAsync": "musaMemPrefetchAsync",
     "cudaPointerGetAttributes": "musaPointerGetAttributes",
-    # Stream flags and types
+    # Stream flags and types.
     "cudaStreamDefault": "musaStreamDefault",
     "cudaStreamNonBlocking": "musaStreamNonBlocking",
     "cudaStreamCreateWithFlags": "musaStreamCreateWithFlags",
@@ -342,13 +304,13 @@ _MAPPING_RULE = {
     "cudaStreamQuery": "musaStreamQuery",
     "cudaStreamGetPriority": "musaStreamGetPriority",
     "cudaStreamGetFlags": "musaStreamGetFlags",
-    # Event flags
+    # Event flags.
     "cudaEventDefault": "musaEventDefault",
     "cudaEventBlockingSync": "musaEventBlockingSync",
     "cudaEventDisableTiming": "musaEventDisableTiming",
     "cudaEventCreateWithFlags": "musaEventCreateWithFlags",
     "cudaEventQuery": "musaEventQuery",
-    # Memory flags
+    # Memory flags.
     "cudaHostAllocDefault": "musaHostAllocDefault",
     "cudaHostAllocPortable": "musaHostAllocPortable",
     "cudaHostAllocMapped": "musaHostAllocMapped",
@@ -356,9 +318,7 @@ _MAPPING_RULE = {
     "cudaMemoryTypeHost": "musaMemoryTypeHost",
     "cudaMemoryTypeDevice": "musaMemoryTypeDevice",
     "cudaMemoryTypeManaged": "musaMemoryTypeManaged",
-    # =========================================================================
-    # Device management
-    # =========================================================================
+    # Device management mappings.
     "cudaDeviceReset": "musaDeviceReset",
     "cudaDeviceSetCacheConfig": "musaDeviceSetCacheConfig",
     "cudaDeviceGetCacheConfig": "musaDeviceGetCacheConfig",
@@ -369,27 +329,23 @@ _MAPPING_RULE = {
     "cudaDeviceCanAccessPeer": "musaDeviceCanAccessPeer",
     "cudaDeviceEnablePeerAccess": "musaDeviceEnablePeerAccess",
     "cudaDeviceDisablePeerAccess": "musaDeviceDisablePeerAccess",
-    # Occupancy
+    # Occupancy mappings.
     "cudaOccupancyMaxActiveBlocksPerMultiprocessor": "musaOccupancyMaxActiveBlocksPerMultiprocessor",
     "cudaOccupancyMaxPotentialBlockSize": "musaOccupancyMaxPotentialBlockSize",
-    # Device properties
+    # Device property mappings.
     "cudaDeviceProp": "musaDeviceProp",
     "cudaFuncAttributes": "musaFuncAttributes",
     "cudaFuncGetAttributes": "musaFuncGetAttributes",
     "cudaFuncSetAttribute": "musaFuncSetAttribute",
     "cudaFuncSetCacheConfig": "musaFuncSetCacheConfig",
-    # =========================================================================
-    # CUDA texture/surface
-    # =========================================================================
+    # CUDA texture and surface mappings.
     "cudaTextureObject_t": "musaTextureObject_t",
     "cudaSurfaceObject_t": "musaSurfaceObject_t",
     "cudaCreateTextureObject": "musaCreateTextureObject",
     "cudaDestroyTextureObject": "musaDestroyTextureObject",
     "cudaCreateSurfaceObject": "musaCreateSurfaceObject",
     "cudaDestroySurfaceObject": "musaDestroySurfaceObject",
-    # =========================================================================
-    # Additional cuBLAS functions
-    # =========================================================================
+    # Additional cuBLAS function mappings.
     "cublasSetMathMode": "mublasSetMathMode",
     "cublasGetMathMode": "mublasGetMathMode",
     "CUBLAS_DEFAULT_MATH": "MUBLAS_DEFAULT_MATH",
@@ -398,9 +354,7 @@ _MAPPING_RULE = {
     "cublasLtDestroy": "mublasLtDestroy",
     "cublasLtHandle_t": "mublasLtHandle_t",
     "cublasLtMatmul": "mublasLtMatmul",
-    # =========================================================================
-    # Additional cuDNN functions
-    # =========================================================================
+    # Additional cuDNN function mappings.
     "cudnnStatus_t": "mudnnStatus_t",
     "cudnnSetStream": "mudnnSetStream",
     "cudnnGetStream": "mudnnGetStream",
@@ -415,9 +369,7 @@ _MAPPING_RULE = {
     "cudnnDestroyTensorDescriptor": "mudnnDestroyTensorDescriptor",
     "cudnnSetTensor4dDescriptor": "mudnnSetTensor4dDescriptor",
     "cudnnSetTensorNdDescriptor": "mudnnSetTensorNdDescriptor",
-    # =========================================================================
-    # Additional NCCL functions
-    # =========================================================================
+    # Additional NCCL function mappings.
     "ncclCommInitRank": "mcclCommInitRank",
     "ncclCommInitAll": "mcclCommInitAll",
     "ncclCommDestroy": "mcclCommDestroy",
@@ -435,9 +387,7 @@ _MAPPING_RULE = {
     "ncclRecv": "mcclRecv",
     "ncclGetUniqueId": "mcclGetUniqueId",
     "ncclUniqueId": "mcclUniqueId",
-    # =========================================================================
-    # CUDA intrinsics and math functions (no mapping needed)
-    # =========================================================================
+    # CUDA intrinsics and math functions intentionally have no mappings.
     # Math intrinsics: __shfl_sync, __shfl_xor_sync, __shfl_up_sync, __shfl_down_sync,
     #   __ballot_sync, __any_sync, __all_sync, __syncthreads, __syncwarp,
     #   __threadfence, __threadfence_block, __threadfence_system
@@ -446,16 +396,12 @@ _MAPPING_RULE = {
     # Math functions: __float2half, __half2float, __float2half_rn, __float22half2_rn,
     #   __half22float2, __hadd, __hsub, __hmul, __hdiv, __hfma,
     #   __hadd2, __hsub2, __hmul2, __hfma2
-    # =========================================================================
-    # Common macros
-    # =========================================================================
+    # Common macro mappings.
     "CUDA_KERNEL_LOOP": "MUSA_KERNEL_LOOP",
     "CUDA_1D_KERNEL_LOOP": "MUSA_1D_KERNEL_LOOP",
     "CUDA_2D_KERNEL_LOOP": "MUSA_2D_KERNEL_LOOP",
     "CUDA_NUM_THREADS": "MUSA_NUM_THREADS",
-    # =========================================================================
-    # PyTorch C++ API
-    # =========================================================================
+    # PyTorch C++ API mappings.
     "torch::cuda::getCurrentCUDAStream": "torch::musa::getCurrentMUSAStream",
     "torch::cuda::getDefaultCUDAStream": "torch::musa::getDefaultMUSAStream",
     "torch::cuda::getStreamFromPool": "torch::musa::getStreamFromPool",
@@ -463,10 +409,8 @@ _MAPPING_RULE = {
     "cudaDeviceIndex": "musaDeviceIndex",
     "CUDADeviceIndex": "MUSADeviceIndex",
     "getCurrentCUDABlasHandle": "getCurrentMUSABlasHandle",
-    # =========================================================================
-    # CUDA driver API -> MUSA driver API
-    # =========================================================================
-    # Types (alphabetical)
+    # CUDA driver API to MUSA driver API mappings.
+    # Driver API types.
     "CUcontext": "MUcontext",
     "CUdevice": "MUdevice",
     "CUdeviceptr": "MUdeviceptr",
@@ -478,7 +422,7 @@ _MAPPING_RULE = {
     "CUmodule": "MUmodule",
     "CUresult": "MUresult",
     "CUstream": "MUstream",
-    # Functions (alphabetical)
+    # Driver API functions.
     "cuCtxGetCurrent": "muCtxGetCurrent",
     "cuCtxSetCurrent": "muCtxSetCurrent",
     "cuDeviceGet": "muDeviceGet",
@@ -496,7 +440,7 @@ _MAPPING_RULE = {
     "cuMemSetAccess": "muMemSetAccess",
     "cuMemUnmap": "muMemUnmap",
     "cuPointerGetAttribute": "muPointerGetAttribute",
-    # Constants - memory allocation
+    # Driver API memory allocation constants.
     "CU_MEM_ACCESS_FLAGS_PROT_READWRITE": "MU_MEM_ACCESS_FLAGS_PROT_READWRITE",
     "CU_MEM_ALLOC_GRANULARITY_MINIMUM": "MU_MEM_ALLOC_GRANULARITY_MINIMUM",
     "CU_MEM_ALLOCATION_COMP_NONE": "MU_MEM_ALLOCATION_COMP_NONE",
@@ -506,48 +450,37 @@ _MAPPING_RULE = {
     "CU_MEM_LOCATION_TYPE_DEVICE": "MU_MEM_LOCATION_TYPE_DEVICE",
     "CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED": "MU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_MUSA_VMM_SUPPORTED",
     "CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED": "MU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED",
-    # Constants - pointer attributes
+    # Driver API pointer attribute constants.
     "CU_POINTER_ATTRIBUTE_CONTEXT": "MU_POINTER_ATTRIBUTE_CONTEXT",
     "CU_POINTER_ATTRIBUTE_DEVICE_POINTER": "MU_POINTER_ATTRIBUTE_DEVICE_POINTER",
     "CU_POINTER_ATTRIBUTE_HOST_POINTER": "MU_POINTER_ATTRIBUTE_HOST_POINTER",
     "CU_POINTER_ATTRIBUTE_MEMORY_TYPE": "MU_POINTER_ATTRIBUTE_MEMORY_TYPE",
     "CU_POINTER_ATTRIBUTE_RANGE_SIZE": "MU_POINTER_ATTRIBUTE_RANGE_SIZE",
     "CU_POINTER_ATTRIBUTE_RANGE_START_ADDR": "MU_POINTER_ATTRIBUTE_RANGE_START_ADDR",
-    # Error codes
+    # Driver API error codes.
     "CUDA_ERROR_INVALID_VALUE": "MUSA_ERROR_INVALID_VALUE",
     "CUDA_ERROR_NOT_INITIALIZED": "MUSA_ERROR_NOT_INITIALIZED",
     "CUDA_ERROR_NOT_PERMITTED": "MUSA_ERROR_NOT_PERMITTED",
     "CUDA_ERROR_NOT_SUPPORTED": "MUSA_ERROR_NOT_SUPPORTED",
     "CUDA_ERROR_OUT_OF_MEMORY": "MUSA_ERROR_OUT_OF_MEMORY",
     "CUDA_SUCCESS": "MUSA_SUCCESS",
-    # =========================================================================
-    # THC headers
-    # =========================================================================
+    # THC header mappings.
     "#include <THC/THCAtomics.cuh>": "#include <THC/THCAtomics.muh>",
-    # =========================================================================
-    # MCC compiler fixes
-    # Template keyword required for dependent template calls in mcc
-    # =========================================================================
+    # MCC compiler fixes for dependent template calls.
     ".FlagHeads<VEC_SIZE>": ".template FlagHeads<VEC_SIZE>",
     ".InclusiveSum<VEC_SIZE>": ".template InclusiveSum<VEC_SIZE>",
     ".Reduce<VEC_SIZE>": ".template Reduce<VEC_SIZE>",
     ".Sum<VEC_SIZE>": ".template Sum<VEC_SIZE>",
     "::cast<vec_size>": "::template cast<vec_size>",
     "SCHEDULER::execute": "SCHEDULER::template execute",
-    # =========================================================================
-    # CUDA launch attributes
-    # =========================================================================
+    # CUDA launch attribute mappings.
     "cudaLaunchAttribute": "musaLaunchAttribute",
     "cudaLaunchAttributeProgrammaticStreamSerialization": "musaLaunchAttributeIgnore",
     "cudaLaunchConfig_t": "musaLaunchConfig_t",
-    # =========================================================================
-    # FlashInfer specific mappings
-    # =========================================================================
+    # FlashInfer-specific mappings.
     ".is_cuda()": ".is_privateuseone()",
     "->philox_cuda_state": "->philox_musa_state",
-    # =========================================================================
-    # CUDA arch guards
-    # =========================================================================
+    # CUDA arch guard mappings.
     "__CUDA_ARCH__ >= 800": "__MUSA_ARCH__ >= 220",
     "(__CUDA_ARCH__ < 800)": "(__MUSA_ARCH__ < 220)",
     "(__CUDA_ARCH__ >= 900)": "(__MUSA_ARCH__ >= 310)",
@@ -555,12 +488,9 @@ _MAPPING_RULE = {
     "#include <cuda/std/functional>": "#include <musa/std/functional>",
     "#include <cuda/std/limits>": "#include <musa/std/limits>",
     "compute_capacity.first >= 8": "compute_capacity.first >= 3",
-    # =========================================================================
-    # FlashInfer math functions
-    # Replace math.cuh with MUSA fast math intrinsics
-    # =========================================================================
+    # FlashInfer math function mappings.
     '#include "math.cuh"': """
-// MUSA fast math intrinsics (replacing flashinfer::math functions)
+// MUSA fast math intrinsics replacing flashinfer::math functions.
 __device__ __forceinline__ float fast_rsqrtf(float x) { return __frsqrt_rn(x); }
 __device__ __forceinline__ float fast_rcp(float x) { return __frcp_rn(x); }
 """,
@@ -568,19 +498,16 @@ __device__ __forceinline__ float fast_rcp(float x) { return __frcp_rn(x); }
     "math::rsqrt(smem[0] / float(d) + eps);": "fast_rsqrtf(smem[0] / float(d) + eps);",
     "math::ptx_rcp(max(sum_low, 1e-8));": "fast_rcp(max(sum_low, 1e-8));",
     "math::ptx_rcp(denom);": "fast_rcp(denom);",
-    # PTX log2/exp2 -> standard math functions
+    # PTX log2/exp2 mappings.
     "math::ptx_log2": "log2f",
     "math::ptx_exp2": "exp2f",
-    # =========================================================================
-    # PTX assembly removal for MUSA
-    # MUSA doesn't support NVIDIA PTX assembly. We use "if(0)" to skip all
-    # asm volatile blocks (works for both single-line and multi-line cases).
-    # The compiler will optimize away the dead code.
-    # =========================================================================
+    # PTX assembly removal for MUSA.
+    #
+    # MUSA does not support NVIDIA PTX assembly. Prefixing with ``if(0)`` skips
+    # both single-line and multi-line asm blocks; the compiler removes the dead
+    # code afterward.
     "asm volatile": "if(0) asm volatile",
-    # =========================================================================
-    # MUSA compiler workarounds
-    # =========================================================================
-    # __restrict__ in struct members causes copy issues
+    # MUSA compiler workarounds.
+    # ``__restrict__`` in struct members causes copy issues.
     "const void* __restrict__ ptrs[8]": "const void* ptrs[8]",
 }

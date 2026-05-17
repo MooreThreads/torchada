@@ -16,6 +16,21 @@ torchada is an adapter that makes [torch_musa](https://github.com/MooreThreads/t
 
 Many PyTorch projects are written for NVIDIA GPUs using `torch.cuda.*` APIs. To run these on Moore Threads GPUs, you would normally need to change every `cuda` reference to `musa`. torchada eliminates this by automatically translating CUDA API calls to MUSA equivalents at runtime.
 
+## Architecture
+
+torchada sits between user code and the PyTorch MUSA backend. User applications import `torchada` once and continue calling standard `torch.cuda.*` APIs. The compatibility layer patches CUDA entry points, translates CUDA device references to MUSA, installs CUDA-shaped module shims, and ports CUDA extension sources and symbols for the MUSA toolchain. On MUSA platforms, calls are redirected to `torch.musa`, custom operators use the `PrivateUse1` dispatch key, distributed NCCL requests map to MCCL, and runtime calls target the MUSA runtime.
+
+Import-time setup follows a small sequence:
+
+- Detect the active platform (`MUSA`, native `CUDA`, or `CPU`).
+- Load optional C++/MUSA operator overrides on MUSA platforms.
+- Apply PyTorch compatibility patches through the `_patch.py` registry.
+- Configure the bundled Triton/MoE defaults for SGLang and vLLM.
+
+The main compatibility modules are `_device_compat.py`, `_cuda_compat.py`, `_runtime.py`, `_ctypes_compat.py`, `_accelerator_compat.py`, `utils/cpp_extension.py`, `_mapping.py`, `_cpp_ops.py`, `csrc/`, `cuda/`, and `triton/`.
+
+For downstream compatibility, `torch.cuda.is_available()` and `torch.version.cuda` are intentionally left unpatched so projects can still distinguish native CUDA environments from MUSA environments.
+
 ## Prerequisites
 
 - **torch_musa**: You must have [torch_musa](https://github.com/MooreThreads/torch_musa) installed (this provides MUSA support for PyTorch)
@@ -53,9 +68,11 @@ That's it! All `torch.cuda.*` APIs are automatically redirected to `torch.musa.*
 | Device operations | `tensor.cuda()`, `model.cuda()`, `torch.device("cuda")` |
 | Memory management | `torch.cuda.memory_allocated()`, `empty_cache()` |
 | Synchronization | `torch.cuda.synchronize()`, `Stream`, `Event` |
+| Compatibility aliases | `memory_cached()`, `torch.cuda.streams`, `torch.cuda.sparse` |
 | Mixed precision | `torch.cuda.amp.autocast()`, `GradScaler()` |
 | CUDA Graphs | `torch.cuda.CUDAGraph`, `torch.cuda.graph()` |
 | CUDA Runtime | `torch.cuda.cudart()` → uses MUSA runtime |
+| CUDA Introspection | `get_gencode_flags()`, `get_sync_debug_mode()`, `set_sync_debug_mode()` |
 | Profiler | `ProfilerActivity.CUDA` → uses PrivateUse1 |
 | Custom Ops | `Library.impl(..., "CUDA")` → uses PrivateUse1 |
 | Distributed | `dist.init_process_group(backend='nccl')` → uses MCCL |
@@ -199,11 +216,10 @@ with torch.accelerator.stream(torch.musa.Stream()):
     ...
 ```
 
-**Forward compatibility:** The wrapper always prefers the real
-`torch.accelerator` implementation and only falls back to `torch.musa` when an
-attribute is missing, so upgrading to a future PyTorch release that ships
-official implementations requires no changes on your side — you will
-automatically get the upstream version.
+**Forward compatibility:** The wrapper first applies torchada overrides for
+MUSA-specific fixes such as synchronization and memory APIs, then prefers the
+real `torch.accelerator` implementation, and finally falls back to `torch.musa`
+when an attribute is missing.
 
 ## Platform Detection
 
