@@ -121,6 +121,30 @@ def _patch_simple_porting_load_replaced_mapping(musa_sp):
     musa_sp.SimplePorting.load_replaced_mapping = patched_load_replaced_mapping
 
 
+def _patch_simple_porting_open(musa_sp):
+    """
+    Patch simple_porting.open to tolerate non-UTF-8 bytes in source files.
+
+    Some source files processed by SimplePorting may contain comments or string
+    literals that are not valid UTF-8. The original implementation opens files
+    with UTF-8 decoding, which can raise UnicodeDecodeError during porting.
+
+    This patch wraps text-mode UTF-8 file opens with errors="surrogateescape"
+    so undecodable bytes can round-trip safely. The original SimplePorting
+    modify_file logic is preserved, keeping this patch forward-compatible with
+    future torch_musa changes.
+    """
+
+    import builtins
+
+    def open_with_surrogateescape(file, mode="r", *args, **kwargs):
+        if "b" not in mode and kwargs.get("encoding") == "utf-8" and "errors" not in kwargs:
+            kwargs["errors"] = "surrogateescape"
+        return builtins.open(file, mode, *args, **kwargs)
+
+    musa_sp.open = open_with_surrogateescape
+
+
 def _apply_musa_patches():
     """
     Apply patches to torch_musa modules for CUDA compatibility.
@@ -158,6 +182,9 @@ def _apply_musa_patches():
         # Some versions of torch_musa have an extra print statement that we want to disable
         # This patch is forward-compatible - if the print is removed, this still works
         _patch_simple_porting_load_replaced_mapping(musa_sp)
+        # Patch simple_porting.open to tolerate non-UTF-8 source files
+        # This preserves SimplePorting's original logic while allowing undecodable bytes to round-trip
+        _patch_simple_porting_open(musa_sp)
 
         _musa_patches_applied = True
 
