@@ -64,6 +64,7 @@ That's it! All `torch.cuda.*` APIs are automatically redirected to `torch.musa.*
 | FlexAttention | `torch.nn.attention.flex_attention` works on MUSA |
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
 | Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `Stream`, `Event`, ... |
+| Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
 
 ## Examples
 
@@ -297,7 +298,7 @@ See `src/torchada/_mapping.py` for the complete mapping table (380+ mappings).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.56
+torchada>=0.1.57
 ```
 
 ### Step 2: Conditional Import

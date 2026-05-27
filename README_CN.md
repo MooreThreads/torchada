@@ -64,6 +64,7 @@ torch.cuda.synchronize()
 | FlexAttention | `torch.nn.attention.flex_attention` 支持 MUSA 设备 |
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
 | 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`Stream`、`Event` 等 |
+| Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
 
 ## 示例
 
@@ -292,7 +293,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.56
+torchada>=0.1.57
 ```
 
 ### 步骤 2：条件导入

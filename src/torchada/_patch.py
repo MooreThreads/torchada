@@ -25,7 +25,7 @@ import functools
 import inspect
 import sys
 import warnings
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, List, Optional
 
 import torch
@@ -1202,7 +1202,6 @@ def _patch_backends_cuda():
     matmul_class.__setattr__ = patched_setattr
 
 
-
 @patch_function
 @requires_import("torchada.utils.cpp_extension", "torch.utils.cpp_extension")
 def _patch_cpp_extension():
@@ -1652,6 +1651,31 @@ def _patch_torch_accelerator():
 
 
 @patch_function
+@requires_import("torch_musa", "triton.language")
+def _patch_triton_extra():
+    if not is_musa_platform():
+        return
+
+    import triton.language as tl
+
+    if hasattr(tl.extra, "musa"):
+        tl.extra.cuda = tl.extra.musa
+    elif not hasattr(tl.extra, "cuda"):
+        tl.extra.cuda = SimpleNamespace()
+
+    def gdc_wait():
+        raise NotImplementedError("tl.extra.cuda.gdc_wait is not supported on MUSA")
+
+    def gdc_launch_dependents():
+        raise NotImplementedError("tl.extra.cuda.gdc_launch_dependents is not supported on MUSA")
+
+    if not hasattr(tl.extra.cuda, "gdc_wait"):
+        tl.extra.cuda.gdc_wait = gdc_wait
+    if not hasattr(tl.extra.cuda, "gdc_launch_dependents"):
+        tl.extra.cuda.gdc_launch_dependents = gdc_launch_dependents
+
+
+@patch_function
 def _patch_ctypes_cdll():
     """
     Patch ctypes.CDLL to automatically translate CUDA/NCCL function names to MUSA/MCCL.
@@ -1737,6 +1761,7 @@ def apply_patches():
     - torch._inductor.autotune_process.CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES
     - torch.accelerator.synchronize() -> torch.musa.synchronize()
     - torch.accelerator context managers (device_index, stream) for forward compatibility
+    - Triton tl.extra.cuda.gdc_wait / gdc_launch_dependents unsupported shim
     - ctypes.CDLL function name translation for MUSA libraries:
         - cudaXxx -> musaXxx (for libmusart)
         - ncclXxx -> mcclXxx (for libmccl)
