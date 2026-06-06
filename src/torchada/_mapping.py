@@ -30,6 +30,7 @@ _MAPPING_RULE = {
     "#include <ATen/cuda/CUDAUtils.h>": '#include "torch_musa/share/generated_cuda_compatible/include/ATen/musa/MUSAUtils.h"',
     "#include <ATen/cuda/detail/UnpackRaw.cuh>": '#include "torch_musa/csrc/aten/musa/UnpackRaw.muh"',
     "#include <ATen/cuda/Exceptions.h>": '#include "torch_musa/csrc/aten/musa/Exceptions.h"',
+    "#include <ATen/cuda/CUDAGraphsUtils.cuh>": "#include <ATen/musa/MUSAGraphsUtils.muh>",
     "at::cuda": "at::musa",
     # File extension mappings for include statements (.cuh -> .muh)
     '.cuh"': '.muh"',
@@ -181,6 +182,7 @@ _MAPPING_RULE = {
     # Error handling
     "cudaError_t": "musaError_t",
     "cudaSuccess": "musaSuccess",
+    "cudaErrorNotReady": "musaErrorNotReady",
     "cudaGetLastError": "musaGetLastError",
     "cudaGetErrorString": "musaGetErrorString",
     "cudaPeekAtLastError": "musaPeekAtLastError",
@@ -322,6 +324,7 @@ _MAPPING_RULE = {
     # =========================================================================
     "cudaHostAlloc": "musaHostAlloc",
     "cudaHostFree": "musaHostFree",
+    "cudaHostGetDevicePointer": "musaHostGetDevicePointer",
     "cudaMallocHost": "musaMallocHost",
     "cudaFreeHost": "musaFreeHost",
     "cudaMallocManaged": "musaMallocManaged",
