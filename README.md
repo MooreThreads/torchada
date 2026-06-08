@@ -298,7 +298,7 @@ See `src/torchada/_mapping.py` for the complete mapping table (380+ mappings).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.58
+torchada>=0.1.59
 ```
 
 ### Step 2: Conditional Import
@@ -335,14 +335,15 @@ if is_nvidia() or is_musa():
 
 | Project | Category | Status | Tracking |
 |---------|----------|--------|----------|
+| [SGLang](https://github.com/sgl-project/sglang) | Model Serving | ✅ Merged | - |
+| [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | Model Serving | ✅ Merged | — |
+| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | ✅ Merged | - |
 | [Xinference](https://github.com/xorbitsai/inference) | Model Serving | ✅ Merged | — |
 | [LightLLM](https://github.com/ModelTC/LightLLM) | Model Serving | ✅ Merged | — |
 | [LightX2V](https://github.com/ModelTC/LightX2V) | Image/Video Generation | ✅ Merged | — |
 | [Chitu](https://github.com/thu-pacman/chitu) | Model Serving | ✅ Merged | — |
-| [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | Model Serving | ✅ Merged | — |
-| [SGLang](https://github.com/sgl-project/sglang) | Model Serving | 🚧 In Progress | [SGLang#16565](https://github.com/sgl-project/sglang/issues/16565) |
+| [Mooncake](https://github.com/kvcache-ai/Mooncake) | KVCache | ✅ Merged | - |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | Image/Video Generation | 🚧 In Progress | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
-| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | 🚧 In Progress | [vLLM-Omni#2347](https://github.com/vllm-project/vllm-omni/issues/2347) |
 
 ## License
 

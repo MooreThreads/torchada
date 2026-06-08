@@ -741,6 +741,17 @@ def _patch_torch_cuda_module():
         # MUSA's graph class uses musa_graph= but CUDA code uses cuda_graph=
         _patch_graph_context_manager()
 
+        # Install transparent CUDA-graph executable rotation so deep models can
+        # use piecewise CUDA graphs despite the MUSA driver's ~2048 live-executable
+        # per-process cap. Zero-cost until the cap is exceeded; disable with
+        # TORCHADA_GRAPH_ROTATION=0.
+        try:
+            from ._graph_rotation import install as _install_graph_rotation
+
+            _install_graph_rotation()
+        except Exception as _rot_exc:  # noqa: BLE001
+            warnings.warn(f"torchada graph-exec rotation install failed: {_rot_exc!r}")
+
         # Patch torch.cuda.nccl -> torch.musa.mccl
         if hasattr(torch.musa, "mccl"):
             sys.modules["torch.cuda.nccl"] = torch.musa.mccl
