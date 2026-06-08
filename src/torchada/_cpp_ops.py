@@ -21,6 +21,7 @@ import subprocess
 from typing import Optional
 
 _cpp_ops_module: Optional[object] = None
+_graph_rotation_module: Optional[object] = None
 _musa_arch_cached: Optional[str] = None
 
 
@@ -155,6 +156,65 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
         import warnings
 
         warnings.warn(f"Failed to load torchada C++ ops: {e}")
+        return None
+
+
+def load_graph_rotation_ops(force_reload: bool = False) -> Optional[object]:
+    """Build/load the MUSA CUDA-graph executable-rotation ops.
+
+    This is a *separate* extension from the ATen op overrides built by
+    ``load_cpp_ops``: it needs torch_musa's internal headers (``MUSAGraph.h``) and
+    links ``libmusa_python``, and a build failure here must not break the core op
+    overrides. It is host-only (no device kernels), so torch's plain loader is used.
+    Built lazily by the graph-rotation module the first time rotation engages.
+
+    Returns the extension module exposing ``free_exec``/``inst_exec``/``has_exec``,
+    or ``None`` on a non-MUSA platform or build failure.
+    """
+    global _graph_rotation_module
+
+    if _graph_rotation_module is not None and not force_reload:
+        return _graph_rotation_module
+
+    from ._platform import is_musa_platform
+
+    if not is_musa_platform():
+        return None
+
+    try:
+        import os.path as osp
+
+        import torch_musa
+        from torch.utils.cpp_extension import load
+
+        src = osp.join(osp.dirname(__file__), "_graph_rotation_src", "graph_exec_aux.cpp")
+        tm = osp.dirname(torch_musa.__file__)
+        musa_home = os.environ.get("MUSA_HOME", "/usr/local/musa")
+        include_dirs = [
+            osp.join(tm, "csrc"),
+            osp.join(tm, "share", "generated_cuda_compatible", "include"),
+            osp.join(musa_home, "include"),
+        ]
+        libdir = osp.join(tm, "lib")
+        verbose = os.environ.get("TORCHADA_CPP_OPS_VERBOSE") == "1"
+
+        _graph_rotation_module = load(
+            name="torchada_graph_rotation_ops",
+            sources=[src],
+            extra_include_paths=include_dirs,
+            extra_cflags=["-O2"],
+            extra_ldflags=[
+                "-L" + osp.join(musa_home, "lib"), "-lmusart",
+                "-L" + libdir, "-lmusa_python", "-Wl,-rpath," + libdir,
+            ],
+            verbose=verbose,
+        )
+        return _graph_rotation_module
+
+    except Exception as e:
+        import warnings
+
+        warnings.warn(f"Failed to load torchada graph-rotation ops: {e}")
         return None
 
 

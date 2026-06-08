@@ -49,6 +49,7 @@ torchada = [
     "csrc/*.mu",
     "csrc/*.cuh",
     "csrc/*.muh",
+    "_graph_rotation_src/*.cpp",
     "triton/autotune/fused_moe/configs/**/*.json",
 ]
 
