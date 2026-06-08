@@ -177,20 +177,24 @@ class _Rotation:
             if key == keep_id:                      # never evict the graph we just touched
                 self._live.move_to_end(key)
                 break
-            self._live.pop(key, None)
             graph = wref()
             if graph is None:                       # already GC'd -> exec freed by its destructor
+                self._live.pop(key, None)
                 continue
             if aux is None:
                 aux = self._ensure_aux()
                 if aux is None:                     # aux unavailable -> cannot rotate; stop
                     return
             try:
-                aux.free_exec(graph)                # destroy exec, keep template
-                self._evicting = True
-                self.stats["evict"] += 1
+                aux.free_exec(graph)                # destroy exec (keep template) FIRST
             except Exception as exc:                # noqa: BLE001
+                # free failed -> the exec is still live; keep it tracked and stop, so
+                # _live stays an honest count of live executables (no false eviction).
                 logger.warning("torchada rotation free_exec failed: %r", exc)
+                return
+            self._live.pop(key, None)               # untrack only after the exec is freed
+            self._evicting = True
+            self.stats["evict"] += 1
 
     def register(self, graph: Any) -> None:
         with self._lock:
