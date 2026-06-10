@@ -101,4 +101,11 @@
         "ep_size": [1, 8],
         "dtype": "fp8_w8a8"
     }
+    ,
+    {
+        "model": "jd-opensource/JoyAI-LLM-Flash",
+        "tp_size": [2, 4, 8, 2, 4, 8],
+        "ep_size": [1, 1, 1, 2, 4, 8],
+        "dtype": "bf16"
+    }
 ]
