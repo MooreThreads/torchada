@@ -212,5 +212,10 @@ The C++ extension provides CUDA-compatible APIs including:
 
 - All patches are applied at import time via `apply_patches()`
 - Patches only affect torch APIs, not system resources
-- No network access or file system modifications
+- No network access. The only import-time file system modification is
+  best-effort and confined to torchada's own installed MoE config directory:
+  `set_default_moe_config_dir()` creates space-free filename aliases
+  (symlink, or atomic copy) for the bundled tuning configs so vLLM's
+  `VLLM_TUNED_CONFIG_FOLDER` lookup resolves. It is idempotent and silently
+  skipped when the install location is read-only.
 - C++ extension building uses standard torch/setuptools mechanisms
