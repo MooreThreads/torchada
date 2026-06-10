@@ -475,6 +475,30 @@ class _FactoryDeviceMode(TorchFunctionMode):
         return func(*args, **kwargs)
 
 
+def _shield_torch_musa_tensor_attrs() -> None:
+    """Exempt torch_musa-injected Tensor attrs from torch_function dispatch.
+
+    torch_musa's ``Tensor.musa`` C relay mis-populates the protocol args
+    (passes the module instead of self), so any active TorchFunctionMode
+    breaks it. The attrs never need device translation; bypass the protocol.
+    """
+    for name in ("musa", "pin_memory", "is_pinned"):
+        attr = getattr(torch.Tensor, name, None)
+        if attr is None or getattr(attr, "_torchada_shielded", False):
+            continue
+
+        def make(orig):
+            @functools.wraps(orig)
+            def shielded(self, *args, **kwargs):
+                with torch._C.DisableTorchFunction():
+                    return orig(self, *args, **kwargs)
+
+            shielded._torchada_shielded = True
+            return shielded
+
+        setattr(torch.Tensor, name, make(attr))
+
+
 def _patch_thread_bootstrap_for_factory_mode() -> None:
     """Enter ``_FactoryDeviceMode`` in every new Python thread.
 
@@ -1795,6 +1819,7 @@ def apply_patches():
     # TorchFunctionMode instead of namespace wrappers (issue #26 eager case,
     # torch.compile cacheability). Entered for the importing thread here and
     # for new threads via the bootstrap patch.
+    _shield_torch_musa_tensor_attrs()
     _FactoryDeviceMode().__enter__()
     _patch_thread_bootstrap_for_factory_mode()
 
