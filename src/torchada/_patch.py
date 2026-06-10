@@ -490,6 +490,12 @@ def _shield_torch_musa_tensor_attrs() -> None:
         def make(orig):
             @functools.wraps(orig)
             def shielded(self, *args, **kwargs):
+                # Translation normally comes from _FactoryDeviceMode; keep it
+                # for explicit device arguments despite the disabled protocol.
+                if args and isinstance(args[0], (str, torch.device)):
+                    args = (_translate_device(args[0]),) + args[1:]
+                if "device" in kwargs:
+                    kwargs["device"] = _translate_device(kwargs["device"])
                 with torch._C.DisableTorchFunction():
                     return orig(self, *args, **kwargs)
 

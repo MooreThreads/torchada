@@ -2099,6 +2099,20 @@ class TestTensorFactoryFunctions:
         assert result["x"].device.type == "musa"
 
     @pytest.mark.gpu
+    def test_pin_memory_translates_cuda_device(self):
+        """Shielded tensor attrs still translate explicit device='cuda' args."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        x = torch.randn(4)
+        pinned = x.pin_memory(device="cuda")
+        assert pinned.is_pinned(device="cuda")
+
+    @pytest.mark.gpu
     def test_compiled_factory_graph_is_cacheable(self):
         """fullgraph compile of a factory-using fn yields AOT cache artifacts
         (regression test for vLLM compile-cache enablement)."""
@@ -2112,6 +2126,8 @@ class TestTensorFactoryFunctions:
             pytest.skip("Only applicable on MUSA platform")
         if os.environ.get("TORCHDYNAMO_DISABLE") == "1":
             pytest.skip("Dynamo disabled in environment")
+        if getattr(getattr(torch, "compiler", None), "save_cache_artifacts", None) is None:
+            pytest.skip("torch.compiler.save_cache_artifacts not available")
 
         # Other tests in this module leak torch.library state that breaks any
         # later in-process compile; probe in a fresh interpreter.
