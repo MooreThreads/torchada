@@ -2101,7 +2101,7 @@ class TestTensorFactoryFunctions:
     @pytest.mark.gpu
     def test_compiled_factory_graph_is_cacheable(self):
         """fullgraph compile of a factory-using fn yields AOT cache artifacts
-        (regression test for vLLM compile-cache enablement, MUSA-0511)."""
+        (regression test for vLLM compile-cache enablement)."""
         import os
 
         import torch
@@ -2499,7 +2499,7 @@ class TestFlashAttnPatching:
     def test_patch_skipped_when_flash_attn_interface_not_available(self):
         """Test that the patch is gracefully skipped when flash_attn_interface is not installed.
 
-        On platforms without flash_attn_interface (e.g. yeahdongcn container), sgl_kernel.flash_attn
+        On platforms without flash_attn_interface, sgl_kernel.flash_attn
         should NOT be available unless sgl_kernel was already installed.
         """
         import sys
