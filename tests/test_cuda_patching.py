@@ -2062,6 +2062,70 @@ class TestTensorFactoryFunctions:
         x = torch.asarray([1, 2, 3], dtype=torch.float32)
         assert x.device.type == "cpu"
 
+    def test_factory_functions_not_wrapped(self):
+        """Factory functions stay original so torch.compile graphs cache.
+
+        Namespace wrappers put torchada functions into dynamo graphs, which
+        the AOT autograd cache rejects (vLLM "compiled artifact is not
+        serializable"). Translation must come from _FactoryDeviceMode only.
+        """
+        import torch
+
+        for name in ("empty", "zeros", "asarray", "tensor", "full"):
+            fn = getattr(torch, name)
+            assert not hasattr(fn, "__wrapped__"), f"torch.{name} is wrapped"
+
+    @pytest.mark.gpu
+    def test_asarray_cuda_in_thread(self):
+        """device='cuda' translation works on worker threads (mode is
+        thread-local; bootstrap patch must enter it per thread)."""
+        import threading
+
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        result = {}
+
+        def make():
+            result["x"] = torch.asarray([1, 2, 3], dtype=torch.float32, device="cuda")
+
+        t = threading.Thread(target=make)
+        t.start()
+        t.join()
+        assert result["x"].device.type == "musa"
+
+    @pytest.mark.gpu
+    def test_compiled_factory_graph_is_cacheable(self):
+        """fullgraph compile of a factory-using fn yields AOT cache artifacts
+        (regression test for vLLM compile-cache enablement, MUSA-0511)."""
+        import os
+
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+        if os.environ.get("TORCHDYNAMO_DISABLE") == "1":
+            pytest.skip("Dynamo disabled in environment")
+
+        torch.compiler.reset()
+
+        def f(x):
+            buf = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+            buf.copy_(x)
+            return buf.relu() + 1
+
+        x = torch.randn(32, device="cuda")
+        torch.compile(f, fullgraph=True)(x)
+        artifacts = torch.compiler.save_cache_artifacts()
+        assert artifacts is not None, "no cache artifacts collected"
+        assert len(artifacts[1].aot_autograd_artifacts) == 1
+
     @pytest.mark.gpu
     def test_tensor_with_cuda_device(self):
         """Test torch.tensor with device='cuda' works on MUSA."""
