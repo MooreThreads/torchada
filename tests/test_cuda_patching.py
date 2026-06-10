@@ -2062,6 +2062,98 @@ class TestTensorFactoryFunctions:
         x = torch.asarray([1, 2, 3], dtype=torch.float32)
         assert x.device.type == "cpu"
 
+    def test_factory_functions_not_wrapped(self):
+        """Factory functions stay original so torch.compile graphs cache.
+
+        Namespace wrappers put torchada functions into dynamo graphs, which
+        the AOT autograd cache rejects (vLLM "compiled artifact is not
+        serializable"). Translation must come from _FactoryDeviceMode only.
+        """
+        import torch
+
+        for name in ("empty", "zeros", "asarray", "tensor", "full"):
+            fn = getattr(torch, name)
+            assert not hasattr(fn, "__wrapped__"), f"torch.{name} is wrapped"
+
+    @pytest.mark.gpu
+    def test_asarray_cuda_in_thread(self):
+        """device='cuda' translation works on worker threads (mode is
+        thread-local; bootstrap patch must enter it per thread)."""
+        import threading
+
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        result = {}
+
+        def make():
+            result["x"] = torch.asarray([1, 2, 3], dtype=torch.float32, device="cuda")
+
+        t = threading.Thread(target=make)
+        t.start()
+        t.join()
+        assert result["x"].device.type == "musa"
+
+    @pytest.mark.gpu
+    def test_pin_memory_translates_cuda_device(self):
+        """Shielded tensor attrs still translate explicit device='cuda' args."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        x = torch.randn(4)
+        pinned = x.pin_memory(device="cuda")
+        assert pinned.is_pinned(device="cuda")
+
+    @pytest.mark.gpu
+    def test_compiled_factory_graph_is_cacheable(self):
+        """fullgraph compile of a factory-using fn yields AOT cache artifacts
+        (regression test for vLLM compile-cache enablement)."""
+        import os
+
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+        if os.environ.get("TORCHDYNAMO_DISABLE") == "1":
+            pytest.skip("Dynamo disabled in environment")
+        if getattr(getattr(torch, "compiler", None), "save_cache_artifacts", None) is None:
+            pytest.skip("torch.compiler.save_cache_artifacts not available")
+
+        # Other tests in this module leak torch.library state that breaks any
+        # later in-process compile; probe in a fresh interpreter.
+        import subprocess
+        import sys
+
+        probe = (
+            "import torchada, torch\n"
+            "def f(x):\n"
+            "    buf = torch.empty(x.shape, device=x.device, dtype=x.dtype)\n"
+            "    buf.copy_(x)\n"
+            "    return buf.relu() + 1\n"
+            "x = torch.randn(32, device='cuda')\n"
+            "torch.compile(f, fullgraph=True)(x)\n"
+            "art = torch.compiler.save_cache_artifacts()\n"
+            "assert art is not None, 'no cache artifacts collected'\n"
+            "assert len(art[1].aot_autograd_artifacts) == 1, art[1]\n"
+        )
+        env = dict(os.environ)
+        env.pop("TORCHDYNAMO_DISABLE", None)
+        env.pop("VLLM_DISABLE_COMPILE_CACHE", None)
+        result = subprocess.run(
+            [sys.executable, "-c", probe], env=env, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+
     @pytest.mark.gpu
     def test_tensor_with_cuda_device(self):
         """Test torch.tensor with device='cuda' works on MUSA."""
@@ -2423,7 +2515,7 @@ class TestFlashAttnPatching:
     def test_patch_skipped_when_flash_attn_interface_not_available(self):
         """Test that the patch is gracefully skipped when flash_attn_interface is not installed.
 
-        On platforms without flash_attn_interface (e.g. yeahdongcn container), sgl_kernel.flash_attn
+        On platforms without flash_attn_interface, sgl_kernel.flash_attn
         should NOT be available unless sgl_kernel was already installed.
         """
         import sys

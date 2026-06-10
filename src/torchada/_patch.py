@@ -29,6 +29,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, List, Optional
 
 import torch
+from torch.overrides import TorchFunctionMode
 
 from ._cpp_ops import get_module
 from ._platform import is_musa_platform
@@ -454,71 +455,75 @@ def _patch_graph_context_manager():
         torch.musa.graph = GraphWrapper
 
 
-def _wrap_factory_function(original_fn: Callable) -> Callable:
-    """Wrap tensor factory functions (empty, zeros, ones, etc.) to translate device."""
+class _FactoryDeviceMode(TorchFunctionMode):
+    """Translate ``device=`` kwargs (e.g. ``"cuda"`` -> ``"musa"``) for tensor
+    factory functions without replacing them in the ``torch`` namespace.
 
-    @functools.wraps(original_fn)
-    def wrapped_fn(*args, **kwargs):
-        if "device" in kwargs:
-            kwargs["device"] = _translate_device(kwargs["device"])
-        return original_fn(*args, **kwargs)
+    Replacing the factories with Python wrappers breaks ``torch.compile``:
+    dynamo graphs then reference torchada wrappers instead of the original
+    builtins, so the AOT autograd cache (id-frozen on the originals) bypasses
+    every graph and vLLM-style fullgraph compiles fail their serializability
+    check. A TorchFunctionMode keeps ``torch.*`` identities intact and dynamo
+    inlines the kwarg translation, leaving compiled graphs cacheable.
+    """
 
-    return wrapped_fn
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        device = kwargs.get("device")
+        if device is not None:
+            kwargs["device"] = _translate_device(device)
+        return func(*args, **kwargs)
 
 
-# List of torch factory functions that accept a device argument
-_FACTORY_FUNCTIONS = [
-    # Basic tensor creation
-    "tensor",
-    "as_tensor",
-    "asarray",
-    # Uninitialized/initialized tensors
-    "empty",
-    "zeros",
-    "ones",
-    "full",
-    # Random tensors
-    "rand",
-    "randn",
-    "randint",
-    "randperm",
-    "normal",
-    # Sequences
-    "arange",
-    "range",
-    "linspace",
-    "logspace",
-    # Special tensors
-    "eye",
-    "empty_strided",
-    "empty_permuted",
-    # From file
-    "from_file",
-    # Like variants
-    "empty_like",
-    "zeros_like",
-    "ones_like",
-    "full_like",
-    "rand_like",
-    "randn_like",
-    "randint_like",
-    # Sparse tensors
-    "sparse_coo_tensor",
-    "sparse_csr_tensor",
-    "sparse_csc_tensor",
-    "sparse_bsr_tensor",
-    "sparse_bsc_tensor",
-    "sparse_compressed_tensor",
-    # Index tensors
-    "tril_indices",
-    "triu_indices",
-    # Window functions
-    "bartlett_window",
-    "blackman_window",
-    "hamming_window",
-    "hann_window",
-    "kaiser_window",
-]
+def _shield_torch_musa_tensor_attrs() -> None:
+    """Exempt torch_musa-injected Tensor attrs from torch_function dispatch.
+
+    torch_musa's ``Tensor.musa`` C relay mis-populates the protocol args
+    (passes the module instead of self), so any active TorchFunctionMode
+    breaks it. The attrs never need device translation; bypass the protocol.
+    """
+    for name in ("musa", "pin_memory", "is_pinned"):
+        attr = getattr(torch.Tensor, name, None)
+        if attr is None or getattr(attr, "_torchada_shielded", False):
+            continue
+
+        def make(orig):
+            @functools.wraps(orig)
+            def shielded(self, *args, **kwargs):
+                # Translation normally comes from _FactoryDeviceMode; keep it
+                # for explicit device arguments despite the disabled protocol.
+                if args and isinstance(args[0], (str, torch.device)):
+                    args = (_translate_device(args[0]),) + args[1:]
+                if "device" in kwargs:
+                    kwargs["device"] = _translate_device(kwargs["device"])
+                with torch._C.DisableTorchFunction():
+                    return orig(self, *args, **kwargs)
+
+            shielded._torchada_shielded = True
+            return shielded
+
+        setattr(torch.Tensor, name, make(attr))
+
+
+def _patch_thread_bootstrap_for_factory_mode() -> None:
+    """Enter ``_FactoryDeviceMode`` in every new Python thread.
+
+    TorchFunctionModes are thread-local; the old factory wrappers translated
+    in all threads, so keep that behavior for eager code on worker threads.
+    """
+    import threading
+
+    original_bootstrap = threading.Thread._bootstrap_inner
+    if getattr(original_bootstrap, "_torchada_factory_mode", False):
+        return
+
+    @functools.wraps(original_bootstrap)
+    def bootstrap_with_factory_mode(self):
+        with _FactoryDeviceMode():
+            return original_bootstrap(self)
+
+    bootstrap_with_factory_mode._torchada_factory_mode = True
+    threading.Thread._bootstrap_inner = bootstrap_with_factory_mode
 
 
 class _CudartWrapper:
@@ -1816,33 +1821,13 @@ def apply_patches():
     if hasattr(torch.nn.Module, "cuda"):
         torch.nn.Module.cuda = _wrap_module_cuda(torch.nn.Module.cuda)
 
-    # Patch tensor factory functions to translate device argument
-    # We also need to update _device_constructors cache to include
-    # the original (unwrapped) functions, because PyTorch's __torch_function__
-    # dispatch receives the original C function, not our Python wrapper.
-    original_fns = []
-    for fn_name in _FACTORY_FUNCTIONS:
-        if hasattr(torch, fn_name):
-            original_fn = getattr(torch, fn_name)
-            original_fns.append(original_fn)
-            setattr(torch, fn_name, _wrap_factory_function(original_fn))
-
-    # Update _device_constructors to include original functions
-    # This ensures the device context manager (with torch.device(...):) works
-    # because __torch_function__ receives the original C function
-    try:
-        from torch.utils._device import _device_constructors
-
-        # Get the current set of constructors
-        constructors = _device_constructors()
-
-        # Add original (unwrapped) functions to the constructors set
-        # PyTorch's __torch_function__ receives these, not our wrappers
-        for orig_fn in original_fns:
-            constructors.add(orig_fn)
-
-    except (ImportError, AttributeError):
-        pass  # Older PyTorch versions may not have this
+    # Translate device kwargs of tensor factory functions via a
+    # TorchFunctionMode instead of namespace wrappers (issue #26 eager case,
+    # torch.compile cacheability). Entered for the importing thread here and
+    # for new threads via the bootstrap patch.
+    _shield_torch_musa_tensor_attrs()
+    _FactoryDeviceMode().__enter__()
+    _patch_thread_bootstrap_for_factory_mode()
 
     _patched = True
 
