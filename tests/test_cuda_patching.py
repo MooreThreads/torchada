@@ -2113,19 +2113,30 @@ class TestTensorFactoryFunctions:
         if os.environ.get("TORCHDYNAMO_DISABLE") == "1":
             pytest.skip("Dynamo disabled in environment")
 
-        torch.compiler.save_cache_artifacts()  # flush artifacts of prior tests
-        torch.compiler.reset()
+        # Other tests in this module leak torch.library state that breaks any
+        # later in-process compile; probe in a fresh interpreter.
+        import subprocess
+        import sys
 
-        def f(x):
-            buf = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-            buf.copy_(x)
-            return buf.relu() + 1
-
-        x = torch.randn(32, device="cuda")
-        torch.compile(f, fullgraph=True)(x)
-        artifacts = torch.compiler.save_cache_artifacts()
-        assert artifacts is not None, "no cache artifacts collected"
-        assert len(artifacts[1].aot_autograd_artifacts) >= 1
+        probe = (
+            "import torchada, torch\n"
+            "def f(x):\n"
+            "    buf = torch.empty(x.shape, device=x.device, dtype=x.dtype)\n"
+            "    buf.copy_(x)\n"
+            "    return buf.relu() + 1\n"
+            "x = torch.randn(32, device='cuda')\n"
+            "torch.compile(f, fullgraph=True)(x)\n"
+            "art = torch.compiler.save_cache_artifacts()\n"
+            "assert art is not None, 'no cache artifacts collected'\n"
+            "assert len(art[1].aot_autograd_artifacts) == 1, art[1]\n"
+        )
+        env = dict(os.environ)
+        env.pop("TORCHDYNAMO_DISABLE", None)
+        env.pop("VLLM_DISABLE_COMPILE_CACHE", None)
+        result = subprocess.run(
+            [sys.executable, "-c", probe], env=env, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
 
     @pytest.mark.gpu
     def test_tensor_with_cuda_device(self):
