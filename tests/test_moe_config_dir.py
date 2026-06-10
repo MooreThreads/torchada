@@ -1,5 +1,6 @@
 """Tests for the fused_moe default config dir resolution (vLLM env redirect)."""
 
+import importlib.metadata
 import json
 import os
 
@@ -55,6 +56,20 @@ def test_exact_triton_version_dir_wins(tmp_path, monkeypatch):
     assert resolved == str(tmp_path / "configs" / "triton_3_1_0")
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["3.2.0", "3.2.0.post1", "3.2.0rc1", "3.2.0+git9d8d5e91", "3.2.0.dev20260601"],
+)
+def test_pep440_variants_match_release_dir(tmp_path, monkeypatch, raw):
+    """post/rc/dev/local-version suffixes must still exact-match triton_3_2_0
+    (not silently fall back to the newest directory)."""
+    for ver in ("triton_3_1_0", "triton_3_2_0"):
+        (tmp_path / "configs" / ver).mkdir(parents=True)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: raw)
+    resolved = fused_moe._vllm_tuned_config_dir(str(tmp_path))
+    assert resolved == str(tmp_path / "configs" / "triton_3_2_0")
+
+
 def test_newest_dir_fallback_when_version_unknown(tmp_path, monkeypatch):
     for ver in ("triton_3_1_0", "triton_3_2_0"):
         (tmp_path / "configs" / ver).mkdir(parents=True)
@@ -79,9 +94,10 @@ def test_env_redirect_set_at_import():
     """`import torchada` (done by conftest) must leave the env pointing at a
     real directory whose space-containing configs all have space-free twins."""
     folder = os.environ.get("VLLM_TUNED_CONFIG_FOLDER")
-    assert folder and os.path.isdir(folder)
+    assert folder
     if os.path.dirname(fused_moe.__file__) not in folder:
         pytest.skip("VLLM_TUNED_CONFIG_FOLDER overridden by the environment")
+    assert os.path.isdir(folder)
     spaced = [n for n in os.listdir(folder) if " " in n and n.endswith(".json")]
     for name in spaced:
         assert os.path.exists(os.path.join(folder, name.replace(" ", "")))
