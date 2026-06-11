@@ -204,8 +204,11 @@ def load_graph_rotation_ops(force_reload: bool = False) -> Optional[object]:
             extra_include_paths=include_dirs,
             extra_cflags=["-O2"],
             extra_ldflags=[
-                "-L" + osp.join(musa_home, "lib"), "-lmusart",
-                "-L" + libdir, "-lmusa_python", "-Wl,-rpath," + libdir,
+                "-L" + osp.join(musa_home, "lib"),
+                "-lmusart",
+                "-L" + libdir,
+                "-lmusa_python",
+                "-Wl,-rpath," + libdir,
             ],
             verbose=verbose,
         )

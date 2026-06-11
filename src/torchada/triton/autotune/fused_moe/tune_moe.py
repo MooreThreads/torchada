@@ -41,6 +41,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class RoutingMethodType(IntEnum):
     Default = 0
     Renormalize = 1
@@ -358,7 +365,7 @@ def benchmark_config(
     run()
     torch.cuda.synchronize()
 
-    use_graph = hasattr(torch.cuda, "CUDAGraph")
+    use_graph = _env_flag("TORCHADA_TUNE_USE_GRAPH") and hasattr(torch.cuda, "CUDAGraph")
     if use_graph:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

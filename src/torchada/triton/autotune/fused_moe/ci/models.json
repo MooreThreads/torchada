@@ -43,14 +43,14 @@
     },
     {
         "model": "Qwen/Qwen3.5-35B-A3B",
-        "tp_size": [4, 8, 4, 8],
-        "ep_size": [1, 1, 4, 8],
+        "tp_size": [1, 2, 4, 8, 2, 4, 8],
+        "ep_size": [1, 1, 1, 1, 2, 4, 8],
         "dtype": "auto"
     },
     {
         "model": "Qwen/Qwen3.5-35B-A3B-FP8",
-        "tp_size": [4, 4, 8],
-        "ep_size": [1, 4, 8],
+        "tp_size": [1, 2, 4, 2, 4],
+        "ep_size": [1, 1, 1, 2, 4],
         "dtype": "fp8_w8a8"
     },
     {
@@ -78,7 +78,7 @@
         "dtype": "fp8_w8a8"
     },
     {
-        "model": "deepseek-ai/DeepSeek-R1-0528/",
+        "model": "deepseek-ai/DeepSeek-R1-0528",
         "tp_size": [8, 8],
         "ep_size": [1, 8],
         "dtype": "fp8_w8a8"
@@ -100,8 +100,7 @@
         "tp_size": [8, 8],
         "ep_size": [1, 8],
         "dtype": "fp8_w8a8"
-    }
-    ,
+    },
     {
         "model": "jd-opensource/JoyAI-LLM-Flash",
         "tp_size": [2, 4, 8, 2, 4, 8],
