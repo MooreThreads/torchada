@@ -8,7 +8,6 @@ import pytest
 
 from torchada.triton.autotune import fused_moe
 
-
 SPACED = "E=128,N=1536,device_name=MTT_S5000,dtype=fp8_w8a8,block_shape=[128, 128].json"
 SPACE_FREE = SPACED.replace(" ", "")
 PLAIN = "E=32,N=768,device_name=MTT_S5000.json"

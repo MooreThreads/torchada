@@ -94,14 +94,17 @@ def _probe_live_exec_limit(max_probe: int = 4096) -> Optional[int]:
     try:
         proc = subprocess.run(
             [sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         for line in proc.stdout.splitlines():
             if line.startswith("TORCHADA_PROBE_LIMIT="):
                 return int(line.split("=", 1)[1])
         logger.warning(
             "graph-exec probe subprocess produced no limit; stderr tail: %s",
-            (proc.stderr or "")[-200:])
+            (proc.stderr or "")[-200:],
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("graph-exec probe subprocess failed: %r", exc)
     return None
@@ -122,7 +125,11 @@ def _resolve_cap() -> int:
             cap = max(64, limit - margin)
             logger.warning(
                 "torchada graph-exec auto-probe: driver live-exec limit ≈ %d, "
-                "cap set to %d (margin %d).", limit, cap, margin)
+                "cap set to %d (margin %d).",
+                limit,
+                cap,
+                margin,
+            )
             return cap
         logger.warning("torchada graph-exec auto-probe failed; using default cap %d", _DEFAULT_CAP)
     return _DEFAULT_CAP
@@ -146,7 +153,10 @@ class _Rotation:
         self._aux_failed = False
         self._evicting = False
         self.stats: Dict[str, int] = {
-            "register": 0, "evict": 0, "reinstantiate": 0, "build_failed": 0
+            "register": 0,
+            "evict": 0,
+            "reinstantiate": 0,
+            "build_failed": 0,
         }
 
     def _ensure_aux(self) -> Optional[Any]:
@@ -162,37 +172,40 @@ class _Rotation:
             self.stats["build_failed"] += 1
             logger.warning(
                 "torchada graph-exec rotation unavailable (aux ops failed to build); "
-                "deep models may hit the MUSA ~2048 CUDA-graph cap.")
+                "deep models may hit the MUSA ~2048 CUDA-graph cap."
+            )
             return None
         self._aux = aux
         logger.warning(
             "torchada graph-exec rotation engaged (cap=%d): live CUDA-graph "
-            "executables exceeded the cap; rotating via re-instantiation.", self.cap)
+            "executables exceeded the cap; rotating via re-instantiation.",
+            self.cap,
+        )
         return self._aux
 
     def _evict_locked(self, keep_id: int) -> None:
         aux: Optional[Any] = None
         while len(self._live) > self.cap:
             key, wref = next(iter(self._live.items()))
-            if key == keep_id:                      # never evict the graph we just touched
+            if key == keep_id:  # never evict the graph we just touched
                 self._live.move_to_end(key)
                 break
             graph = wref()
-            if graph is None:                       # already GC'd -> exec freed by its destructor
+            if graph is None:  # already GC'd -> exec freed by its destructor
                 self._live.pop(key, None)
                 continue
             if aux is None:
                 aux = self._ensure_aux()
-                if aux is None:                     # aux unavailable -> cannot rotate; stop
+                if aux is None:  # aux unavailable -> cannot rotate; stop
                     return
             try:
-                aux.free_exec(graph)                # destroy exec (keep template) FIRST
-            except Exception as exc:                # noqa: BLE001
+                aux.free_exec(graph)  # destroy exec (keep template) FIRST
+            except Exception as exc:  # noqa: BLE001
                 # free failed -> the exec is still live; keep it tracked and stop, so
                 # _live stays an honest count of live executables (no false eviction).
                 logger.warning("torchada rotation free_exec failed: %r", exc)
                 return
-            self._live.pop(key, None)               # untrack only after the exec is freed
+            self._live.pop(key, None)  # untrack only after the exec is freed
             self._evicting = True
             self.stats["evict"] += 1
 
@@ -206,7 +219,7 @@ class _Rotation:
                 self._evict_locked(key)
 
     def on_replay(self, graph: Any) -> None:
-        if not self._evicting:                      # fast path: nothing evicted -> exec is live
+        if not self._evicting:  # fast path: nothing evicted -> exec is live
             return
         with self._lock:
             aux = self._aux
@@ -214,7 +227,7 @@ class _Rotation:
                 return
             key = id(graph)
             if key not in self._live or not aux.has_exec(graph):
-                aux.inst_exec(graph)                # re-instantiate from the kept template
+                aux.inst_exec(graph)  # re-instantiate from the kept template
                 self._live[key] = weakref.ref(graph)
                 self.stats["reinstantiate"] += 1
             self._live.move_to_end(key)
@@ -222,8 +235,13 @@ class _Rotation:
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            return dict(self.stats, live=len(self._live), cap=self.cap,
-                        evicting=self._evicting, aux_failed=self._aux_failed)
+            return dict(
+                self.stats,
+                live=len(self._live),
+                cap=self.cap,
+                evicting=self._evicting,
+                aux_failed=self._aux_failed,
+            )
 
 
 _rotation: Optional[_Rotation] = None
@@ -267,14 +285,14 @@ def install() -> bool:
             result = orig_capture_end(self, *args, **kwargs)
             try:
                 rot.register(self)
-            except Exception as exc:                # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("torchada rotation register failed: %r", exc)
             return result
 
         def replay(self: Any, *args: Any, **kwargs: Any) -> Any:
             try:
                 rot.on_replay(self)
-            except Exception as exc:                # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("torchada rotation on_replay failed: %r", exc)
             return orig_replay(self, *args, **kwargs)
 
