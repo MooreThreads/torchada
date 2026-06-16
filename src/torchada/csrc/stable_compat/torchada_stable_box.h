@@ -63,9 +63,12 @@ inline Tensor contiguous(const Tensor& self) {
 // Compile stub: torch_get_current_cuda_blas_handle has no MUSA stable-ABI
 // equivalent. Only cublas/GEMM kernels use it; torch_utils.h defines an unused
 // inline that references it, so a stub is enough to compile non-GEMM kernels.
+// It returns a non-zero error (not success) so that if a GEMM kernel actually
+// calls it, the AOTI error check at the call site fails fast instead of
+// proceeding with a null handle and crashing deep inside the BLAS call.
 static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
   *ret = nullptr;
-  return 0;  // success
+  return 1;  // failure: cuBLAS handle is unsupported on the MUSA stable ABI
 }
 
 namespace torchada_stable {
@@ -95,6 +98,11 @@ inline void invoke_boxed(StableIValue* stack, std::index_sequence<I...>) {
 
 template <auto Fn>
 inline void boxed(StableIValue* stack, uint64_t /*nargs*/, uint64_t /*nout*/) {
+  // The op's C++ signature is the source of truth for how many stack slots are
+  // read/written, so nargs/nout are redundant with it and intentionally unused.
+  // A schema/signature mismatch is an author error caught by the stable-ABI
+  // unit test, which exercises every signature shape (void / Tensor / int
+  // returns, scalar args).
   using Tup = typename fn_traits<decltype(Fn)>::args;
   invoke_boxed<Fn, Tup>(stack,
                         std::make_index_sequence<std::tuple_size_v<Tup>>());

@@ -244,8 +244,9 @@ def _ensure_stable_headers_patched() -> None:
     so a bare import — or a pure-inference run that never builds an extension —
     does not write into the ``torch`` / ``torch_musa`` site-packages headers.
     Called from the MUSA setuptools extension build entry points (extension
-    construction + ``BuildExtension.build_extensions``); the flag makes all calls
-    after the first an instant no-op. Best-effort: never let it break a build.
+    construction + ``BuildExtension.build_extensions``); once the backport
+    succeeds the flag makes further calls an instant no-op. Best-effort: never
+    let it break a build.
     """
     global _stable_headers_patched
     if _stable_headers_patched:
@@ -254,9 +255,11 @@ def _ensure_stable_headers_patched() -> None:
         return
     try:
         _patch_torch_musa_stable_headers()
+        # Only mark done on success; an unexpected failure leaves the flag unset
+        # so a later build retries (the backport is idempotent).
+        _stable_headers_patched = True
     except Exception:  # noqa: BLE001  never let header patching break the build
         pass
-    _stable_headers_patched = True
 
 
 def _apply_musa_patches():
