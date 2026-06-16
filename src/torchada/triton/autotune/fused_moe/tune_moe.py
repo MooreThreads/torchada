@@ -645,12 +645,11 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
         sorted_batches = sorted(bs_to_config.keys())
         best_configs = {bs: sort_config(bs_to_config[bs]) for bs in sorted_batches}
 
-        config_dir = os.environ.get(
-            "SGLANG_MOE_CONFIG_DIR", os.path.dirname(os.path.realpath(__file__))
-        )
+        default_config_dir = os.path.dirname(os.path.realpath(__file__))
+        config_dir = os.environ.get("SGLANG_MOE_CONFIG_DIR", default_config_dir)
         triton_version = triton.__version__
         version_dir = f"triton_{triton_version.replace('.', '_')}"
-        config_dir = os.path.join(config_dir, "..", "..", "configs", version_dir)
+        config_dir = os.path.join(config_dir, "configs", version_dir)
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, filename)
         save_configs(best_configs, config_path)
