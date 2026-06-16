@@ -106,5 +106,11 @@
         "tp_size": [2, 4, 8, 2, 4, 8],
         "ep_size": [1, 1, 1, 2, 4, 8],
         "dtype": "bf16"
+    },
+    {
+        "model": "google/gemma-4-26B-A4B-it",
+        "tp_size": [1, 2, 4, 8],
+        "ep_size": [1, 1, 1, 1],
+        "dtype": "bf16"
     }
 ]
