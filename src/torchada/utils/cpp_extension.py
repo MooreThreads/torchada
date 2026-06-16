@@ -35,6 +35,12 @@ from .._platform import Platform, detect_platform, is_musa_platform
 # Flag to track if torch_musa patches have been applied
 _musa_patches_applied = False
 
+# Flag to track if the libtorch-stable header backport has been applied. Kept
+# separate from _musa_patches_applied so the (in-memory) import-time patches and
+# the (on-disk) header backport are triggered independently — see
+# _ensure_stable_headers_patched.
+_stable_headers_patched = False
+
 
 def _get_cuda_home() -> Optional[str]:
     """
@@ -145,6 +151,114 @@ def _patch_simple_porting_open(musa_sp):
     musa_sp.open = open_with_surrogateescape
 
 
+def _patch_torch_musa_stable_headers() -> None:
+    """Backport the libtorch-stable ``Tensor`` accessors that stable-ABI kernels
+    (as built by vLLM, SGLang, and other torch_musa-dependent projects) use but
+    torch_musa 2.9.0's older ``torch::stable`` snapshot omits: ``element_size`` /
+    ``mutable_data_ptr<T>`` / ``const_data_ptr<T>``, and mark ``tensor_inl.h``
+    method definitions ``inline`` (they are emitted in every TU that includes
+    them, which is a multiple-definition/ODR error otherwise).
+
+    Patches BOTH the ``torch/include`` copy and the torch_musa
+    ``generated_cuda_compatible/include`` copy. Idempotent + best-effort: a
+    read-only install, or a future torch_musa that already ships these, is a
+    no-op.
+
+    This writes into the ``torch`` / ``torch_musa`` site-packages headers, so it
+    is invoked lazily by ``_ensure_stable_headers_patched`` from the setuptools
+    extension build entry points (``_create_musa_extension`` and the
+    BuildExtension) rather than at ``import torchada`` — a bare import, or a
+    pure-inference run, never mutates those headers. (The JIT ``load`` /
+    ``load_inline`` helpers are intentionally excluded: torchada builds its own
+    cpp ops through them at import, which would re-introduce an import-time
+    write; libtorch-stable kernels are built via setuptools, not JIT-loaded.)
+    """
+    import re
+
+    try:
+        import torch
+    except ImportError:
+        return
+
+    roots = [os.path.join(os.path.dirname(torch.__file__), "include")]
+    try:
+        import torch_musa
+
+        roots.append(os.path.join(os.path.dirname(torch_musa.__file__),
+                                  "share", "generated_cuda_compatible", "include"))
+    except ImportError:
+        pass
+
+    # Injected as one block, anchored just before ``numel()``. ``mutable_data_ptr``
+    # is the sentinel: absent in stock torch_musa, present after we patch, so the
+    # presence check below makes re-runs a no-op.
+    anchor = "  int64_t numel() const {"
+    methods = (
+        "  template <typename T>\n"
+        "  T* mutable_data_ptr() const { return reinterpret_cast<T*>(data_ptr()); }\n"
+        "  template <typename T>\n"
+        "  const T* const_data_ptr() const {\n"
+        "    return reinterpret_cast<const T*>(data_ptr());\n"
+        "  }\n"
+        "  int64_t element_size() const {\n"
+        "    return static_cast<int64_t>(\n"
+        "        aoti_torch_dtype_element_size(static_cast<int32_t>(scalar_type())));\n"
+        "  }\n\n"
+    ) + anchor
+    # Only column-0 method definitions are matched; call sites inside bodies are
+    # indented and so never match, and the negative lookahead keeps already-inline
+    # / template / comment lines untouched, which makes the rewrite idempotent.
+    inl_pat = re.compile(
+        r"^(?!\s*(?:inline|template|//|\*))"
+        r"([A-Za-z_][\w:<>,\s\*&]*?\bTensor::[A-Za-z_]\w*\s*\()"
+    )
+    for root in roots:
+        ts = os.path.join(root, "torch", "csrc", "stable", "tensor_struct.h")
+        ti = os.path.join(root, "torch", "csrc", "stable", "tensor_inl.h")
+        try:
+            if os.path.exists(ts):
+                with open(ts, encoding="utf-8") as f:
+                    s = f.read()
+                if "mutable_data_ptr" not in s and anchor in s:
+                    with open(ts, "w", encoding="utf-8") as f:
+                        f.write(s.replace(anchor, methods, 1))
+            if os.path.exists(ti):
+                with open(ti, encoding="utf-8") as f:
+                    lines = f.read().splitlines(keepends=True)
+                changed = False
+                for i, line in enumerate(lines):
+                    if "inline" not in line and inl_pat.match(line):
+                        lines[i] = "inline " + line
+                        changed = True
+                if changed:
+                    with open(ti, "w", encoding="utf-8") as f:
+                        f.write("".join(lines))
+        except OSError:
+            pass  # read-only headers / no write perms — best effort
+
+
+def _ensure_stable_headers_patched() -> None:
+    """Apply the libtorch-stable header backport once, lazily, at build time.
+
+    Separated from ``_apply_musa_patches`` (which runs at ``import torchada``)
+    so a bare import — or a pure-inference run that never builds an extension —
+    does not write into the ``torch`` / ``torch_musa`` site-packages headers.
+    Called from the MUSA setuptools extension build entry points (extension
+    construction + ``BuildExtension.build_extensions``); the flag makes all calls
+    after the first an instant no-op. Best-effort: never let it break a build.
+    """
+    global _stable_headers_patched
+    if _stable_headers_patched:
+        return
+    if not is_musa_platform():
+        return
+    try:
+        _patch_torch_musa_stable_headers()
+    except Exception:  # noqa: BLE001  never let header patching break the build
+        pass
+    _stable_headers_patched = True
+
+
 def _apply_musa_patches():
     """
     Apply patches to torch_musa modules for CUDA compatibility.
@@ -185,6 +299,12 @@ def _apply_musa_patches():
         # Patch simple_porting.open to tolerate non-UTF-8 source files
         # This preserves SimplePorting's original logic while allowing undecodable bytes to round-trip
         _patch_simple_porting_open(musa_sp)
+
+        # NOTE: the libtorch-stable header backport is intentionally NOT applied
+        # here. It writes into the torch / torch_musa site-packages headers, so
+        # it is deferred to the build entry points via
+        # _ensure_stable_headers_patched() — a bare ``import torchada`` (e.g. for
+        # inference) must not mutate those headers.
 
         _musa_patches_applied = True
 
@@ -255,20 +375,28 @@ def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
     platform = detect_platform()
 
     if platform == Platform.MUSA:
+        paths: List[str] = []
         try:
             import torch_musa.utils.musa_extension as musa_ext
 
             if hasattr(musa_ext, "include_paths"):
                 # musa_ext uses musa=bool parameter, not cuda= or device_type=
-                return musa_ext.include_paths(musa=include_device)
+                paths = list(musa_ext.include_paths(musa=include_device))
         except ImportError:
             pass
 
-        # Fallback: construct paths manually
-        paths = []
-        musa_home = _get_cuda_home()
-        if musa_home:
-            paths.append(os.path.join(musa_home, "include"))
+        if not paths:
+            # Fallback: construct paths manually
+            musa_home = _get_cuda_home()
+            if musa_home:
+                paths.append(os.path.join(musa_home, "include"))
+
+        # Auto-append torchada's libtorch-stable ABI compat headers so
+        # libtorch-stable kernels (vLLM, SGLang, ...) resolve
+        # <torch/headeronly/core/Dispatch.h> on MUSA. Appended LAST so a future
+        # torch_musa shipping the real header wins.
+        if include_device:
+            paths.append(stable_compat_include_dir())
         return paths
 
     else:
@@ -287,6 +415,31 @@ def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
         else:
             # PyTorch < 2.6
             return torch_include_paths(cuda=include_device)
+
+
+def stable_compat_include_dir() -> str:
+    """Directory holding torchada's libtorch-stable ABI compat headers.
+
+    Add to an extension's ``include_dirs`` so libtorch-stable
+    ``csrc/libtorch_stable`` kernels (vLLM, SGLang, ...) build on torch_musa: it
+    shadows the (absent) ``torch/headeronly/core/Dispatch.h`` with a THO_DISPATCH
+    shim. Pair with ``stable_compat_box_header`` (force-include) to also get the
+    ``TORCH_BOX`` shim + ``CUDA_VERSION`` define.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "csrc",
+        "stable_compat",
+    )
+
+
+def stable_compat_box_header() -> str:
+    """Path to the force-include header providing ``TORCH_BOX`` for the stable ABI.
+
+    Pass via ``-include`` in extra_compile_args when building libtorch-stable
+    sources (mcc/g++ both accept ``-include <path>``).
+    """
+    return os.path.join(stable_compat_include_dir(), "torchada_stable_box.h")
 
 
 def library_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None) -> List[str]:
@@ -445,6 +598,9 @@ def _create_musa_extension(name: str, sources: List[str], *args, **kwargs):
     """
     # Ensure patches are applied
     _apply_musa_patches()
+    # Building a MUSA extension: apply the (on-disk) libtorch-stable header
+    # backport now so csrc/libtorch_stable/*.cu can compile.
+    _ensure_stable_headers_patched()
 
     # Translate 'nvcc' to 'mcc' in extra_compile_args
     kwargs = _translate_compile_args(kwargs)
@@ -533,6 +689,9 @@ def _get_build_extension_class():
                     return _MAPPING_RULE.copy()
 
                 def build_extensions(self):
+                    # Building now: apply the (on-disk) libtorch-stable header
+                    # backport before the compiler reads the torch headers.
+                    _ensure_stable_headers_patched()
                     # Register .cu, .cuh as valid source extensions
                     self.compiler.src_extensions += [".cu", ".cuh"]
                     super().build_extensions()
