@@ -86,16 +86,20 @@ def get_moe_configs(
 
     # We found that using the fused_moe_kernel config from Triton 3.1.0 with Triton 3.2.0 results in negative performance gains,
     # so we also include the Triton version as a key for finding the fused_moe_kernel config to achieve the best performance.
-    config_dir = os.environ.get(
-        "SGLANG_MOE_CONFIG_DIR", os.path.dirname(os.path.realpath(__file__))
+    default_config_dir = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        "..",
+        "..",
+        "autotune",
+        "fused_moe",
     )
+
+    config_dir = os.environ.get("SGLANG_MOE_CONFIG_DIR", default_config_dir)
 
     triton_version = triton.__version__
     version_dir = f"triton_{triton_version.replace('.', '_')}"
     config_file_path = os.path.join(
         config_dir,
-        "..",
-        "..",
         "configs",
         version_dir,
         json_file_name,
@@ -117,8 +121,6 @@ def get_moe_configs(
             continue
         try_config_file_path = os.path.join(
             config_dir,
-            "..",
-            "..",
             "configs",
             f"triton_{try_triton_version.replace('.', '_')}",
             json_file_name,
