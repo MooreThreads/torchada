@@ -312,6 +312,18 @@ _MAPPING_RULE = {
     "CUDAStreamGuard": "MUSAStreamGuard",
     "CUDAEvent": "MUSAEvent",
     # =========================================================================
+    # libtorch-stable / AOTI C-ABI shims. Projects that depend on torch_musa
+    # (e.g. vLLM and SGLang) are migrating their kernels to the PyTorch stable
+    # ABI (csrc/libtorch_stable). Those kernels call the aoti_torch_*_cuda_* C
+    # symbols, which torch_musa exposes under *_musa_*. The C++ getCurrent*Stream
+    # rules above do not match these C names.
+    # =========================================================================
+    "aoti_torch_get_current_cuda_stream": "aoti_torch_get_current_musa_stream",
+    # Stable-ABI impl blocks register under the LITERAL dispatch-key token (the
+    # stable C ABI does not translate CUDA->MUSA the way torch.library's Python
+    # path does). MUSA tensors are PrivateUse1, so re-key the stable impl block.
+    "STABLE_TORCH_LIBRARY_IMPL(_C, CUDA": "STABLE_TORCH_LIBRARY_IMPL(_C, PrivateUse1",
+    # =========================================================================
     # CUDA header includes
     # =========================================================================
     "cuda_runtime.h": "musa_runtime.h",
