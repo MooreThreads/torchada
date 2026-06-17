@@ -2062,23 +2062,54 @@ class TestTensorFactoryFunctions:
         x = torch.asarray([1, 2, 3], dtype=torch.float32)
         assert x.device.type == "cpu"
 
-    def test_factory_functions_not_wrapped(self):
-        """Factory functions stay original so torch.compile graphs cache.
-
-        Namespace wrappers put torchada functions into dynamo graphs, which
-        the AOT autograd cache rejects (vLLM "compiled artifact is not
-        serializable"). Translation must come from _FactoryDeviceMode only.
+    def test_factory_functions_wrapped_and_cacheable(self):
+        """Factory functions are device-translating wrappers AND registered in
+        ``torch._inductor.config.unsafe_marked_cacheable_functions`` so the AOT
+        autograd cache still accepts them; the end-to-end cache proof is
+        ``test_compiled_factory_graph_is_cacheable``.
         """
         import torch
 
-        for name in ("empty", "zeros", "asarray", "tensor", "full"):
+        names = ("empty", "zeros", "asarray", "tensor", "full")
+        for name in names:
             fn = getattr(torch, name)
-            assert not hasattr(fn, "__wrapped__"), f"torch.{name} is wrapped"
+            assert hasattr(fn, "__wrapped__"), f"torch.{name} is not a torchada wrapper"
+
+        try:
+            safelist = torch._inductor.config.unsafe_marked_cacheable_functions
+        except Exception:
+            safelist = None
+        if safelist is not None:
+            for name in names:
+                assert f"torch.{name}" in safelist, f"torch.{name} not registered cacheable"
+
+    def test_factory_set_discovered_at_runtime(self):
+        """Wrapping is driven by torch's device-constructor registry at runtime,
+        not a hand-kept list. A device constructor that is NOT in the minimal
+        static fallback (and is neither a ``*_like`` nor an extra), e.g.
+        ``sparse_coo_tensor``/``scalar_tensor``, must end up wrapped — which can
+        only happen if ``_device_constructors()`` was read at import.
+        """
+        import torch
+
+        from torchada._patch import _FALLBACK_FACTORY_FUNCTIONS
+
+        registry_only = [
+            n
+            for n in ("sparse_coo_tensor", "scalar_tensor", "vander", "logspace", "tril_indices")
+            if n not in _FALLBACK_FACTORY_FUNCTIONS and callable(getattr(torch, n, None))
+        ]
+        assert registry_only, "no known registry-only factory present on this torch build"
+        assert any(hasattr(getattr(torch, n), "__wrapped__") for n in registry_only), (
+            f"none of {registry_only} wrapped — discovery fell back to the static list "
+            "instead of reading torch._device_constructors()"
+        )
+        assert hasattr(torch.asarray, "__wrapped__")  # the common device= entry point
 
     @pytest.mark.gpu
     def test_asarray_cuda_in_thread(self):
-        """device='cuda' translation works on worker threads (mode is
-        thread-local; bootstrap patch must enter it per thread)."""
+        """device='cuda' translation works on worker threads: the factory
+        wrappers live in the torch namespace (process-global)."""
         import threading
 
         import torch
@@ -2097,20 +2128,6 @@ class TestTensorFactoryFunctions:
         t.start()
         t.join()
         assert result["x"].device.type == "musa"
-
-    @pytest.mark.gpu
-    def test_pin_memory_translates_cuda_device(self):
-        """Shielded tensor attrs still translate explicit device='cuda' args."""
-        import torch
-
-        import torchada
-
-        if not torchada.is_musa_platform():
-            pytest.skip("Only applicable on MUSA platform")
-
-        x = torch.randn(4)
-        pinned = x.pin_memory(device="cuda")
-        assert pinned.is_pinned(device="cuda")
 
     @pytest.mark.gpu
     def test_compiled_factory_graph_is_cacheable(self):

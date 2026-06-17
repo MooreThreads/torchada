@@ -29,7 +29,6 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, List, Optional
 
 import torch
-from torch.overrides import TorchFunctionMode
 
 from ._cpp_ops import get_module
 from ._platform import is_musa_platform
@@ -455,75 +454,98 @@ def _patch_graph_context_manager():
         torch.musa.graph = GraphWrapper
 
 
-class _FactoryDeviceMode(TorchFunctionMode):
-    """Translate ``device=`` kwargs (e.g. ``"cuda"`` -> ``"musa"``) for tensor
-    factory functions without replacing them in the ``torch`` namespace.
+def _wrap_factory_function(original_fn: Callable) -> Callable:
+    """Wrap a tensor factory (``empty``, ``zeros``, ...) so an explicit
+    ``device="cuda"`` argument is translated to ``"musa"`` on the MUSA platform.
 
-    Replacing the factories with Python wrappers breaks ``torch.compile``:
-    dynamo graphs then reference torchada wrappers instead of the original
-    builtins, so the AOT autograd cache (id-frozen on the originals) bypasses
-    every graph and vLLM-style fullgraph compiles fail their serializability
-    check. A TorchFunctionMode keeps ``torch.*`` identities intact and dynamo
-    inlines the kwarg translation, leaving compiled graphs cacheable.
+    Wrapping the factory in the ``torch`` namespace adds no per-op cost to
+    non-factory ops and is safe under CUDA-graph capture. ``torch.compile``'s
+    AOT autograd cache is keyed on the original ``torch.*`` builtins, so a
+    wrapper reached from a compiled graph would otherwise be rejected as not
+    serializable; ``_mark_factory_wrappers_cacheable`` re-registers the wrapped
+    names to keep compiled graphs cacheable.
     """
 
-    def __torch_function__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs or {}
-        device = kwargs.get("device")
-        if device is not None:
-            kwargs["device"] = _translate_device(device)
-        return func(*args, **kwargs)
+    @functools.wraps(original_fn)
+    def wrapped_fn(*args, **kwargs):
+        if "device" in kwargs:
+            kwargs["device"] = _translate_device(kwargs["device"])
+        return original_fn(*args, **kwargs)
+
+    return wrapped_fn
 
 
-def _shield_torch_musa_tensor_attrs() -> None:
-    """Exempt torch_musa-injected Tensor attrs from torch_function dispatch.
+# Minimal fallback used only if torch's private device-constructor registry is
+# unavailable; the live set is normally discovered at runtime (see below).
+_FALLBACK_FACTORY_FUNCTIONS = (
+    "tensor", "as_tensor", "asarray", "empty", "zeros", "ones", "full",
+    "rand", "randn", "randint", "arange", "linspace", "eye",
+    "empty_like", "zeros_like", "ones_like", "full_like",
+)
 
-    torch_musa's ``Tensor.musa`` C relay mis-populates the protocol args
-    (passes the module instead of self), so any active TorchFunctionMode
-    breaks it. The attrs never need device translation; bypass the protocol.
+# Factories that accept an explicit ``device=`` but that torch does NOT device-
+# inject into (so they are absent from ``_device_constructors()``); still wrapped
+# so e.g. ``torch.zeros_like(x, device="cuda")`` / ``torch.normal(..., device=)``
+# translate. The ``*_like`` family is derived by rule from the discovered base.
+_EXTRA_FACTORY_FUNCTIONS = ("from_file", "normal")
+
+
+def _discover_factory_functions() -> List[str]:
+    """Resolve, at runtime, the torch tensor-factory names whose ``device=``
+    kwarg we translate — instead of hand-maintaining a static list.
+
+    The base set comes from torch's own ``torch.utils._device._device_constructors()``
+    (exactly the functions ``torch.set_default_device`` injects ``device=`` into),
+    so it tracks the installed torch version automatically. That registry omits
+    the ``*_like`` family, ``from_file`` and ``normal`` (torch does not device-
+    inject into them) even though they take an explicit ``device=``; we add the
+    ``*_like`` variants by rule and the others from ``_EXTRA_FACTORY_FUNCTIONS``.
+    Entries not reachable as ``torch.<name>`` by identity (e.g. ``torch.fft.*``,
+    ``torch.nested.*``) are skipped — we only rebind top-level ``torch`` names.
+    Falls back to ``_FALLBACK_FACTORY_FUNCTIONS`` if the private registry is gone.
     """
-    for name in ("musa", "pin_memory", "is_pinned"):
-        attr = getattr(torch.Tensor, name, None)
-        if attr is None or getattr(attr, "_torchada_shielded", False):
-            continue
+    names = set()
+    try:
+        from torch.utils._device import _device_constructors
 
-        def make(orig):
-            @functools.wraps(orig)
-            def shielded(self, *args, **kwargs):
-                # Translation normally comes from _FactoryDeviceMode; keep it
-                # for explicit device arguments despite the disabled protocol.
-                if args and isinstance(args[0], (str, torch.device)):
-                    args = (_translate_device(args[0]),) + args[1:]
-                if "device" in kwargs:
-                    kwargs["device"] = _translate_device(kwargs["device"])
-                with torch._C.DisableTorchFunction():
-                    return orig(self, *args, **kwargs)
+        for fn in _device_constructors():
+            name = getattr(fn, "__name__", None)
+            if name and getattr(torch, name, None) is fn:
+                names.add(name)
+    except Exception:
+        pass
+    if not names:
+        names.update(_FALLBACK_FACTORY_FUNCTIONS)
+    # ``*_like`` variants accept device= but are not device-injected by torch.
+    names |= {n + "_like" for n in tuple(names) if callable(getattr(torch, n + "_like", None))}
+    for extra in _EXTRA_FACTORY_FUNCTIONS:
+        if callable(getattr(torch, extra, None)):
+            names.add(extra)
+    return sorted(names)
 
-            shielded._torchada_shielded = True
-            return shielded
+# Salt mixed into the AOT-autograd cache key for the wrapped factories; bump to
+# invalidate cached artifacts if the wrapping behavior changes.
+_AOT_CACHE_SALT = "torchada-factory-device-wrappers-v1"
 
-        setattr(torch.Tensor, name, make(attr))
 
+def _mark_factory_wrappers_cacheable(names: List[str]) -> None:
+    """Keep ``torch.compile`` AOT caching working with the factory wrappers.
 
-def _patch_thread_bootstrap_for_factory_mode() -> None:
-    """Enter ``_FactoryDeviceMode`` in every new Python thread.
-
-    TorchFunctionModes are thread-local; the old factory wrappers translated
-    in all threads, so keep that behavior for eager code on worker threads.
+    The AOT autograd cache safelist is keyed on the original ``torch.*``
+    builtins, so a wrapper reached from a compiled graph bypasses the cache and
+    fullgraph compiles raise "The compiled artifact is not serializable". torch
+    exposes ``unsafe_marked_cacheable_functions`` for exactly this; the dict
+    value is a salt mixed into the cache key. Each wrapped factory is registered
+    under its ``torch.<name>`` access path (the key the cache resolves, not the
+    wrapper ``__qualname__``). No-op on torch builds without the config (newer
+    torch safelists these natively, where ``setdefault`` keeps this harmless).
     """
-    import threading
-
-    original_bootstrap = threading.Thread._bootstrap_inner
-    if getattr(original_bootstrap, "_torchada_factory_mode", False):
+    try:
+        safelist = torch._inductor.config.unsafe_marked_cacheable_functions
+    except Exception:
         return
-
-    @functools.wraps(original_bootstrap)
-    def bootstrap_with_factory_mode(self):
-        with _FactoryDeviceMode():
-            return original_bootstrap(self)
-
-    bootstrap_with_factory_mode._torchada_factory_mode = True
-    threading.Thread._bootstrap_inner = bootstrap_with_factory_mode
+    for name in names:
+        safelist.setdefault(f"torch.{name}", _AOT_CACHE_SALT)
 
 
 class _CudartWrapper:
@@ -1821,13 +1843,36 @@ def apply_patches():
     if hasattr(torch.nn.Module, "cuda"):
         torch.nn.Module.cuda = _wrap_module_cuda(torch.nn.Module.cuda)
 
-    # Translate device kwargs of tensor factory functions via a
-    # TorchFunctionMode instead of namespace wrappers (issue #26 eager case,
-    # torch.compile cacheability). Entered for the importing thread here and
-    # for new threads via the bootstrap patch.
-    _shield_torch_musa_tensor_attrs()
-    _FactoryDeviceMode().__enter__()
-    _patch_thread_bootstrap_for_factory_mode()
+    # Translate the ``device=`` kwarg of tensor factory functions
+    # (``"cuda"`` -> ``"musa"``) so CUDA-authored code such as
+    # ``torch.asarray(..., device="cuda")`` runs on MUSA. The factory set is
+    # discovered at runtime from torch's own device-constructor registry (no
+    # hand-kept list). Namespace wrappers add no per-op cost to non-factory ops
+    # and are CUDA-graph-capture-safe; _mark_factory_wrappers_cacheable() below
+    # keeps torch.compile AOT caching working.
+    wrapped_names: List[str] = []
+    original_fns = []
+    for fn_name in _discover_factory_functions():
+        original_fn = getattr(torch, fn_name, None)
+        if original_fn is None or hasattr(original_fn, "__wrapped__"):
+            continue  # missing on this torch, or already wrapped
+        original_fns.append(original_fn)
+        setattr(torch, fn_name, _wrap_factory_function(original_fn))
+        wrapped_names.append(fn_name)
+
+    # PyTorch's __torch_function__ dispatch (e.g. the ``with torch.device(...):``
+    # context manager) receives the original C functions, so the
+    # device-constructor set must include the unwrapped originals.
+    try:
+        from torch.utils._device import _device_constructors
+
+        constructors = _device_constructors()
+        for orig_fn in original_fns:
+            constructors.add(orig_fn)
+    except (ImportError, AttributeError):
+        pass
+
+    _mark_factory_wrappers_cacheable(wrapped_names)
 
     _patched = True
 
