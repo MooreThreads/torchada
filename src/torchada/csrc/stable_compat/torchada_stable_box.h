@@ -75,8 +75,9 @@ mublasHandle_t getCurrentMUSABlasHandle();
 }
 }  // namespace at
 static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
-  *ret = reinterpret_cast<void*>(at::musa::getCurrentMUSABlasHandle());
-  return 0;  // success
+  auto handle = at::musa::getCurrentMUSABlasHandle();
+  *ret = reinterpret_cast<void*>(handle);
+  return handle ? 0 : 1;  // fail fast on a null handle instead of crashing in muBLAS
 }
 
 namespace torchada_stable {
