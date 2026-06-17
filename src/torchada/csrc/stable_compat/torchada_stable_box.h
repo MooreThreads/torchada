@@ -60,15 +60,24 @@ inline Tensor contiguous(const Tensor& self) {
 #define CUDA_VERSION 0
 #endif
 
-// Compile stub: torch_get_current_cuda_blas_handle has no MUSA stable-ABI
-// equivalent. Only cublas/GEMM kernels use it; torch_utils.h defines an unused
-// inline that references it, so a stub is enough to compile non-GEMM kernels.
-// It returns a non-zero error (not success) so that if a GEMM kernel actually
-// calls it, the AOTI error check at the call site fails fast instead of
-// proceeding with a null handle and crashing deep inside the BLAS call.
+// torch_get_current_cuda_blas_handle has no AOTI stable-ABI shim on torch_musa,
+// but torch_musa exposes the stream-bound current handle through its handle pool
+// (at::musa::getCurrentMUSABlasHandle). Forward-declare it (resolved at import
+// time from the already-loaded libtorch_musa) and return the muBLAS handle so the
+// gptq cuBLAS->muBLAS GEMM path works. mublasHandle_t per
+// /usr/local/musa/include/internal/mublas_types.h; the typedef is harmless if a
+// later <mublas.h> (via the cublas_v2.h->mublas.h mapping) repeats it.
+struct _mublasHandle_t;
+typedef struct _mublasHandle_t* mublasHandle_t;
+namespace at {
+namespace musa {
+mublasHandle_t getCurrentMUSABlasHandle();
+}
+}  // namespace at
 static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
-  *ret = nullptr;
-  return 1;  // failure: cuBLAS handle is unsupported on the MUSA stable ABI
+  auto handle = at::musa::getCurrentMUSABlasHandle();
+  *ret = reinterpret_cast<void*>(handle);
+  return handle ? 0 : 1;  // fail fast on a null handle instead of crashing in muBLAS
 }
 
 namespace torchada_stable {

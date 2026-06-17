@@ -1,0 +1,28 @@
+"""nccl CUDA->MUSA porting rules."""
+
+MAPPING = {
+    'nccl': 'mccl',
+    'NCCL': 'MCCL',
+    'ncclComm_t': 'mcclComm_t',
+    'ncclDataType_t': 'mcclDataType_t',
+    'ncclRedOp_t': 'mcclRedOp_t',
+    'ncclResult_t': 'mcclResult_t',
+    'ncclSuccess': 'mcclSuccess',
+    'ncclCommInitRank': 'mcclCommInitRank',
+    'ncclCommInitAll': 'mcclCommInitAll',
+    'ncclCommDestroy': 'mcclCommDestroy',
+    'ncclCommCount': 'mcclCommCount',
+    'ncclCommCuDevice': 'mcclCommCuDevice',
+    'ncclCommUserRank': 'mcclCommUserRank',
+    'ncclAllReduce': 'mcclAllReduce',
+    'ncclBroadcast': 'mcclBroadcast',
+    'ncclReduce': 'mcclReduce',
+    'ncclAllGather': 'mcclAllGather',
+    'ncclReduceScatter': 'mcclReduceScatter',
+    'ncclGroupStart': 'mcclGroupStart',
+    'ncclGroupEnd': 'mcclGroupEnd',
+    'ncclSend': 'mcclSend',
+    'ncclRecv': 'mcclRecv',
+    'ncclGetUniqueId': 'mcclGetUniqueId',
+    'ncclUniqueId': 'mcclUniqueId',
+}

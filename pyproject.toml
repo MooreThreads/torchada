@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchada"
-version = "0.1.65"
+version = "0.1.66"
 description = "Adapter package for torch_musa to act exactly like PyTorch CUDA"
 readme = "README.md"
 license = {text = "MIT"}
@@ -43,12 +43,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 torchada = [
-    "csrc/*.h",
-    "csrc/*.cpp",
-    "csrc/*.cu",
-    "csrc/*.mu",
-    "csrc/*.cuh",
-    "csrc/*.muh",
+    "csrc/**/*.h",
+    "csrc/**/*.hpp",
+    "csrc/**/*.cpp",
+    "csrc/**/*.cu",
+    "csrc/**/*.mu",
+    "csrc/**/*.cuh",
+    "csrc/**/*.muh",
     "_graph_rotation_src/*.cpp",
     "triton/autotune/fused_moe/configs/**/*.json",
 ]
