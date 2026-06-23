@@ -25,6 +25,14 @@ def calculate_shard_intermediate_size(
     return 2 * intermediate_size // moe_tp_size
 
 
+def get_num_shared_experts(config, disable_shared_experts_fusion: bool) -> int:
+    if disable_shared_experts_fusion:
+        return 0
+    if getattr(config, "shared_expert_intermediate_size", None) is not None:
+        return 1
+    return getattr(config, "n_shared_experts", 0) or getattr(config, "num_shared_experts", 0) or 0
+
+
 def get_model_config(
     model_name: str,
     tp_size: int,
@@ -68,8 +76,9 @@ def get_model_config(
         "Qwen3VLMoeForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
     ]:
-        E = config.num_experts // ep_size
-        topk = config.num_experts_per_tok
+        num_shared_experts = get_num_shared_experts(config, disable_shared_experts_fusion)
+        E = config.num_experts // ep_size + num_shared_experts
+        topk = config.num_experts_per_tok + num_shared_experts
         intermediate_size = config.moe_intermediate_size
     elif architecture in [
         "DeepseekV2ForCausalLM",
@@ -236,7 +245,7 @@ def get_config_filename(
         num_experts,
         N,
         dtype_str,
-        block_shape,
+        list(block_shape) if block_shape else block_shape,
         per_channel_quant,
     )
 

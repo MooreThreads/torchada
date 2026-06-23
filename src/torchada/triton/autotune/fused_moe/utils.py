@@ -1,8 +1,15 @@
 import json
+import os
 from typing import Dict, List, TypedDict
 
 import torch
 from transformers import AutoConfig
+
+# Register SGLang custom configs, e.g. qwen3_5_moe, when SGLang is available.
+try:
+    import sglang.srt.utils.hf_transformers_utils  # noqa: F401
+except ImportError:
+    pass
 
 from torchada.triton.runtime.fused_moe.config import get_config_dtype_str, get_config_file_name
 
@@ -25,6 +32,101 @@ def calculate_shard_intermediate_size(
     return 2 * intermediate_size // moe_tp_size
 
 
+def get_num_shared_experts(config, disable_shared_experts_fusion: bool) -> int:
+    if disable_shared_experts_fusion:
+        return 0
+    if getattr(config, "shared_expert_intermediate_size", None) is not None:
+        return 1
+    return getattr(config, "n_shared_experts", 0) or getattr(config, "num_shared_experts", 0) or 0
+
+
+def infer_quant_dtype_str(config) -> str:
+    quant_config = getattr(config, "quantization_config", None) or {}
+    if not quant_config:
+        return "auto"
+
+    quant_method = str(quant_config.get("quant_method", "")).lower()
+    if "fp8" in quant_method or quant_config.get("weight_block_size") is not None:
+        return "fp8_w8a8"
+
+    config_groups = quant_config.get("config_groups") or {}
+    first_group = next(iter(config_groups.values()), {})
+    weights_config = first_group.get("weights", {})
+    activations_config = (
+        first_group.get("input_activations") or first_group.get("activations") or {}
+    )
+    weight_bits = weights_config.get("num_bits")
+    activation_bits = activations_config.get("num_bits")
+    if weight_bits == 4:
+        return "int4_w4a16"
+    if weight_bits == 8 and activation_bits == 8:
+        return "int8_w8a8"
+    if weight_bits == 8:
+        return "int8_w8a16"
+
+    if "int4" in quant_method or "w4a16" in quant_method:
+        return "int4_w4a16"
+    if "int8" in quant_method or "w8a8" in quant_method:
+        return "int8_w8a8" if "w8a8" in quant_method else "int8_w8a16"
+
+    return "auto"
+
+
+def _load_config_from_modelscope(model_name: str):
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "ModelScope is required to fetch model configs when Hugging Face "
+            "AutoConfig cannot load the model."
+        ) from exc
+
+    cache_dir = (
+        os.environ.get("MODELSCOPE_CACHE")
+        or os.environ.get("MODELSCOPE_CACHE_DIR")
+        or os.environ.get("MODELSCOPE_CACHE_HOME")
+    )
+    snapshot_kwargs = {
+        "model_id": model_name,
+        "allow_file_pattern": [
+            "config.json",
+            "configuration.json",
+            "configuration*.py",
+            "generation_config.json",
+        ],
+        "ignore_file_pattern": [
+            "*.bin",
+            "*.safetensors",
+            "*.pt",
+            "*.pth",
+            "*.onnx",
+            "*.msgpack",
+            "*.gguf",
+        ],
+    }
+    if cache_dir:
+        snapshot_kwargs["cache_dir"] = cache_dir
+
+    local_path = snapshot_download(**snapshot_kwargs)
+    return AutoConfig.from_pretrained(local_path, trust_remote_code=True)
+
+
+def _load_model_config(model_name: str):
+    if os.path.exists(model_name):
+        return AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+
+    try:
+        return _load_config_from_modelscope(model_name)
+    except Exception:
+        try:
+            return AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        except Exception as hf_error:
+            raise RuntimeError(
+                f"Failed to load model config for {model_name!r} from both "
+                "Hugging Face and ModelScope."
+            ) from hf_error
+
+
 def get_model_config(
     model_name: str,
     tp_size: int,
@@ -32,9 +134,10 @@ def get_model_config(
     disable_shared_experts_fusion: bool = False,
     topk_ids_dir: str = None,
 ) -> Dict:
-    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    config = _load_model_config(model_name)
 
     architecture = config.architectures[0]
+    quant_dtype_str = infer_quant_dtype_str(config)
     block_shape = None
     if hasattr(config, "quantization_config") and "weight_block_size" in config.quantization_config:
         block_shape = config.quantization_config["weight_block_size"]
@@ -53,6 +156,7 @@ def get_model_config(
         config = config.get_text_config()
 
     hidden_size = config.hidden_size
+    num_fused_shared_experts = 0
     if architecture == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts // ep_size
         topk = config.ffn_config.moe_top_k
@@ -68,8 +172,9 @@ def get_model_config(
         "Qwen3VLMoeForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
     ]:
-        E = config.num_experts // ep_size
-        topk = config.num_experts_per_tok
+        num_fused_shared_experts = get_num_shared_experts(config, disable_shared_experts_fusion)
+        E = config.num_experts // ep_size + num_fused_shared_experts
+        topk = config.num_experts_per_tok + num_fused_shared_experts
         intermediate_size = config.moe_intermediate_size
     elif architecture in [
         "DeepseekV2ForCausalLM",
@@ -143,6 +248,8 @@ def get_model_config(
         "dtype": config.torch_dtype,
         "block_shape": block_shape,
         "architecture": architecture,
+        "num_fused_shared_experts": num_fused_shared_experts,
+        "quant_dtype_str": quant_dtype_str,
     }
 
 
@@ -236,7 +343,7 @@ def get_config_filename(
         num_experts,
         N,
         dtype_str,
-        block_shape,
+        list(block_shape) if block_shape else block_shape,
         per_channel_quant,
     )
 

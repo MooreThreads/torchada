@@ -41,6 +41,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _resolve_dtype_str(requested_dtype: str, params: Dict) -> str:
+    if requested_dtype != "auto":
+        return requested_dtype
+    quant_dtype_str = params.get("quant_dtype_str")
+    if quant_dtype_str and quant_dtype_str != "auto":
+        return quant_dtype_str
+    dtype = params.get("dtype")
+    if dtype is not None:
+        return str(dtype).replace("torch.", "")
+    return "auto"
+
+
+def _is_quant_dtype(dtype_str: str, quant_dtype: str) -> bool:
+    return dtype_str == quant_dtype
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -94,24 +110,25 @@ class ModelEntry:
     hidden_size: int = 0
     shard_intermediate_size: int = 0
     topk: int = 0
+    num_fused_shared_experts: int = 0
     dtype: torch.dtype = torch.float16
     block_shape: Optional[Tuple[int, int]] = None
 
     @property
     def use_fp8(self) -> bool:
-        return self.dtype_str == "fp8_w8a8"
+        return _is_quant_dtype(self.dtype_str, "fp8_w8a8")
 
     @property
     def use_int8(self) -> bool:
-        return self.dtype_str == "int8_w8a8"
+        return _is_quant_dtype(self.dtype_str, "int8_w8a8")
 
     @property
     def use_int8a16(self) -> bool:
-        return self.dtype_str == "int8_w8a16"
+        return _is_quant_dtype(self.dtype_str, "int8_w8a16")
 
     @property
     def use_int4(self) -> bool:
-        return self.dtype_str == "int4_w4a16"
+        return _is_quant_dtype(self.dtype_str, "int4_w4a16")
 
     @property
     def unique_key(self) -> Tuple:
@@ -120,6 +137,7 @@ class ModelEntry:
             self.hidden_size,
             self.shard_intermediate_size,
             self.topk,
+            self.num_fused_shared_experts,
             str(self.dtype),
             self.use_fp8,
             self.use_int8,
@@ -140,7 +158,8 @@ def validate_and_log_entries(entries: List[ModelEntry]) -> None:
 
     for i, e in enumerate(entries):
         logger.info(
-            "[%d] model=%s tp=%d ep=%d experts=%d hidden=%d intermediate=%d topk=%d dtype=%s block=%s",
+            "[%d] model=%s tp=%d ep=%d experts=%d hidden=%d "
+            "intermediate=%d topk=%d shared=%d dtype=%s block=%s",
             i,
             e.path,
             e.tp_size,
@@ -149,6 +168,7 @@ def validate_and_log_entries(entries: List[ModelEntry]) -> None:
             e.hidden_size,
             e.shard_intermediate_size,
             e.topk,
+            e.num_fused_shared_experts,
             e.dtype_str,
             e.block_shape,
         )
@@ -266,39 +286,81 @@ def benchmark_config(
     use_int4_w4a16: bool,
     per_channel_quant: bool,
     block_shape: List[int] = None,
+    num_fused_shared_experts: int = 0,
     num_iters: int = 100,
 ) -> float:
     """Run the fused MoE kernel and return latency in microseconds."""
-    torch.set_default_device("cuda")
+    device = "cuda"
+    torch.set_default_device(device)
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    num_routed_experts = num_experts - num_fused_shared_experts
+    assert num_routed_experts > 0
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
     # Create random weights based on quantization type
     if use_int8_w8a16 or use_int8_w8a8:
         w1 = torch.randint(
-            -127, 127, (num_experts, shard_intermediate_size, hidden_size), dtype=torch.int8
+            -127,
+            127,
+            (num_experts, shard_intermediate_size, hidden_size),
+            dtype=torch.int8,
+            device=device,
         )
         w2 = torch.randint(
-            -127, 127, (num_experts, hidden_size, shard_intermediate_size // 2), dtype=torch.int8
+            -127,
+            127,
+            (num_experts, hidden_size, shard_intermediate_size // 2),
+            dtype=torch.int8,
+            device=device,
         )
     elif use_int4_w4a16:
         w1 = torch.randint(
-            0, 255, (num_experts, shard_intermediate_size, hidden_size // 2), dtype=torch.uint8
+            0,
+            255,
+            (num_experts, shard_intermediate_size, hidden_size // 2),
+            dtype=torch.uint8,
+            device=device,
         )
         w2 = torch.randint(
-            0, 255, (num_experts, hidden_size, shard_intermediate_size // 4), dtype=torch.uint8
+            0,
+            255,
+            (num_experts, hidden_size, shard_intermediate_size // 4),
+            dtype=torch.uint8,
+            device=device,
         )
     else:
-        w1 = torch.randn(num_experts, shard_intermediate_size, hidden_size, dtype=init_dtype)
-        w2 = torch.randn(num_experts, hidden_size, shard_intermediate_size // 2, dtype=init_dtype)
+        w1 = torch.randn(
+            num_experts,
+            shard_intermediate_size,
+            hidden_size,
+            dtype=init_dtype,
+            device=device,
+        )
+        w2 = torch.randn(
+            num_experts,
+            hidden_size,
+            shard_intermediate_size // 2,
+            dtype=init_dtype,
+            device=device,
+        )
 
-    gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32)
+    gating_output = torch.randn(
+        num_iters,
+        num_tokens,
+        num_routed_experts,
+        dtype=torch.float32,
+        device=device,
+    )
 
     # Scales for quantized paths
     w1_scale = w2_scale = a1_scale = a2_scale = None
     if use_int8_w8a16:
-        w1_scale = torch.randn((num_experts, 2 * shard_intermediate_size), dtype=torch.float32)
-        w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32)
+        w1_scale = torch.randn(
+            (num_experts, 2 * shard_intermediate_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32, device=device)
     if use_int4_w4a16:
         block_n = 1 if (block_shape[0] == 0) else block_shape[0]
         block_k = block_shape[1]
@@ -306,32 +368,54 @@ def benchmark_config(
         n_tiles_w2 = (hidden_size + block_n - 1) // block_n
         k_tiles_w1 = (hidden_size + block_k - 1) // block_k
         k_tiles_w2 = (shard_intermediate_size // 2 + block_k - 1) // block_k
-        w1_scale = torch.randn((num_experts, n_tiles_w1, k_tiles_w1), dtype=torch.bfloat16)
-        w2_scale = torch.randn((num_experts, n_tiles_w2, k_tiles_w2), dtype=torch.bfloat16)
+        w1_scale = torch.randn(
+            (num_experts, n_tiles_w1, k_tiles_w1),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        w2_scale = torch.randn(
+            (num_experts, n_tiles_w2, k_tiles_w2),
+            dtype=torch.bfloat16,
+            device=device,
+        )
     if use_fp8_w8a8 or use_int8_w8a8:
         if use_int8_w8a8 and block_shape is None:
-            w1_scale = torch.randn(num_experts, shard_intermediate_size, dtype=torch.float32)
-            w2_scale = torch.randn(num_experts, hidden_size, dtype=torch.float32)
+            w1_scale = torch.randn(
+                num_experts, shard_intermediate_size, dtype=torch.float32, device=device
+            )
+            w2_scale = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
         elif block_shape is None:
-            w1_scale = torch.randn(num_experts, dtype=torch.float32)
-            w2_scale = torch.randn(num_experts, dtype=torch.float32)
-            a1_scale = torch.randn(1, dtype=torch.float32)
-            a2_scale = torch.randn(1, dtype=torch.float32)
+            w1_scale = torch.randn(num_experts, dtype=torch.float32, device=device)
+            w2_scale = torch.randn(num_experts, dtype=torch.float32, device=device)
+            a1_scale = torch.randn(1, dtype=torch.float32, device=device)
+            a2_scale = torch.randn(1, dtype=torch.float32, device=device)
         else:
             block_n, block_k = block_shape[0], block_shape[1]
             n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
             n_tiles_w2 = (hidden_size + block_n - 1) // block_n
             k_tiles_w1 = (hidden_size + block_k - 1) // block_k
             k_tiles_w2 = (shard_intermediate_size // 2 + block_k - 1) // block_k
-            w1_scale = torch.rand((num_experts, n_tiles_w1, k_tiles_w1), dtype=torch.float32)
-            w2_scale = torch.rand((num_experts, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
+            w1_scale = torch.rand(
+                (num_experts, n_tiles_w1, k_tiles_w1),
+                dtype=torch.float32,
+                device=device,
+            )
+            w2_scale = torch.rand(
+                (num_experts, n_tiles_w2, k_tiles_w2),
+                dtype=torch.float32,
+                device=device,
+            )
 
     if use_fp8_w8a8:
         w1 = w1.to(torch.float8_e4m3fn)
         w2 = w2.to(torch.float8_e4m3fn)
 
-    input_gating = torch.randn(num_tokens, num_experts, dtype=torch.float32)
-    topk_config = TopKConfig(top_k=topk, renormalize=True)
+    input_gating = torch.randn(num_tokens, num_routed_experts, dtype=torch.float32, device=device)
+    topk_config = TopKConfig(
+        top_k=topk,
+        renormalize=True,
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
     topk_output = select_experts(x, input_gating, topk_config)
 
     def prepare(i: int):
@@ -341,7 +425,15 @@ def benchmark_config(
         topk_output.router_logits.copy_(new_topk_output.router_logits)
 
     def run():
-        moe_runner_config = MoeRunnerConfig(inplace=True)
+        moe_runner_config = MoeRunnerConfig(
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=shard_intermediate_size,
+            top_k=topk,
+            num_fused_shared_experts=num_fused_shared_experts,
+            inplace=True,
+        )
         with override_config(config):
             fused_moe(
                 x,
@@ -381,7 +473,7 @@ def benchmark_config(
         torch.cuda.synchronize()
 
     # Flush L2 cache
-    cache_flush = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+    cache_flush = torch.empty(int(256e6 // 4), dtype=torch.int, device=device)
     cache_flush.zero_()
 
     # Timing loop
@@ -426,6 +518,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
             entry.hidden_size = params["hidden_size"]
             entry.shard_intermediate_size = params["shard_intermediate_size"]
             entry.topk = params["topk"]
+            entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
+            entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
             entry.dtype = params["dtype"]
             entry.block_shape = tuple(params["block_shape"]) if params["block_shape"] else None
             entries.append(entry)
@@ -479,6 +573,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
                     entry.hidden_size = params["hidden_size"]
                     entry.shard_intermediate_size = params["shard_intermediate_size"]
                     entry.topk = params["topk"]
+                    entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
+                    entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
                     entry.dtype = params["dtype"]
                     entry.block_shape = (
                         tuple(params["block_shape"]) if params["block_shape"] else None
@@ -531,6 +627,7 @@ def _tune_worker(
                     entry.use_int4,
                     entry.per_channel_quant,
                     list(entry.block_shape) if entry.block_shape else None,
+                    entry.num_fused_shared_experts,
                     num_iters=10,
                 )
             except (triton.runtime.autotuner.OutOfResources, RuntimeError, AssertionError):
@@ -725,6 +822,7 @@ def _benchmark_worker(
                 entry.use_int4,
                 entry.per_channel_quant,
                 list(entry.block_shape) if entry.block_shape else None,
+                entry.num_fused_shared_experts,
             )
             result_queue.put((entry, batch_size, kernel_time, None))
         except Exception as e:
@@ -823,7 +921,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tune or benchmark MoE kernels for CUDA.")
+    parser = argparse.ArgumentParser(description="Tune or benchmark MoE kernels.")
     parser.add_argument(
         "--config",
         type=str,

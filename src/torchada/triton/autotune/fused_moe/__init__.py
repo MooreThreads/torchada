@@ -3,11 +3,18 @@ import logging
 import os
 import re
 import shutil
+import sys
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _TRITON_DIR_PREFIX = "triton_"
+
+
+def _is_fused_moe_tuner() -> bool:
+    argv0 = os.path.realpath(sys.argv[0]) if sys.argv else ""
+    expected_suffix = os.path.join("autotune", "fused_moe", "tune_moe.py")
+    return argv0.endswith(expected_suffix)
 
 
 def _installed_triton_version() -> Optional[str]:

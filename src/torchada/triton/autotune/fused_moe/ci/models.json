@@ -43,39 +43,45 @@
     },
     {
         "model": "Qwen/Qwen3.5-35B-A3B",
-        "tp_size": [1, 2, 4, 8, 2, 4, 8],
-        "ep_size": [1, 1, 1, 1, 2, 4, 8],
-        "dtype": "auto"
+        "tp_size": [1, 8, 8],
+        "ep_size": [1, 1, 8],
+        "dtype": "auto",
+        "disable_shared_experts_fusion": false
     },
     {
         "model": "Qwen/Qwen3.5-35B-A3B-FP8",
-        "tp_size": [1, 2, 4, 2, 4],
-        "ep_size": [1, 1, 1, 2, 4],
-        "dtype": "fp8_w8a8"
-    },
-    {
-        "model": "Qwen/Qwen3.5-122B-A10B",
-        "tp_size": [8, 8],
-        "ep_size": [1, 8],
-        "dtype": "auto"
+        "tp_size": [1, 4, 4],
+        "ep_size": [1, 1, 4],
+        "dtype": "auto",
+        "disable_shared_experts_fusion": false
     },
     {
         "model": "Qwen/Qwen3.5-122B-A10B-FP8",
         "tp_size": [8, 8],
         "ep_size": [1, 8],
-        "dtype": "fp8_w8a8"
+        "dtype": "auto",
+        "disable_shared_experts_fusion": false
     },
     {
-        "model": "Qwen/Qwen3.5-397B-A17B",
+        "model": "Qwen/Qwen3.5-122B-A10B",
         "tp_size": [8, 8],
         "ep_size": [1, 8],
-        "dtype": "auto"
+        "dtype": "auto",
+        "disable_shared_experts_fusion": false
     },
     {
         "model": "Qwen/Qwen3.5-397B-A17B-FP8",
         "tp_size": [8, 8],
         "ep_size": [1, 8],
-        "dtype": "fp8_w8a8"
+        "dtype": "auto",
+        "disable_shared_experts_fusion": false
+    },
+    {
+        "model": "Qwen/Qwen3.5-397B-A17B",
+        "tp_size": [8, 8],
+        "ep_size": [1, 8],
+        "dtype": "auto",
+        "disable_shared_experts_fusion": false
     },
     {
         "model": "deepseek-ai/DeepSeek-R1-0528",
