@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -78,6 +78,38 @@ def fused_topk_native(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
+
+
+def append_shared_experts(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_routed_experts: int,
+    num_fused_shared_experts: int,
+    routed_scaling_factor: Optional[float] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if num_fused_shared_experts == 0:
+        return topk_weights, topk_ids
+
+    shared_ids = torch.arange(
+        num_routed_experts,
+        num_routed_experts + num_fused_shared_experts,
+        dtype=topk_ids.dtype,
+        device=topk_ids.device,
+    ).unsqueeze(0)
+    shared_ids = shared_ids.expand(topk_ids.shape[0], -1)
+
+    if routed_scaling_factor is not None:
+        shared_weights = topk_weights.sum(dim=-1, keepdim=True) / routed_scaling_factor
+    else:
+        shared_weights = topk_weights[:, :1]
+    shared_weights = shared_weights.expand(-1, num_fused_shared_experts)
+    if num_fused_shared_experts > 1:
+        shared_weights = shared_weights / num_fused_shared_experts
+
+    return (
+        torch.cat([topk_weights, shared_weights], dim=-1),
+        torch.cat([topk_ids, shared_ids], dim=-1),
+    )
 
 
 def grouped_topk(
@@ -414,6 +446,13 @@ def select_experts(
             renormalize=renormalize,
             correction_bias=correction_bias,
             scoring_func=scoring_func,
+        )
+        topk_weights, topk_ids = append_shared_experts(
+            topk_weights,
+            topk_ids,
+            router_logits.shape[-1],
+            num_fused_shared_experts,
+            routed_scaling_factor,
         )
 
     return StandardTopKOutput(topk_weights, topk_ids, router_logits)
