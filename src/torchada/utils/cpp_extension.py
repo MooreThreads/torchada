@@ -208,8 +208,9 @@ def _patch_torch_musa_stable_headers() -> None:
     # Only column-0 method definitions are matched; call sites inside bodies are
     # indented and so never match, and the negative lookahead keeps already-inline
     # / template / comment lines untouched, which makes the rewrite idempotent.
+    skipped_prefixes = "|".join(("inline", "template", "//", r"\*"))
     inl_pat = re.compile(
-        r"^(?!\s*(?:inline|template|//|\*))"
+        r"^(?!\s*(?:" + skipped_prefixes + r"))"
         r"([A-Za-z_][\w:<>,\s\*&]*?\bTensor::[A-Za-z_]\w*\s*\()"
     )
     for root in roots:

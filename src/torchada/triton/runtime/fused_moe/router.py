@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -86,7 +86,7 @@ def append_shared_experts(
     num_routed_experts: int,
     num_fused_shared_experts: int,
     routed_scaling_factor: Optional[float] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     if num_fused_shared_experts == 0:
         return topk_weights, topk_ids
 
