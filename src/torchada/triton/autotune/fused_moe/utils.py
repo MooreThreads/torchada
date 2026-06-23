@@ -35,9 +35,18 @@ def calculate_shard_intermediate_size(
 def get_num_shared_experts(config, disable_shared_experts_fusion: bool) -> int:
     if disable_shared_experts_fusion:
         return 0
-    if getattr(config, "shared_expert_intermediate_size", None) is not None:
-        return 1
-    return getattr(config, "n_shared_experts", 0) or getattr(config, "num_shared_experts", 0) or 0
+    explicit_num_shared_experts = getattr(config, "n_shared_experts", None)
+    if explicit_num_shared_experts is None:
+        explicit_num_shared_experts = getattr(config, "num_shared_experts", None)
+    if explicit_num_shared_experts is not None:
+        return max(int(explicit_num_shared_experts), 0)
+
+    shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", None)
+    if shared_expert_intermediate_size is not None:
+        # This field describes the hidden size of a Qwen-style single shared expert,
+        # not a count. Multiple shared experts need an explicit count field above.
+        return 1 if int(shared_expert_intermediate_size) > 0 else 0
+    return 0
 
 
 def infer_quant_dtype_str(config) -> str:

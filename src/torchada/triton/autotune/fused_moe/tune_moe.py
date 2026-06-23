@@ -50,7 +50,36 @@ def _resolve_dtype_str(requested_dtype: str, params: Dict) -> str:
     dtype = params.get("dtype")
     if dtype is not None:
         return str(dtype).replace("torch.", "")
-    return "auto"
+    raise ValueError(
+        "Unable to resolve dtype='auto'. Set dtype explicitly in the tune config "
+        "or provide model config dtype/quantization_config metadata."
+    )
+
+
+def _resolve_torch_dtype(dtype_str: str, params: Dict) -> torch.dtype:
+    dtype_aliases = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    dtype = params.get("dtype")
+    if dtype is not None:
+        if isinstance(dtype, str):
+            dtype = dtype.replace("torch.", "")
+            try:
+                return dtype_aliases[dtype]
+            except KeyError as exc:
+                raise ValueError(f"Unsupported model config dtype {dtype!r}") from exc
+        return dtype
+    if dtype_str in {"fp8_w8a8", "int8_w8a8", "int8_w8a16", "int4_w4a16"}:
+        return torch.bfloat16
+    try:
+        return dtype_aliases[dtype_str]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported dtype {dtype_str!r}") from exc
 
 
 def _is_quant_dtype(dtype_str: str, quant_dtype: str) -> bool:
@@ -520,7 +549,7 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
             entry.topk = params["topk"]
             entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
             entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
-            entry.dtype = params["dtype"]
+            entry.dtype = _resolve_torch_dtype(entry.dtype_str, params)
             entry.block_shape = tuple(params["block_shape"]) if params["block_shape"] else None
             entries.append(entry)
         except Exception as e:
@@ -575,7 +604,7 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
                     entry.topk = params["topk"]
                     entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
                     entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
-                    entry.dtype = params["dtype"]
+                    entry.dtype = _resolve_torch_dtype(entry.dtype_str, params)
                     entry.block_shape = (
                         tuple(params["block_shape"]) if params["block_shape"] else None
                     )

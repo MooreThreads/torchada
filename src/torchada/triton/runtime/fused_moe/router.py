@@ -103,6 +103,8 @@ def append_shared_experts(
     else:
         shared_weights = topk_weights[:, :1]
     shared_weights = shared_weights.expand(-1, num_fused_shared_experts)
+    if num_fused_shared_experts > 1:
+        shared_weights = shared_weights / num_fused_shared_experts
 
     return (
         torch.cat([topk_weights, shared_weights], dim=-1),
