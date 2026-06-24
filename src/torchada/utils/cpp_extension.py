@@ -194,6 +194,7 @@ def _patch_torch_musa_stable_headers() -> None:
     # presence check below makes re-runs a no-op.
     anchor = "  int64_t numel() const {"
     methods = (
+        "  void* mutable_data_ptr() const { return data_ptr(); }\n"
         "  template <typename T>\n"
         "  T* mutable_data_ptr() const { return reinterpret_cast<T*>(data_ptr()); }\n"
         "  template <typename T>\n"
@@ -203,7 +204,29 @@ def _patch_torch_musa_stable_headers() -> None:
         "  int64_t element_size() const {\n"
         "    return static_cast<int64_t>(\n"
         "        aoti_torch_dtype_element_size(static_cast<int32_t>(scalar_type())));\n"
-        "  }\n\n"
+        "  }\n"
+        # sizes/strides/device: torch 2.10 stable Tensor accessors newer vLLM/SGLang
+        # stable kernels use. Gated on TORCHADA_STABLE_ACCESSORS (defined by
+        # torchada_stable_box.h, which also defines torch::stable::Device) so a TU
+        # that does not force-include the box header is untouched.
+        "#ifdef TORCHADA_STABLE_ACCESSORS\n"
+        "  c10::IntArrayRef sizes() const {\n"
+        "    int64_t* p;\n"
+        "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_sizes(ath_.get(), &p));\n"
+        "    return c10::IntArrayRef(p, dim());\n"
+        "  }\n"
+        "  c10::IntArrayRef strides() const {\n"
+        "    int64_t* p;\n"
+        "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_strides(ath_.get(), &p));\n"
+        "    return c10::IntArrayRef(p, dim());\n"
+        "  }\n"
+        "  torch::stable::Device device() const {\n"
+        "    int32_t dt, di;\n"
+        "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_device_type(ath_.get(), &dt));\n"
+        "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_device_index(ath_.get(), &di));\n"
+        "    return torch::stable::Device{dt, di};\n"
+        "  }\n"
+        "#endif\n\n"
     ) + anchor
     # Only column-0 method definitions are matched; call sites inside bodies are
     # indented and so never match, and the negative lookahead keeps already-inline

@@ -10,6 +10,31 @@
 // std traits over those — no dependency on the newer boxer machinery.
 //
 // Force-include this header (mcc -include) when building libtorch_stable sources.
+
+// torch_musa 2.9's torch::stable predates torch 2.10's Tensor::{sizes,strides,
+// device}() and torch::stable::{empty,from_blob} that newer vLLM/SGLang stable
+// kernels call. Define the stable Device here -- BEFORE <tensor.h> -- so the
+// torchada-patched tensor_struct.h accessors (gated on TORCHADA_STABLE_ACCESSORS)
+// can reference it; empty/from_blob are defined after <tensor.h> below.
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <c10/util/ArrayRef.h>
+#include <optional>
+#include <vector>
+namespace torch {
+namespace stable {
+struct Device {
+  int32_t type_;
+  int32_t index_;
+  bool is_privateuseone() const {
+    return type_ == aoti_torch_device_type_privateuse1();
+  }
+  bool is_cuda() const { return type_ == aoti_torch_device_type_cuda(); }
+  int32_t type() const { return type_; }
+  int32_t index() const { return index_; }
+};
+}  // namespace stable
+}  // namespace torch
+#define TORCHADA_STABLE_ACCESSORS 1
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/stableivalue_conversions.h>
 #include <torch/csrc/stable/tensor.h>
@@ -49,6 +74,32 @@ inline Tensor contiguous(const Tensor& self) {
   TORCH_ERROR_CODE_CHECK(
       aoti_torch_call_dispatcher("aten::contiguous", "", stack.data()));
   return to<Tensor>(stack[0]);
+}
+
+// torch 2.10 factory functions, backported onto torch_musa's AOTI C-shim.
+inline Tensor empty(c10::IntArrayRef size, ScalarType dtype,
+                    std::optional<int64_t> /*pin_memory, unused*/, Device device) {
+  std::vector<int64_t> strides(size.size());
+  int64_t acc = 1;
+  for (int64_t i = static_cast<int64_t>(size.size()) - 1; i >= 0; --i) {
+    strides[i] = acc;
+    acc *= size[i];
+  }
+  AtenTensorHandle h;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided(
+      static_cast<int64_t>(size.size()), size.data(), strides.data(),
+      static_cast<int32_t>(dtype), device.type_, device.index_, &h));
+  return Tensor(h);
+}
+inline Tensor from_blob(void* data, c10::IntArrayRef sizes,
+                        c10::IntArrayRef strides, Device device,
+                        ScalarType dtype) {
+  AtenTensorHandle h;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_create_tensor_from_blob(
+      data, static_cast<int64_t>(sizes.size()), sizes.data(), strides.data(),
+      /*storage_offset=*/0, static_cast<int32_t>(dtype), device.type_,
+      device.index_, &h));
+  return Tensor(h);
 }
 }  // namespace stable
 }  // namespace torch
