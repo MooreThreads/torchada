@@ -159,6 +159,24 @@ struct fn_traits<R (*)(A...)> {
   using args = std::tuple<strip_t<A>...>;
 };
 
+// A multi-value (tuple/pair) return occupies one stack slot per element in the
+// stable ABI; torch_musa's from()/to() only convert single <=64-bit values, so
+// the boxer spreads a tuple return across consecutive slots itself rather than
+// calling from() on the whole aggregate (which would trip the 64-bit
+// static_assert).
+template <class T>
+struct is_tuple_like : std::false_type {};
+template <class... Ts>
+struct is_tuple_like<std::tuple<Ts...>> : std::true_type {};
+template <class A, class B>
+struct is_tuple_like<std::pair<A, B>> : std::true_type {};
+
+template <class Ret, std::size_t... J>
+inline void store_return(StableIValue* stack, Ret&& ret,
+                         std::index_sequence<J...>) {
+  ((stack[J] = from(std::get<J>(std::forward<Ret>(ret)))), ...);
+}
+
 template <auto Fn, class Tup, std::size_t... I>
 inline void invoke_boxed(StableIValue* stack, std::index_sequence<I...>) {
   // Materialize args as lvalues so they bind to Tensor& parameters.
@@ -166,6 +184,9 @@ inline void invoke_boxed(StableIValue* stack, std::index_sequence<I...>) {
   using R = typename fn_traits<decltype(Fn)>::ret;
   if constexpr (std::is_void_v<R>) {
     std::apply(Fn, args);
+  } else if constexpr (is_tuple_like<strip_t<R>>::value) {
+    store_return(stack, std::apply(Fn, args),
+                 std::make_index_sequence<std::tuple_size_v<strip_t<R>>>());
   } else {
     stack[0] = from(std::apply(Fn, args));
   }
