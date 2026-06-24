@@ -44,16 +44,11 @@ using IntHeaderOnlyArrayRef = c10::ArrayRef<int64_t>;
 
 // STD_TORCH_CHECK error messages in some libtorch-stable kernels (e.g.
 // selective_scan_fwd's dispatch default case) stream a c10::ScalarType into the
-// ostringstream, but torch_musa's headeronly snapshot ships no
-// operator<<(ostream&, ScalarType). Provide one so those checks compile; it
-// prints the underlying enum value (sufficient for an error message).
-#include <ostream>
+// ostringstream. The operator<<(ostream&, ScalarType) lives in
+// <c10/core/ScalarType.h>, which those TUs do not transitively include (they
+// get ScalarType from a lighter header). Pull it in here -- the box header is
+// force-included in every stable TU -- so the streaming operator is in scope.
 #include <c10/core/ScalarType.h>
-namespace c10 {
-inline std::ostream& operator<<(std::ostream& os, ScalarType t) {
-  return os << "ScalarType(" << static_cast<int>(t) << ")";
-}
-}  // namespace c10
 
 // torch_musa's stable ops.h predates torch::stable::contiguous (used by
 // libtorch_stable/layernorm_kernels.cu when input.stride(-1) != 1). Provide it
