@@ -37,18 +37,21 @@ inline const char* toString(torch::headeronly::ScalarType t) {
 #define THO_DISPATCH_CASE_TMPL(CASE_TYPE_USING_HINT, enum_type, ...) \
   CASE_TYPE_USING_HINT(enum_type, scalar_t, __VA_ARGS__)
 
-namespace detail {
+// Own namespace: torch_musa's ATen/Dispatch.h already defines ::detail::scalar_type
+// for the same type (torch::headeronly::ScalarType aliases at::ScalarType), so a
+// global ::detail one would be a redefinition when both headers land in one TU.
+namespace torchada_detail {
 inline torch::headeronly::ScalarType scalar_type(torch::headeronly::ScalarType s) {
   return s;
 }
-}  // namespace detail
+}  // namespace torchada_detail
 
 #define THO_DISPATCH_SWITCH_TMPL(                                          \
     PRELUDE, CHECK_NOT_IMPLEMENTED, TYPE, NAME, ...)                       \
   [&] {                                                                    \
     const auto& the_type = TYPE;                                          \
     constexpr const char* at_dispatch_name = NAME;                        \
-    torch::headeronly::ScalarType _st = ::detail::scalar_type(the_type);  \
+    torch::headeronly::ScalarType _st = ::torchada_detail::scalar_type(the_type);  \
     PRELUDE(at_dispatch_name, _st);                                       \
     C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wswitch-enum")           \
     switch (_st) {                                                        \
