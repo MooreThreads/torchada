@@ -119,6 +119,13 @@ inline Tensor from_blob(void* data, c10::IntArrayRef sizes,
   } while (0)
 #endif
 
+// Kernel-launch error check used by some libtorch-stable kernels after a <<<>>>
+// launch (e.g. selective_scan). Checks the last runtime error via the same
+// STD_CUDA_CHECK path.
+#ifndef STD_CUDA_KERNEL_LAUNCH_CHECK
+#define STD_CUDA_KERNEL_LAUNCH_CHECK() STD_CUDA_CHECK(musaGetLastError())
+#endif
+
 // torch_get_current_cuda_blas_handle has no AOTI stable-ABI shim on torch_musa,
 // but torch_musa exposes the stream-bound current handle through its handle pool
 // (at::musa::getCurrentMUSABlasHandle). Forward-declare it (resolved at import

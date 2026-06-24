@@ -20,6 +20,10 @@ enum class DeviceType : int8_t {
 struct Device {
   int32_t type_;
   int32_t index_;
+  Device() = default;
+  Device(int32_t type, int32_t index = 0) : type_(type), index_(index) {}
+  Device(DeviceType t, int32_t index = 0)
+      : type_(static_cast<int32_t>(t)), index_(index) {}
   bool is_privateuseone() const {
     return type_ == aoti_torch_device_type_privateuse1();
   }
