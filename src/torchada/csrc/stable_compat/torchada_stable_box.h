@@ -107,6 +107,18 @@ inline Tensor from_blob(void* data, c10::IntArrayRef sizes,
 #define CUDA_VERSION 0
 #endif
 
+// Stable-ABI runtime-error check used by some libtorch-stable kernels (e.g.
+// minimax_reduce_rms_kernel). The ported kernel calls musa* runtime APIs that
+// return a musaError_t (0 == success); wrap them in STD_TORCH_CHECK.
+#ifndef STD_CUDA_CHECK
+#define STD_CUDA_CHECK(EXPR)                                              \
+  do {                                                                   \
+    auto _musa_err = (EXPR);                                             \
+    STD_TORCH_CHECK(_musa_err == 0, "MUSA runtime error: ",             \
+                    static_cast<int64_t>(_musa_err));                    \
+  } while (0)
+#endif
+
 // torch_get_current_cuda_blas_handle has no AOTI stable-ABI shim on torch_musa,
 // but torch_musa exposes the stream-bound current handle through its handle pool
 // (at::musa::getCurrentMUSABlasHandle). Forward-declare it (resolved at import
