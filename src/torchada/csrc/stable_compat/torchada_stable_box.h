@@ -20,20 +20,7 @@
 #include <c10/util/ArrayRef.h>
 #include <optional>
 #include <vector>
-namespace torch {
-namespace stable {
-struct Device {
-  int32_t type_;
-  int32_t index_;
-  bool is_privateuseone() const {
-    return type_ == aoti_torch_device_type_privateuse1();
-  }
-  bool is_cuda() const { return type_ == aoti_torch_device_type_cuda(); }
-  int32_t type() const { return type_; }
-  int32_t index() const { return index_; }
-};
-}  // namespace stable
-}  // namespace torch
+#include <torch/csrc/stable/device.h>
 #define TORCHADA_STABLE_ACCESSORS 1
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/stableivalue_conversions.h>
@@ -73,6 +60,15 @@ inline Tensor contiguous(const Tensor& self) {
   std::array<StableIValue, 2> stack{from(self), from(static_cast<int64_t>(0))};
   TORCH_ERROR_CODE_CHECK(
       aoti_torch_call_dispatcher("aten::contiguous", "", stack.data()));
+  return to<Tensor>(stack[0]);
+}
+
+// aten::flatten.using_ints(Tensor self, int start_dim, int end_dim) -> Tensor
+inline Tensor flatten(const Tensor& self, int64_t start_dim, int64_t end_dim) {
+  std::array<StableIValue, 3> stack{
+      from(self), from(start_dim), from(end_dim)};
+  TORCH_ERROR_CODE_CHECK(
+      aoti_torch_call_dispatcher("aten::flatten", "using_ints", stack.data()));
   return to<Tensor>(stack[0]);
 }
 
