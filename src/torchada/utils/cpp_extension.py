@@ -195,6 +195,7 @@ def _patch_torch_musa_stable_headers() -> None:
     anchor = "  int64_t numel() const {"
     methods = (
         "  void* mutable_data_ptr() const { return data_ptr(); }\n"
+        "  const void* const_data_ptr() const { return data_ptr(); }\n"
         "  template <typename T>\n"
         "  T* mutable_data_ptr() const { return reinterpret_cast<T*>(data_ptr()); }\n"
         "  template <typename T>\n"
