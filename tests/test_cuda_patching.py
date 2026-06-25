@@ -2591,8 +2591,12 @@ class TestFlashAttnPatching:
         """Newer sglang FA3 callers forward an ``only_qv`` keyword down into the
         sgl_kernel.flash_attn kernels. The MUSA flash_attn_interface doesn't
         implement that parameter, so _patch_flash_attn must wrap those entry
-        points to silently drop the argument before delegating -- while leaving
-        an implementation that natively supports it untouched.
+        points to silently drop the argument before delegating.
+
+        The wrap must be conservative: it only strips ``only_qv`` from callables
+        that provably ignore it. Implementations that declare ``only_qv``, accept
+        ``**kwargs`` (which may forward it onward), or aren't introspectable are
+        left untouched so a meaningful argument is never silently dropped.
 
         Uses fully synthetic modules so it runs on any platform.
         """
@@ -2620,9 +2624,20 @@ class TestFlashAttnPatching:
                 calls["kvcache_only_qv"] = only_qv
                 return "kvcache-ok"
 
+            def flash_attn_kwargs_func(q, **kwargs):
+                # Accepts only_qv via **kwargs -> may forward it -> leave alone.
+                calls["kwargs_only_qv"] = kwargs.get("only_qv")
+                return "kwargs-ok"
+
             fake_fai.flash_attn_varlen_func = flash_attn_varlen_func
             fake_fai.flash_attn_with_kvcache = flash_attn_with_kvcache
+            fake_fai.flash_attn_kwargs_func = flash_attn_kwargs_func
+            # A non-introspectable C callable (inspect.signature raises) -> must
+            # be left alone rather than guessed at.
+            fake_fai.flash_attn_builtin = iter
             native_kvcache = fake_fai.flash_attn_with_kvcache
+            native_kwargs = fake_fai.flash_attn_kwargs_func
+            native_builtin = fake_fai.flash_attn_builtin
             sys.modules["flash_attn_interface"] = fake_fai
 
             # Pre-seed a stub sgl_kernel package so the patch doesn't import a
@@ -2652,6 +2667,16 @@ class TestFlashAttnPatching:
             assert fake_fai.flash_attn_with_kvcache is native_kvcache
             assert fake_fai.flash_attn_with_kvcache(0, only_qv=True) == "kvcache-ok"
             assert calls["kvcache_only_qv"] is True
+
+            # **kwargs callable may forward only_qv -> not wrapped, still
+            # receives the argument.
+            assert fake_fai.flash_attn_kwargs_func is native_kwargs
+            assert fake_fai.flash_attn_kwargs_func(0, only_qv=True) == "kwargs-ok"
+            assert calls["kwargs_only_qv"] is True
+
+            # Non-introspectable callable -> left untouched rather than risk
+            # dropping an argument it may consume.
+            assert fake_fai.flash_attn_builtin is native_builtin
 
             # Idempotent: re-running the patch does not double-wrap.
             wrapped = fake_fai.flash_attn_varlen_func

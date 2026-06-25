@@ -1370,8 +1370,9 @@ def _patch_flash_attn():
     # not implement that parameter yet and would otherwise raise
     # ``TypeError: ... got an unexpected keyword argument 'only_qv'``. Wrap the
     # flash attention functions so the argument is dropped before delegating,
-    # but only when the underlying implementation doesn't already accept it, so
-    # a future native implementation is passed through untouched. Mutating the
+    # but only for implementations we can prove ignore it (see
+    # ``_accepts_only_qv``), so a future native implementation -- or one that
+    # forwards the argument -- is passed through untouched. Mutating the
     # functions on the module in place keeps ``sgl_kernel.flash_attn`` and
     # ``flash_attn_interface`` pointing at the same (wrapped) callables.
     _ignore_only_qv_param = "_torchada_ignores_only_qv"
@@ -1384,6 +1385,20 @@ def _patch_flash_attn():
 
         setattr(wrapper, _ignore_only_qv_param, True)
         return wrapper
+
+    def _accepts_only_qv(func: Callable) -> bool:
+        # Be conservative so a meaningful ``only_qv`` is never silently dropped:
+        # report False (i.e. safe to strip) only when the signature is
+        # introspectable AND declares no ``only_qv`` parameter AND accepts no
+        # arbitrary ``**kwargs`` (which could forward ``only_qv`` onward).
+        # Anything we can't prove ignores the argument is left untouched.
+        try:
+            params = inspect.signature(func).parameters
+        except (ValueError, TypeError):
+            return True
+        if "only_qv" in params:
+            return True
+        return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
     # Harden every public flash attention entry point the module advertises,
     # plus a few well-known names in case the package exposes them lazily via a
@@ -1403,7 +1418,7 @@ def _patch_flash_attn():
         _func = getattr(flash_attn_interface, _name, None)
         if _func is None or inspect.isclass(_func) or not callable(_func):
             continue
-        if getattr(_func, _ignore_only_qv_param, False) or _has_param(_func, "only_qv"):
+        if getattr(_func, _ignore_only_qv_param, False) or _accepts_only_qv(_func):
             continue
         setattr(flash_attn_interface, _name, _drop_only_qv(_func))
 
