@@ -478,9 +478,23 @@ def _wrap_factory_function(original_fn: Callable) -> Callable:
 # Minimal fallback used only if torch's private device-constructor registry is
 # unavailable; the live set is normally discovered at runtime (see below).
 _FALLBACK_FACTORY_FUNCTIONS = (
-    "tensor", "as_tensor", "asarray", "empty", "zeros", "ones", "full",
-    "rand", "randn", "randint", "arange", "linspace", "eye",
-    "empty_like", "zeros_like", "ones_like", "full_like",
+    "tensor",
+    "as_tensor",
+    "asarray",
+    "empty",
+    "zeros",
+    "ones",
+    "full",
+    "rand",
+    "randn",
+    "randint",
+    "arange",
+    "linspace",
+    "eye",
+    "empty_like",
+    "zeros_like",
+    "ones_like",
+    "full_like",
 )
 
 # Factories that accept an explicit ``device=`` but that torch does NOT device-
@@ -522,6 +536,7 @@ def _discover_factory_functions() -> List[str]:
         if callable(getattr(torch, extra, None)):
             names.add(extra)
     return sorted(names)
+
 
 # Salt mixed into the AOT-autograd cache key for the wrapped factories; bump to
 # invalidate cached artifacts if the wrapping behavior changes.
@@ -1349,6 +1364,48 @@ def _patch_flash_attn():
     sgl_kernel = sys.modules["sgl_kernel"]
     sgl_kernel.flash_attn = flash_attn_interface
     sys.modules["sgl_kernel.flash_attn"] = flash_attn_interface
+
+    # Newer callers (e.g. sglang's FA3 path) pass an ``only_qv`` argument to the
+    # flash attention entry points. The MUSA flash_attn_interface package does
+    # not implement that parameter yet and would otherwise raise
+    # ``TypeError: ... got an unexpected keyword argument 'only_qv'``. Wrap the
+    # flash attention functions so the argument is dropped before delegating,
+    # but only when the underlying implementation doesn't already accept it, so
+    # a future native implementation is passed through untouched. Mutating the
+    # functions on the module in place keeps ``sgl_kernel.flash_attn`` and
+    # ``flash_attn_interface`` pointing at the same (wrapped) callables.
+    _ignore_only_qv_param = "_torchada_ignores_only_qv"
+
+    def _drop_only_qv(original: Callable) -> Callable:
+        @functools.wraps(original)
+        def wrapper(*args, **kwargs):
+            kwargs.pop("only_qv", None)
+            return original(*args, **kwargs)
+
+        setattr(wrapper, _ignore_only_qv_param, True)
+        return wrapper
+
+    # Harden every public flash attention entry point the module advertises,
+    # plus a few well-known names in case the package exposes them lazily via a
+    # module-level ``__getattr__`` (PEP 562), which would keep them out of
+    # ``dir()``. flash_attn_varlen_func and flash_attn_with_kvcache are the ones
+    # sglang's FA3 path forwards ``only_qv`` into.
+    candidate_names = {n for n in dir(flash_attn_interface) if n.startswith("flash_attn")}
+    candidate_names.update(
+        (
+            "flash_attn_func",
+            "flash_attn_varlen_func",
+            "flash_attn_with_kvcache",
+        )
+    )
+
+    for _name in sorted(candidate_names):
+        _func = getattr(flash_attn_interface, _name, None)
+        if _func is None or inspect.isclass(_func) or not callable(_func):
+            continue
+        if getattr(_func, _ignore_only_qv_param, False) or _has_param(_func, "only_qv"):
+            continue
+        setattr(flash_attn_interface, _name, _drop_only_qv(_func))
 
 
 class _CDLLWrapper:

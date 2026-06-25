@@ -2587,6 +2587,83 @@ class TestFlashAttnPatching:
             assert hasattr(sgl_flash_attn, func_name), f"Missing {func_name}"
             assert callable(getattr(sgl_flash_attn, func_name)), f"{func_name} not callable"
 
+    def test_only_qv_argument_is_dropped(self):
+        """Newer sglang FA3 callers forward an ``only_qv`` keyword down into the
+        sgl_kernel.flash_attn kernels. The MUSA flash_attn_interface doesn't
+        implement that parameter, so _patch_flash_attn must wrap those entry
+        points to silently drop the argument before delegating -- while leaving
+        an implementation that natively supports it untouched.
+
+        Uses fully synthetic modules so it runs on any platform.
+        """
+        import sys
+        from types import ModuleType
+
+        from torchada._patch import _patch_flash_attn
+
+        # Save and shadow any real modules we are about to replace.
+        shadowed = ("flash_attn_interface", "sgl_kernel", "sgl_kernel.flash_attn")
+        saved = {name: sys.modules.pop(name, None) for name in shadowed}
+
+        try:
+            calls = {}
+
+            fake_fai = ModuleType("flash_attn_interface")
+
+            def flash_attn_varlen_func(q, k, v, causal=False):
+                # No ``only_qv`` parameter -> must be wrapped to drop it.
+                calls["varlen"] = dict(q=q, k=k, v=v, causal=causal)
+                return "varlen-ok"
+
+            def flash_attn_with_kvcache(q, only_qv=False):
+                # Already accepts ``only_qv`` -> must be left untouched.
+                calls["kvcache_only_qv"] = only_qv
+                return "kvcache-ok"
+
+            fake_fai.flash_attn_varlen_func = flash_attn_varlen_func
+            fake_fai.flash_attn_with_kvcache = flash_attn_with_kvcache
+            native_kvcache = fake_fai.flash_attn_with_kvcache
+            sys.modules["flash_attn_interface"] = fake_fai
+
+            # Pre-seed a stub sgl_kernel package so the patch doesn't import a
+            # real one (which may require CUDA/MUSA).
+            fake_sgl = ModuleType("sgl_kernel")
+            fake_sgl.__path__ = []
+            fake_sgl.__package__ = "sgl_kernel"
+            sys.modules["sgl_kernel"] = fake_sgl
+
+            _patch_flash_attn()
+
+            # varlen kernel had no only_qv -> wrapped, argument dropped, the
+            # rest of the call forwarded unchanged.
+            assert (
+                fake_fai.flash_attn_varlen_func(1, 2, 3, causal=True, only_qv=True) == "varlen-ok"
+            )
+            assert calls["varlen"] == {"q": 1, "k": 2, "v": 3, "causal": True}
+
+            # Identity preserved: a fresh import resolves to the same wrapped
+            # object (sgl_kernel.flash_attn IS flash_attn_interface).
+            from sgl_kernel.flash_attn import flash_attn_varlen_func as imported
+
+            assert imported is fake_fai.flash_attn_varlen_func
+
+            # kvcache kernel natively supports only_qv -> not wrapped, still
+            # receives the argument.
+            assert fake_fai.flash_attn_with_kvcache is native_kvcache
+            assert fake_fai.flash_attn_with_kvcache(0, only_qv=True) == "kvcache-ok"
+            assert calls["kvcache_only_qv"] is True
+
+            # Idempotent: re-running the patch does not double-wrap.
+            wrapped = fake_fai.flash_attn_varlen_func
+            _patch_flash_attn()
+            assert fake_fai.flash_attn_varlen_func is wrapped
+        finally:
+            for name in shadowed:
+                sys.modules.pop(name, None)
+            for name, mod in saved.items():
+                if mod is not None:
+                    sys.modules[name] = mod
+
 
 class TestAcceleratorModuleWrapper:
     """Test the _AcceleratorModuleWrapper priority / fallback logic in isolation.
