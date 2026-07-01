@@ -3138,6 +3138,24 @@ class TestStableCompatHeaders:
         for pred in ("is_privateuseone", "is_cuda", "is_cpu"):
             assert pred in text, pred
 
+    def test_device_shim_members_are_initialized(self):
+        """Device's members carry default initializers, so a default-constructed
+        Device is well-defined (not indeterminate → UB on is_cuda()/type())."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        text = open(
+            os.path.join(
+                stable_compat_include_dir(), "torch", "csrc", "stable", "device.h"
+            ),
+            encoding="utf-8",
+        ).read()
+        assert "int32_t type_;" not in text, "type_ left uninitialized"
+        assert "int32_t index_;" not in text, "index_ left uninitialized"
+        assert "int32_t type_ = " in text
+        assert "int32_t index_ = " in text
+
     def test_macros_shim_header_present(self):
         """torch/csrc/stable/macros.h forwards to library.h on torch_musa 2.9."""
         import os
@@ -3383,6 +3401,24 @@ class TestStableHeaderBackport:
         assert c2 is False
         assert twice == once
         assert twice.count("inline ") == 1
+
+    def test_inline_prefixes_def_with_inline_in_trailing_comment(self):
+        """A def whose trailing comment contains 'inline' is still prefixed.
+
+        Idempotency is enforced by the regex's leading-``inline`` lookahead, not
+        by a substring test — a plain ``"inline" in line`` guard would wrongly
+        skip this def, leaving it non-inline (an ODR error).
+        """
+        from torchada.utils.cpp_extension import _inline_tensor_inl_defs
+
+        src = "Device Tensor::device() const {  // not inline here\n  return d_;\n}\n"
+        out, changed = _inline_tensor_inl_defs(src)
+        assert changed is True
+        assert out.startswith("inline Device Tensor::device() const {")
+        # And still idempotent on the prefixed result.
+        again, changed2 = _inline_tensor_inl_defs(out)
+        assert changed2 is False
+        assert again == out
 
     def test_ensure_stable_headers_patched_noop_off_musa(self):
         """_ensure_stable_headers_patched must not raise or write off-MUSA."""

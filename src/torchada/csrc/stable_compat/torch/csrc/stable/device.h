@@ -18,8 +18,10 @@ enum class DeviceType : int8_t {
   PrivateUse1 = 20,
 };
 struct Device {
-  int32_t type_;
-  int32_t index_;
+  // Initialized so a default-constructed Device is well-defined (an "unset"
+  // device: is_cuda()/is_cpu()/is_privateuseone() all false), not indeterminate.
+  int32_t type_ = -1;
+  int32_t index_ = -1;
   Device() = default;
   Device(int32_t type, int32_t index = 0) : type_(type), index_(index) {}
   Device(DeviceType t, int32_t index = 0)

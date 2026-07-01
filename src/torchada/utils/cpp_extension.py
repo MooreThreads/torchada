@@ -242,12 +242,17 @@ def _inline_tensor_inl_defs(text: str) -> Tuple[str, bool]:
     """Prefix ``inline`` onto column-0 ``Tensor::`` method definitions.
 
     Pure string transform (no IO) so it is unit-testable off-MUSA. Returns
-    ``(new_text, changed)``. Idempotent: already-``inline`` lines are skipped.
+    ``(new_text, changed)``. Idempotency comes from the regex itself: its
+    ``^(?!\\s*(?:inline|...))`` lookahead rejects a line that already starts with
+    ``inline``, so a second pass is a no-op. The match is gated only on the
+    regex — a substring check like ``"inline" not in line`` would also skip a
+    def whose *trailing comment* happens to contain "inline", leaving it
+    non-inline and reintroducing an ODR error.
     """
     lines = text.splitlines(keepends=True)
     changed = False
     for i, line in enumerate(lines):
-        if "inline" not in line and _TENSOR_INL_DEF_RE.match(line):
+        if _TENSOR_INL_DEF_RE.match(line):
             lines[i] = "inline " + line
             changed = True
     return "".join(lines), changed
