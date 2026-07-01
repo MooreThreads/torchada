@@ -27,10 +27,13 @@ Usage (preferred):
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from .._mapping import _MAPPING_RULE, EXT_REPLACED_MAPPING
 from .._platform import Platform, detect_platform, is_musa_platform
+
+logger = logging.getLogger(__name__)
 
 # Flag to track if torch_musa patches have been applied
 _musa_patches_applied = False
@@ -151,13 +154,118 @@ def _patch_simple_porting_open(musa_sp):
     musa_sp.open = open_with_surrogateescape
 
 
+# Anchor for the accessor injection: the ``numel()`` definition that stock
+# torch_musa 2.9 already ships. The backported block is spliced in just before
+# it. ``mutable_data_ptr`` is the idempotency sentinel — absent in stock
+# torch_musa, present after we patch — so a re-run is a no-op.
+_STABLE_ACCESSOR_ANCHOR = "  int64_t numel() const {"
+
+# torch::stable::Tensor accessors that torch_musa 2.9.0's older snapshot omits
+# but stable-ABI kernels (vLLM, SGLang, ...) call. ``element_size`` /
+# ``mutable_data_ptr<T>`` / ``const_data_ptr<T>`` are always injected; the
+# sizes/strides/device/storage_offset/is_privateuseone block is gated on
+# TORCHADA_STABLE_ACCESSORS (defined by torchada_stable_box.h, which also defines
+# torch::stable::Device) so a TU that does not force-include the box header is
+# untouched.
+_STABLE_ACCESSOR_METHODS = (
+    "  void* mutable_data_ptr() const { return data_ptr(); }\n"
+    "  const void* const_data_ptr() const { return data_ptr(); }\n"
+    "  template <typename T>\n"
+    "  T* mutable_data_ptr() const { return reinterpret_cast<T*>(data_ptr()); }\n"
+    "  template <typename T>\n"
+    "  const T* const_data_ptr() const {\n"
+    "    return reinterpret_cast<const T*>(data_ptr());\n"
+    "  }\n"
+    "  int64_t element_size() const {\n"
+    "    return static_cast<int64_t>(\n"
+    "        aoti_torch_dtype_element_size(static_cast<int32_t>(scalar_type())));\n"
+    "  }\n"
+    "#ifdef TORCHADA_STABLE_ACCESSORS\n"
+    "  c10::IntArrayRef sizes() const {\n"
+    "    int64_t* p;\n"
+    "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_sizes(ath_.get(), &p));\n"
+    "    return c10::IntArrayRef(p, dim());\n"
+    "  }\n"
+    "  c10::IntArrayRef strides() const {\n"
+    "    int64_t* p;\n"
+    "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_strides(ath_.get(), &p));\n"
+    "    return c10::IntArrayRef(p, dim());\n"
+    "  }\n"
+    "  torch::stable::Device device() const {\n"
+    "    int32_t dt, di;\n"
+    "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_device_type(ath_.get(), &dt));\n"
+    "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_device_index(ath_.get(), &di));\n"
+    "    return torch::stable::Device(dt, di);\n"
+    "  }\n"
+    "  bool is_privateuseone() const { return device().is_privateuseone(); }\n"
+    "  int64_t storage_offset() const {\n"
+    "    int64_t o;\n"
+    "    TORCH_ERROR_CODE_CHECK(aoti_torch_get_storage_offset(ath_.get(), &o));\n"
+    "    return o;\n"
+    "  }\n"
+    "#endif\n\n"
+)
+
+# Only column-0 method definitions are matched (``RetType Tensor::method(``); call
+# sites inside bodies are indented and so never match, and the negative lookahead
+# keeps already-inline / template / comment lines untouched, which makes the
+# inline rewrite idempotent.
+_TENSOR_INL_DEF_RE = re.compile(
+    r"^(?!\s*(?:inline|template|//|\*))"
+    r"([A-Za-z_][\w:<>,\s\*&]*?\bTensor::[A-Za-z_]\w*\s*\()"
+)
+
+
+def _inject_stable_accessors(text: str) -> Tuple[str, str]:
+    """Splice the backported accessor block into a ``tensor_struct.h`` body.
+
+    Pure string transform (no IO) so it is unit-testable off-MUSA. Returns
+    ``(new_text, status)`` where status is one of ``"injected"`` (block added),
+    ``"already"`` (sentinel present — no-op), or ``"anchor-missing"`` (the
+    ``numel()`` anchor was not found, so nothing was injected — the caller should
+    warn, since stable kernels will then fail to compile on the missing
+    accessors).
+    """
+    if "mutable_data_ptr" in text:
+        return text, "already"
+    if _STABLE_ACCESSOR_ANCHOR not in text:
+        return text, "anchor-missing"
+    new_text = text.replace(
+        _STABLE_ACCESSOR_ANCHOR,
+        _STABLE_ACCESSOR_METHODS + _STABLE_ACCESSOR_ANCHOR,
+        1,
+    )
+    return new_text, "injected"
+
+
+def _inline_tensor_inl_defs(text: str) -> Tuple[str, bool]:
+    """Prefix ``inline`` onto column-0 ``Tensor::`` method definitions.
+
+    Pure string transform (no IO) so it is unit-testable off-MUSA. Returns
+    ``(new_text, changed)``. Idempotency comes from the regex itself: its
+    ``^(?!\\s*(?:inline|...))`` lookahead rejects a line that already starts with
+    ``inline``, so a second pass is a no-op. The match is gated only on the
+    regex — a substring check like ``"inline" not in line`` would also skip a
+    def whose *trailing comment* happens to contain "inline", leaving it
+    non-inline and reintroducing an ODR error.
+    """
+    lines = text.splitlines(keepends=True)
+    changed = False
+    for i, line in enumerate(lines):
+        if _TENSOR_INL_DEF_RE.match(line):
+            lines[i] = "inline " + line
+            changed = True
+    return "".join(lines), changed
+
+
 def _patch_torch_musa_stable_headers() -> None:
     """Backport the libtorch-stable ``Tensor`` accessors that stable-ABI kernels
     (as built by vLLM, SGLang, and other torch_musa-dependent projects) use but
     torch_musa 2.9.0's older ``torch::stable`` snapshot omits: ``element_size`` /
-    ``mutable_data_ptr<T>`` / ``const_data_ptr<T>``, and mark ``tensor_inl.h``
-    method definitions ``inline`` (they are emitted in every TU that includes
-    them, which is a multiple-definition/ODR error otherwise).
+    ``mutable_data_ptr<T>`` / ``const_data_ptr<T>`` / sizes / strides / device /
+    storage_offset, and mark ``tensor_inl.h`` method definitions ``inline`` (they
+    are emitted in every TU that includes them, which is a
+    multiple-definition/ODR error otherwise).
 
     Patches BOTH the ``torch/include`` copy and the torch_musa
     ``generated_cuda_compatible/include`` copy. Idempotent + best-effort: a
@@ -173,8 +281,6 @@ def _patch_torch_musa_stable_headers() -> None:
     cpp ops through them at import, which would re-introduce an import-time
     write; libtorch-stable kernels are built via setuptools, not JIT-loaded.)
     """
-    import re
-
     try:
         import torch
     except ImportError:
@@ -189,30 +295,6 @@ def _patch_torch_musa_stable_headers() -> None:
     except ImportError:
         pass
 
-    # Injected as one block, anchored just before ``numel()``. ``mutable_data_ptr``
-    # is the sentinel: absent in stock torch_musa, present after we patch, so the
-    # presence check below makes re-runs a no-op.
-    anchor = "  int64_t numel() const {"
-    methods = (
-        "  template <typename T>\n"
-        "  T* mutable_data_ptr() const { return reinterpret_cast<T*>(data_ptr()); }\n"
-        "  template <typename T>\n"
-        "  const T* const_data_ptr() const {\n"
-        "    return reinterpret_cast<const T*>(data_ptr());\n"
-        "  }\n"
-        "  int64_t element_size() const {\n"
-        "    return static_cast<int64_t>(\n"
-        "        aoti_torch_dtype_element_size(static_cast<int32_t>(scalar_type())));\n"
-        "  }\n\n"
-    ) + anchor
-    # Only column-0 method definitions are matched; call sites inside bodies are
-    # indented and so never match, and the negative lookahead keeps already-inline
-    # / template / comment lines untouched, which makes the rewrite idempotent.
-    skipped_prefixes = "|".join(("inline", "template", "//", r"\*"))
-    inl_pat = re.compile(
-        r"^(?!\s*(?:" + skipped_prefixes + r"))"
-        r"([A-Za-z_][\w:<>,\s\*&]*?\bTensor::[A-Za-z_]\w*\s*\()"
-    )
     for root in roots:
         ts = os.path.join(root, "torch", "csrc", "stable", "tensor_struct.h")
         ti = os.path.join(root, "torch", "csrc", "stable", "tensor_inl.h")
@@ -220,20 +302,25 @@ def _patch_torch_musa_stable_headers() -> None:
             if os.path.exists(ts):
                 with open(ts, encoding="utf-8") as f:
                     s = f.read()
-                if "mutable_data_ptr" not in s and anchor in s:
+                new_s, status = _inject_stable_accessors(s)
+                if status == "injected":
                     with open(ts, "w", encoding="utf-8") as f:
-                        f.write(s.replace(anchor, methods, 1))
+                        f.write(new_s)
+                elif status == "anchor-missing":
+                    # The accessors were not injected, so stable kernels that call
+                    # sizes()/strides()/device()/element_size() will fail to build.
+                    # Name it instead of failing later with a cryptic C++ error.
+                    logger.warning(
+                        "torchada: could not backport torch::stable::Tensor "
+                        "accessors into %s (numel() anchor not found); "
+                        "libtorch-stable kernels may fail to compile", ts)
             if os.path.exists(ti):
                 with open(ti, encoding="utf-8") as f:
-                    lines = f.read().splitlines(keepends=True)
-                changed = False
-                for i, line in enumerate(lines):
-                    if "inline" not in line and inl_pat.match(line):
-                        lines[i] = "inline " + line
-                        changed = True
+                    contents = f.read()
+                new_ti, changed = _inline_tensor_inl_defs(contents)
                 if changed:
                     with open(ti, "w", encoding="utf-8") as f:
-                        f.write("".join(lines))
+                        f.write(new_ti)
         except OSError:
             pass  # read-only headers / no write perms — best effort
 

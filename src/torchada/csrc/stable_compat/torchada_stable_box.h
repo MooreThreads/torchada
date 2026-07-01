@@ -10,6 +10,18 @@
 // std traits over those — no dependency on the newer boxer machinery.
 //
 // Force-include this header (mcc -include) when building libtorch_stable sources.
+
+// torch_musa 2.9's torch::stable predates torch 2.10's Tensor::{sizes,strides,
+// device}() and torch::stable::{empty,from_blob} that newer vLLM/SGLang stable
+// kernels call. Define the stable Device here -- BEFORE <tensor.h> -- so the
+// torchada-patched tensor_struct.h accessors (gated on TORCHADA_STABLE_ACCESSORS)
+// can reference it; empty/from_blob are defined after <tensor.h> below.
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <c10/util/ArrayRef.h>
+#include <optional>
+#include <vector>
+#include <torch/csrc/stable/device.h>
+#define TORCHADA_STABLE_ACCESSORS 1
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/stableivalue_conversions.h>
 #include <torch/csrc/stable/tensor.h>
@@ -29,6 +41,14 @@ using HeaderOnlyArrayRef = c10::ArrayRef<T>;
 using IntHeaderOnlyArrayRef = c10::ArrayRef<int64_t>;
 }  // namespace headeronly
 }  // namespace torch
+
+// STD_TORCH_CHECK error messages in some libtorch-stable kernels (e.g.
+// selective_scan_fwd's dispatch default case) stream a c10::ScalarType into the
+// ostringstream. The operator<<(ostream&, ScalarType) lives in
+// <c10/core/ScalarType.h>, which those TUs do not transitively include (they
+// get ScalarType from a lighter header). Pull it in here -- the box header is
+// force-included in every stable TU -- so the streaming operator is in scope.
+#include <c10/core/ScalarType.h>
 
 // torch_musa's stable ops.h predates torch::stable::contiguous (used by
 // libtorch_stable/layernorm_kernels.cu when input.stride(-1) != 1). Provide it
@@ -50,6 +70,56 @@ inline Tensor contiguous(const Tensor& self) {
       aoti_torch_call_dispatcher("aten::contiguous", "", stack.data()));
   return to<Tensor>(stack[0]);
 }
+
+// aten::flatten.using_ints(Tensor self, int start_dim, int end_dim) -> Tensor
+inline Tensor flatten(const Tensor& self, int64_t start_dim, int64_t end_dim) {
+  std::array<StableIValue, 3> stack{
+      from(self), from(start_dim), from(end_dim)};
+  TORCH_ERROR_CODE_CHECK(
+      aoti_torch_call_dispatcher("aten::flatten", "using_ints", stack.data()));
+  return to<Tensor>(stack[0]);
+}
+
+// torch 2.10 factory functions, backported onto torch_musa's AOTI C-shim.
+// Matches the (size, dtype, layout, device) prefix of torch::stable::empty that
+// every MUSA-compiled call uses, e.g.
+//   empty({..}, ScalarType::Int, std::nullopt, tensor.device())
+// The 3rd slot is layout (a std::nullopt in those calls), NOT pin_memory; it is
+// ignored because only a strided, contiguous tensor is produced on MUSA. dtype +
+// device carry what aoti_torch_empty_strided needs. The fully defaulted / layout-
+// enum forms (empty({1, 1}), empty(size, dtype, some_layout, ...)) are not in the
+// MUSA kernel set and intentionally not supported.
+inline Tensor empty(c10::IntArrayRef size, ScalarType dtype,
+                    std::optional<int64_t> /*layout, ignored*/, Device device) {
+  std::vector<int64_t> strides(size.size());
+  int64_t acc = 1;
+  for (int64_t i = static_cast<int64_t>(size.size()) - 1; i >= 0; --i) {
+    strides[i] = acc;
+    acc *= size[i];
+  }
+  AtenTensorHandle h;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided(
+      static_cast<int64_t>(size.size()), size.data(), strides.data(),
+      static_cast<int32_t>(dtype), device.type_, device.index_, &h));
+  return Tensor(h);
+}
+// Mirrors the no-deleter torch::stable::from_blob (data, sizes, strides, device,
+// dtype, storage_offset). The torch 2.11 deleter overload is intentionally NOT
+// shimmed: torch_musa 2.9's AOTI C-shim has no from_blob-with-deleter entry, so a
+// deleter would have to be silently dropped (leaking / dangling the backing
+// storage). Kernels that need the deleter form (e.g. get_cuda_view_from_cpu_tensor)
+// must stay out of the MUSA kernel set until torch_musa exposes a deleter-capable
+// create_tensor_from_blob.
+inline Tensor from_blob(void* data, c10::IntArrayRef sizes,
+                        c10::IntArrayRef strides, Device device,
+                        ScalarType dtype, int64_t storage_offset = 0) {
+  AtenTensorHandle h;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_create_tensor_from_blob(
+      data, static_cast<int64_t>(sizes.size()), sizes.data(), strides.data(),
+      storage_offset, static_cast<int32_t>(dtype), device.type_,
+      device.index_, &h));
+  return Tensor(h);
+}
 }  // namespace stable
 }  // namespace torch
 
@@ -58,6 +128,25 @@ inline Tensor contiguous(const Tensor& self) {
 // -DCUDA_VERSION=0 via the build, but define here for direct/JIT use.
 #ifndef CUDA_VERSION
 #define CUDA_VERSION 0
+#endif
+
+// Stable-ABI runtime-error check used by some libtorch-stable kernels (e.g.
+// minimax_reduce_rms_kernel). The ported kernel calls musa* runtime APIs that
+// return a musaError_t (0 == success); wrap them in STD_TORCH_CHECK.
+#ifndef STD_CUDA_CHECK
+#define STD_CUDA_CHECK(EXPR)                                              \
+  do {                                                                   \
+    auto _musa_err = (EXPR);                                             \
+    STD_TORCH_CHECK(_musa_err == 0, "MUSA runtime error: ",             \
+                    static_cast<int64_t>(_musa_err));                    \
+  } while (0)
+#endif
+
+// Kernel-launch error check used by some libtorch-stable kernels after a <<<>>>
+// launch (e.g. selective_scan). Checks the last runtime error via the same
+// STD_CUDA_CHECK path.
+#ifndef STD_CUDA_KERNEL_LAUNCH_CHECK
+#define STD_CUDA_KERNEL_LAUNCH_CHECK() STD_CUDA_CHECK(musaGetLastError())
 #endif
 
 // torch_get_current_cuda_blas_handle has no AOTI stable-ABI shim on torch_musa,
@@ -93,6 +182,24 @@ struct fn_traits<R (*)(A...)> {
   using args = std::tuple<strip_t<A>...>;
 };
 
+// A multi-value (tuple/pair) return occupies one stack slot per element in the
+// stable ABI; torch_musa's from()/to() only convert single <=64-bit values, so
+// the boxer spreads a tuple return across consecutive slots itself rather than
+// calling from() on the whole aggregate (which would trip the 64-bit
+// static_assert).
+template <class T>
+struct is_tuple_like : std::false_type {};
+template <class... Ts>
+struct is_tuple_like<std::tuple<Ts...>> : std::true_type {};
+template <class A, class B>
+struct is_tuple_like<std::pair<A, B>> : std::true_type {};
+
+template <class Ret, std::size_t... J>
+inline void store_return(StableIValue* stack, Ret&& ret,
+                         std::index_sequence<J...>) {
+  ((stack[J] = from(std::get<J>(std::forward<Ret>(ret)))), ...);
+}
+
 template <auto Fn, class Tup, std::size_t... I>
 inline void invoke_boxed(StableIValue* stack, std::index_sequence<I...>) {
   // Materialize args as lvalues so they bind to Tensor& parameters.
@@ -100,6 +207,9 @@ inline void invoke_boxed(StableIValue* stack, std::index_sequence<I...>) {
   using R = typename fn_traits<decltype(Fn)>::ret;
   if constexpr (std::is_void_v<R>) {
     std::apply(Fn, args);
+  } else if constexpr (is_tuple_like<strip_t<R>>::value) {
+    store_return(stack, std::apply(Fn, args),
+                 std::make_index_sequence<std::tuple_size_v<strip_t<R>>>());
   } else {
     stack[0] = from(std::apply(Fn, args));
   }
