@@ -3074,3 +3074,323 @@ class TestTorchAcceleratorPatching:
         stream_ctx = torch.accelerator.StreamContext
         assert stream_ctx.__name__ == "StreamContext"
         assert "torch_musa.core.stream" in stream_ctx.__module__
+
+
+class TestStableCompatHeaders:
+    """Tests for the libtorch-stable ABI compat headers and their path helpers.
+
+    torchada backports the ``torch::stable`` surface that torch_musa 2.9 predates
+    but vLLM v0.24.0's ``csrc/libtorch_stable`` kernels (and SGLang's) require.
+    These tests validate the shipped headers and the pure-Python path helpers, so
+    they run on any platform (no MUSA hardware needed).
+    """
+
+    def test_stable_compat_include_dir_exists(self):
+        """stable_compat_include_dir() points at an existing directory."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        d = stable_compat_include_dir()
+        assert os.path.isdir(d), f"stable_compat include dir missing: {d}"
+        assert d.endswith("stable_compat")
+
+    def test_stable_compat_box_header_exists(self):
+        """stable_compat_box_header() points at the force-include header."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        h = stable_compat_box_header()
+        assert os.path.isfile(h), f"box header missing: {h}"
+        assert h.endswith("torchada_stable_box.h")
+
+    def test_dispatch_shim_header_present(self):
+        """torch/headeronly/core/Dispatch.h shadows the absent torch header."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        p = os.path.join(
+            stable_compat_include_dir(), "torch", "headeronly", "core", "Dispatch.h"
+        )
+        assert os.path.isfile(p), f"Dispatch.h shim missing: {p}"
+        text = open(p, encoding="utf-8").read()
+        # The THO_DISPATCH_* macros vLLM/SGLang stable kernels use.
+        assert "THO_DISPATCH_SWITCH" in text
+        assert "THO_DISPATCH_CASE" in text
+        assert "ScalarTypeToCPPTypeT" in text
+
+    def test_device_shim_header_present(self):
+        """torch/csrc/stable/device.h provides Device / DeviceType."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        p = os.path.join(
+            stable_compat_include_dir(), "torch", "csrc", "stable", "device.h"
+        )
+        assert os.path.isfile(p), f"device.h shim missing: {p}"
+        text = open(p, encoding="utf-8").read()
+        assert "struct Device" in text
+        assert "enum class DeviceType" in text
+        # Predicates vLLM stable kernels call on a Device.
+        for pred in ("is_privateuseone", "is_cuda", "is_cpu"):
+            assert pred in text, pred
+
+    def test_macros_shim_header_present(self):
+        """torch/csrc/stable/macros.h forwards to library.h on torch_musa 2.9."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        p = os.path.join(
+            stable_compat_include_dir(), "torch", "csrc", "stable", "macros.h"
+        )
+        assert os.path.isfile(p), f"macros.h shim missing: {p}"
+        assert "library.h" in open(p, encoding="utf-8").read()
+
+    def test_box_header_defines_torch_box(self):
+        """The force-include header defines TORCH_BOX for STABLE_TORCH_LIBRARY_IMPL."""
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        assert "#define TORCH_BOX(func)" in text
+        assert "namespace torchada_stable" in text
+
+    def test_box_header_backports_free_functions(self):
+        """The box header supplies the torch::stable free functions torch_musa 2.9 lacks.
+
+        vLLM v0.24.0 calls these from compiled kernels: contiguous (layernorm),
+        flatten (cache), empty (sampler / custom_all_reduce), from_blob
+        (weak_ref_tensor via ops.h).
+        """
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        for fn in (
+            "inline Tensor contiguous",
+            "inline Tensor flatten",
+            "inline Tensor empty",
+            "inline Tensor from_blob",
+        ):
+            assert fn in text, f"box header missing backport: {fn}"
+
+    def test_box_header_empty_shim_matches_compiled_call_shape(self):
+        """empty() accepts the (size, dtype, nullopt-layout, device) shape vLLM uses.
+
+        sampler.cu / custom_all_reduce.cu call
+        ``torch::stable::empty({...}, ScalarType::X, std::nullopt, dev)``. The 3rd
+        positional slot is ``layout`` (not ``pin_memory``); guard against the
+        comment regressing to the earlier mislabel.
+        """
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        # The 3rd empty() slot must be documented as layout, never pin_memory.
+        assert "layout, ignored" in text
+        assert "pin_memory, unused" not in text
+
+    def test_box_header_handles_multivalue_returns(self):
+        """The boxer spreads tuple/pair returns across stack slots.
+
+        vLLM v0.24.0 boxes ops returning std::tuple<Tensor, Tensor>,
+        std::tuple<int64_t, Tensor>, and std::tuple<vector<int64_t>,
+        vector<int64_t>> (custom_all_reduce, grouped_topk, scaled_fp4_quant).
+        """
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        assert "is_tuple_like" in text
+        assert "store_return" in text
+        # pair is boxed too, not only tuple.
+        assert "std::pair" in text
+
+    def test_cuda_family_shim_headers_redirect_to_musa(self):
+        """cuda_bf16/fp16/fp8/runtime + cublas_v2 shims include the MUSA headers."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        d = stable_compat_include_dir()
+        for name, needle in [
+            ("cuda_bf16.h", "musa_bf16.h"),
+            ("cuda_fp16.h", "musa_fp16.h"),
+            ("cuda_fp8.h", "musa_fp8.h"),
+            ("cuda_runtime.h", "musa_runtime.h"),
+            ("cublas_v2.h", "mublas.h"),
+        ]:
+            p = os.path.join(d, name)
+            assert os.path.isfile(p), f"{name} shim missing"
+            assert needle in open(p, encoding="utf-8").read(), f"{name} !-> {needle}"
+
+    def test_cuda_bf16_shim_aliases_nv_types(self):
+        """cuda_bf16.h aliases __nv_bfloat16{,2} to the MUSA __mt_bfloat16{,2}."""
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        text = open(
+            os.path.join(stable_compat_include_dir(), "cuda_bf16.h"), encoding="utf-8"
+        ).read()
+        assert "__nv_bfloat16 = __mt_bfloat16" in text
+        assert "__nv_bfloat162 = __mt_bfloat162" in text
+
+    def test_include_paths_appends_stable_compat_on_musa(self):
+        """include_paths() auto-appends the stable_compat dir for device builds on MUSA."""
+        import torchada
+        from torchada.utils.cpp_extension import (
+            include_paths,
+            stable_compat_include_dir,
+        )
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        paths = include_paths(device_type="cuda")
+        assert stable_compat_include_dir() in paths
+        # It must be appended LAST so a real future torch_musa header wins.
+        assert paths[-1] == stable_compat_include_dir()
+
+    def test_include_paths_omits_stable_compat_for_cpu_only(self):
+        """include_paths(device_type='cpu') does not add the device stable_compat dir."""
+        import torchada
+        from torchada.utils.cpp_extension import (
+            include_paths,
+            stable_compat_include_dir,
+        )
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        paths = include_paths(device_type="cpu")
+        assert stable_compat_include_dir() not in paths
+
+
+class TestStableHeaderBackport:
+    """Tests for the torch::stable::Tensor accessor backport transforms.
+
+    ``_inject_stable_accessors`` and ``_inline_tensor_inl_defs`` are pure string
+    transforms (no IO, no torch_musa), so they are exercised directly here on any
+    platform. They are what makes torch_musa 2.9's stable Tensor expose the
+    sizes()/strides()/device()/element_size()/data_ptr accessors vLLM stable
+    kernels call.
+    """
+
+    def _anchor(self):
+        from torchada.utils.cpp_extension import _STABLE_ACCESSOR_ANCHOR
+
+        return _STABLE_ACCESSOR_ANCHOR
+
+    def _struct(self):
+        # Minimal tensor_struct.h-shaped body containing the numel() anchor.
+        return (
+            "struct Tensor {\n"
+            "  int64_t dim() const { return dim_; }\n"
+            f"{self._anchor()} return numel_; }}\n"
+            "};\n"
+        )
+
+    def test_inject_adds_block_before_anchor(self):
+        from torchada.utils.cpp_extension import _inject_stable_accessors
+
+        new, status = _inject_stable_accessors(self._struct())
+        assert status == "injected"
+        # Anchor preserved, block inserted before it.
+        assert self._anchor() in new
+        assert new.index("mutable_data_ptr") < new.index(self._anchor())
+
+    def test_inject_always_on_and_gated_accessors_present(self):
+        from torchada.utils.cpp_extension import _inject_stable_accessors
+
+        new, _ = _inject_stable_accessors(self._struct())
+        # Always-on (needed even without the box header force-include).
+        assert "element_size()" in new
+        assert "T* mutable_data_ptr() const" in new
+        assert "const T* const_data_ptr() const" in new
+        # Gated on the box-header define so bare TUs are untouched.
+        assert "#ifdef TORCHADA_STABLE_ACCESSORS" in new
+        for acc in ("sizes()", "strides()", "device()", "storage_offset()"):
+            assert acc in new, acc
+        assert new.count("#ifdef TORCHADA_STABLE_ACCESSORS") == 1
+        assert new.count("#endif") == 1
+
+    def test_inject_is_idempotent(self):
+        from torchada.utils.cpp_extension import _inject_stable_accessors
+
+        once, s1 = _inject_stable_accessors(self._struct())
+        twice, s2 = _inject_stable_accessors(once)
+        assert s1 == "injected"
+        assert s2 == "already"
+        assert twice == once  # no second copy
+        assert twice.count("void* mutable_data_ptr() const") == 1
+
+    def test_inject_reports_anchor_missing(self):
+        """A body without the numel() anchor is flagged, not silently mangled."""
+        from torchada.utils.cpp_extension import _inject_stable_accessors
+
+        text = "struct Tensor {\n  int64_t dim() const { return 0; }\n};\n"
+        out, status = _inject_stable_accessors(text)
+        assert status == "anchor-missing"
+        assert out == text  # unchanged
+
+    def test_inline_prefixes_column0_defs(self):
+        from torchada.utils.cpp_extension import _inline_tensor_inl_defs
+
+        src = "ScalarType Tensor::scalar_type() const {\n  return st_;\n}\n"
+        out, changed = _inline_tensor_inl_defs(src)
+        assert changed is True
+        assert out.startswith("inline ScalarType Tensor::scalar_type() const {")
+
+    def test_inline_skips_indented_call_sites(self):
+        """Indented Tensor:: call sites inside bodies are never inlined."""
+        from torchada.utils.cpp_extension import _inline_tensor_inl_defs
+
+        src = "  return other.Tensor::scalar_type();\n"
+        out, changed = _inline_tensor_inl_defs(src)
+        assert changed is False
+        assert out == src
+
+    def test_inline_skips_already_inline_template_and_comment(self):
+        from torchada.utils.cpp_extension import _inline_tensor_inl_defs
+
+        src = (
+            "inline Device Tensor::device() const { return d_; }\n"
+            "template <typename T>\n"
+            "// Tensor::foo() is a comment\n"
+        )
+        out, changed = _inline_tensor_inl_defs(src)
+        assert changed is False
+        assert out == src
+        assert "inline inline" not in out
+
+    def test_inline_handles_multi_token_return_type(self):
+        """A def like 'std::optional<X> Tensor::m()' is still recognized."""
+        from torchada.utils.cpp_extension import _inline_tensor_inl_defs
+
+        src = "c10::IntArrayRef Tensor::sizes() const {\n  return s_;\n}\n"
+        out, changed = _inline_tensor_inl_defs(src)
+        assert changed is True
+        assert out.startswith("inline c10::IntArrayRef Tensor::sizes() const {")
+
+    def test_inline_is_idempotent(self):
+        from torchada.utils.cpp_extension import _inline_tensor_inl_defs
+
+        src = "Device Tensor::device() const { return d_; }\n"
+        once, c1 = _inline_tensor_inl_defs(src)
+        twice, c2 = _inline_tensor_inl_defs(once)
+        assert c1 is True
+        assert c2 is False
+        assert twice == once
+        assert twice.count("inline ") == 1
+
+    def test_ensure_stable_headers_patched_noop_off_musa(self):
+        """_ensure_stable_headers_patched must not raise or write off-MUSA."""
+        import torchada
+        from torchada.utils import cpp_extension as ce
+
+        if torchada.is_musa_platform():
+            pytest.skip("This asserts the off-MUSA no-op path")
+
+        # Should return immediately (is_musa_platform() guard) without error.
+        ce._ensure_stable_headers_patched()

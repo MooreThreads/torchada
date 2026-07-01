@@ -81,8 +81,16 @@ inline Tensor flatten(const Tensor& self, int64_t start_dim, int64_t end_dim) {
 }
 
 // torch 2.10 factory functions, backported onto torch_musa's AOTI C-shim.
+// Matches the (size, dtype, layout, device) prefix of torch::stable::empty that
+// every MUSA-compiled call uses, e.g.
+//   empty({..}, ScalarType::Int, std::nullopt, tensor.device())
+// The 3rd slot is layout (a std::nullopt in those calls), NOT pin_memory; it is
+// ignored because only a strided, contiguous tensor is produced on MUSA. dtype +
+// device carry what aoti_torch_empty_strided needs. The fully defaulted / layout-
+// enum forms (empty({1, 1}), empty(size, dtype, some_layout, ...)) are not in the
+// MUSA kernel set and intentionally not supported.
 inline Tensor empty(c10::IntArrayRef size, ScalarType dtype,
-                    std::optional<int64_t> /*pin_memory, unused*/, Device device) {
+                    std::optional<int64_t> /*layout, ignored*/, Device device) {
   std::vector<int64_t> strides(size.size());
   int64_t acc = 1;
   for (int64_t i = static_cast<int64_t>(size.size()) - 1; i >= 0; --i) {
@@ -95,13 +103,20 @@ inline Tensor empty(c10::IntArrayRef size, ScalarType dtype,
       static_cast<int32_t>(dtype), device.type_, device.index_, &h));
   return Tensor(h);
 }
+// Mirrors the no-deleter torch::stable::from_blob (data, sizes, strides, device,
+// dtype, storage_offset). The torch 2.11 deleter overload is intentionally NOT
+// shimmed: torch_musa 2.9's AOTI C-shim has no from_blob-with-deleter entry, so a
+// deleter would have to be silently dropped (leaking / dangling the backing
+// storage). Kernels that need the deleter form (e.g. get_cuda_view_from_cpu_tensor)
+// must stay out of the MUSA kernel set until torch_musa exposes a deleter-capable
+// create_tensor_from_blob.
 inline Tensor from_blob(void* data, c10::IntArrayRef sizes,
                         c10::IntArrayRef strides, Device device,
-                        ScalarType dtype) {
+                        ScalarType dtype, int64_t storage_offset = 0) {
   AtenTensorHandle h;
   TORCH_ERROR_CODE_CHECK(aoti_torch_create_tensor_from_blob(
       data, static_cast<int64_t>(sizes.size()), sizes.data(), strides.data(),
-      /*storage_offset=*/0, static_cast<int32_t>(dtype), device.type_,
+      storage_offset, static_cast<int32_t>(dtype), device.type_,
       device.index_, &h));
   return Tensor(h);
 }
