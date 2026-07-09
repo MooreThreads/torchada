@@ -221,8 +221,8 @@ class TestMixedSourcesBuild:
     """
     Test building extensions with mixed source types (.cu, .cuh, .mu, .muh, .cpp).
 
-    This tests the fix for the issue where .mu files required manually specifying
-    the ported path (e.g., csrc_musa/foo.mu instead of csrc/foo.mu).
+    In-place porting keeps every source at its original path (no <dir>_musa
+    mirror, no .cu -> .mu rename), so a .mu source is listed as csrc/foo.mu.
     """
 
     def test_mixed_sources_dir_exists(self):
@@ -264,9 +264,8 @@ class TestMixedSourcesBuild:
             src_dir = os.path.join(tmpdir, "csrc")
             shutil.copytree(MIXED_SOURCES_DIR, src_dir)
 
-            # Create setup.py that uses CUDA-style paths for .mu files
-            # This tests the fix: users can specify csrc/mul_kernel.mu
-            # and torchada will find it in csrc_musa/mul_kernel.mu after porting
+            # setup.py lists sources at their real paths; in-place porting keeps
+            # them there (no csrc_musa mirror, no .cu -> .mu rename).
             setup_content = """
 import torchada  # noqa: F401 - Apply MUSA patches
 from setuptools import setup
@@ -279,8 +278,8 @@ setup(
             name="test_mixed_sources",
             sources=[
                 "csrc/bindings.cpp",      # C++ file with CUDA symbols
-                "csrc/add_kernel.cu",     # CUDA kernel -> ported to csrc_musa/add_kernel.mu
-                "csrc/mul_kernel.mu",     # MUSA kernel -> found in csrc_musa/mul_kernel.mu
+                "csrc/add_kernel.cu",     # CUDA kernel -> ported in place, name kept
+                "csrc/mul_kernel.mu",     # MUSA-native kernel -> left as-is
             ],
             include_dirs=["csrc"],        # Include dir for headers
         )
@@ -311,17 +310,17 @@ setup(
             ext_files = [f for f in os.listdir(tmpdir) if f.endswith(".so") or f.endswith(".pyd")]
             assert len(ext_files) > 0, "No extension file was built"
 
-            # Verify ported directory was created
-            ported_dir = os.path.join(tmpdir, "csrc_musa")
-            assert os.path.isdir(ported_dir), "Ported directory csrc_musa was not created"
-
-            # Verify ported files exist
+            # In-place porting: no <dir>_musa mirror, no .cu -> .mu rename.
+            assert not os.path.isdir(
+                os.path.join(tmpdir, "csrc_musa")
+            ), "in-place porting must not create a csrc_musa mirror"
+            # Sources keep their original names and locations.
             assert os.path.exists(
-                os.path.join(ported_dir, "add_kernel.mu")
-            ), "add_kernel.cu was not ported to add_kernel.mu"
+                os.path.join(src_dir, "add_kernel.cu")
+            ), "add_kernel.cu should be ported in place (name/location kept)"
             assert os.path.exists(
-                os.path.join(ported_dir, "utils.muh")
-            ), "utils.cuh was not ported to utils.muh"
+                os.path.join(src_dir, "mul_kernel.mu")
+            ), "mul_kernel.mu should resolve at its original path"
 
     def test_run_mixed_sources_extension(self):
         """Test running the mixed sources extension after building."""
