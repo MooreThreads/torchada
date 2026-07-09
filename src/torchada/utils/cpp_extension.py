@@ -898,24 +898,32 @@ def _get_build_extension_class():
                     sp.musa_dir_path = source_dir
                     sp.run()
 
-                    # SimplePorting.__init__ eagerly created an empty <dir>_musa; drop it.
-                    import shutil
-
+                    # SimplePorting.__init__ eagerly created an empty <dir>_musa
+                    # (its computed output dir, before we redirect to source_dir).
+                    # Remove only that empty directory: os.rmdir refuses a
+                    # non-empty dir, so a <dir>_musa that happens to hold real
+                    # content is never force-deleted.
                     leftover = source_dir + "_musa"
                     if os.path.isdir(leftover):
-                        shutil.rmtree(leftover, ignore_errors=True)
+                        try:
+                            os.rmdir(leftover)
+                        except OSError:
+                            pass
 
                     self._ported_dirs.add(source_dir)
                     return source_dir
 
 
                 @staticmethod
-                def _dir_has_cuda_headers(path):
-                    """True if ``path`` recursively holds any C/C++/CUDA header or source."""
+                def _dir_has_portable_sources(path):
+                    """True if ``path`` recursively holds any file the porter would
+                    rewrite — any extension in ``_PORTABLE_SOURCE_EXTS``. Kept in
+                    sync with the porting allowlist so a directory of only
+                    ``.cc``/``.cpp`` sources (no ``.h``/``.cu``) is not skipped."""
                     try:
                         for _root, _dirs, files in os.walk(path):
                             for f in files:
-                                if f.endswith((".h", ".hpp", ".cuh", ".cu")):
+                                if f.endswith(_PORTABLE_SOURCE_EXTS):
                                     return True
                     except OSError:
                         pass
@@ -967,7 +975,7 @@ def _get_build_extension_class():
                             if (
                                 os.path.isdir(root)
                                 and not self._is_system_include_dir(root)
-                                and self._dir_has_cuda_headers(root)
+                                and self._dir_has_portable_sources(root)
                             ):
                                 self._port_directory(root, mapping_rule)
                         # ext.sources and ext.include_dirs are intentionally left
