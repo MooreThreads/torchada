@@ -44,9 +44,9 @@ _musa_patches_applied = False
 # _ensure_stable_headers_patched.
 _stable_headers_patched = False
 
-# Extensions whose CONTENT is CUDA→MUSA ported in place. SimplePorting.run()
-# walks every file in a directory; restricting the substitution to compiled
-# translation units and headers keeps in-place porting from rewriting build
+# CUDA/C++ translation units and headers whose CONTENT is CUDA→MUSA ported in
+# place. SimplePorting.run() walks every file in a directory; restricting the
+# substitution to these extensions keeps in-place porting from rewriting build
 # scripts, templates, docs and configs (.py / .jinja / .cmake / .md / .json /
 # .gitignore ...) onto themselves. See _patch_simple_porting_modify_file.
 _PORTABLE_SOURCE_EXTS = (
@@ -62,6 +62,14 @@ _PORTABLE_SOURCE_EXTS = (
     ".hxx",
     ".inl",
     ".inc",
+)
+
+# MUSA-native sources are already MUSA and must NOT be CUDA→MUSA-substituted:
+# the mapping would corrupt valid MUSA constructs (e.g. the asm-volatile
+# neutralization rule, which disables un-assemblable CUDA PTX, would disable a
+# hand-written MUSA inline-asm block and leave its output uninitialized). They
+# compile as-is and are left byte-identical.
+_MUSA_NATIVE_EXTS = (
     ".mu",
     ".muh",
 )
@@ -191,9 +199,13 @@ def _patch_simple_porting_modify_file(musa_sp):
        ``.md`` / ``.gitignore`` ...) onto themselves, corrupting committed
        tooling (e.g. a codegen ``generate.py`` gets ``cutlass``→``mutlass``
        applied to its imports). So the content substitution is gated to the
-       translation-unit / header extensions in ``_PORTABLE_SOURCE_EXTS``; any
-       other file is left byte-for-byte untouched (or copied verbatim if a
-       distinct mirror destination is still in use).
+       CUDA/C++ translation-unit / header extensions in
+       ``_PORTABLE_SOURCE_EXTS``; any other file is left byte-for-byte
+       untouched (or copied verbatim if a distinct mirror destination is still
+       in use). MUSA-native ``.mu``/``.muh`` sources (``_MUSA_NATIVE_EXTS``) are
+       likewise left untouched: they are already MUSA, so substitution only
+       corrupts them (e.g. the asm-volatile neutralization rule disables a
+       hand-written MUSA inline-asm block, leaving its result uninitialized).
 
     2. The stock method opens the destination with ``"w"`` (truncating) while
        the source handle is open, zeroing the file when src == dst. Reading all
@@ -203,10 +215,12 @@ def _patch_simple_porting_modify_file(musa_sp):
 
     def modify_file(self, cuda_filepath, musa_filepath):
         ext = os.path.splitext(cuda_filepath)[1].lower()
-        if ext not in _PORTABLE_SOURCE_EXTS:
-            # Not a compiled source/header: never CUDA→MUSA-substitute it. In
-            # place (dst == src) leave it alone; for a distinct destination
-            # (legacy mirror mode) copy it verbatim so the mirror stays complete.
+        if ext in _MUSA_NATIVE_EXTS or ext not in _PORTABLE_SOURCE_EXTS:
+            # Leave byte-identical: either MUSA-native (.mu/.muh — already MUSA,
+            # substitution would corrupt it) or not a compiled source at all
+            # (.py/.jinja/.md/...). In place (dst == src) leave it alone; for a
+            # distinct destination (legacy mirror mode) copy it verbatim so the
+            # mirror stays complete.
             if os.path.abspath(cuda_filepath) != os.path.abspath(musa_filepath):
                 import shutil
 
@@ -919,7 +933,9 @@ def _get_build_extension_class():
                     """True if ``path`` recursively holds any file the porter would
                     rewrite — any extension in ``_PORTABLE_SOURCE_EXTS``. Kept in
                     sync with the porting allowlist so a directory of only
-                    ``.cc``/``.cpp`` sources (no ``.h``/``.cu``) is not skipped."""
+                    ``.cc``/``.cpp`` sources (no ``.h``/``.cu``) is not skipped. A
+                    directory of only MUSA-native ``.mu``/``.muh`` sources has
+                    nothing to port and is intentionally not a porting target."""
                     try:
                         for _root, _dirs, files in os.walk(path):
                             for f in files:
