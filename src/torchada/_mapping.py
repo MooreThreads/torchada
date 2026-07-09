@@ -2,11 +2,14 @@
 
 from ._mappings import MAPPING_RULE as _MAPPING_RULE  # noqa: F401
 
-# Extension file suffix mappings: convert .cu/.cuh to .mu/.muh so torch_musa's
-# musa_compile rule (which only adds -x musa for .mu/.muh) treats them correctly.
+# Keep source extensions unchanged during porting. Sources are ported in place
+# (no <dir>_musa mirror), and .cu/.cuh compile as MUSA via the patched
+# _is_musa_file (which selects the -x musa rule), so renaming to .mu/.muh is
+# unnecessary -- and avoiding it removes any need for include/source-path
+# rewriting.
 EXT_REPLACED_MAPPING = {
-    'cuh': 'muh',
-    'cu': 'mu',
+    'cuh': 'cuh',
+    'cu': 'cu',
     'cc': 'cc',
     'cpp': 'cpp',
     'cxx': 'cxx',

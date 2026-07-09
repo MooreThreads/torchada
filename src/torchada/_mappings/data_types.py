@@ -30,4 +30,11 @@ MAPPING = {
     'CUDA_R_8F_E5M2': 'MUSA_R_8F_E5M2',
     'cuda_fp16.h': 'musa_fp16.h',
     'cuda_bf16.h': 'musa_bf16.h',
+    # torch_musa's torch::headeronly snapshot omits these scalar-type headers;
+    # the c10 variants carry the same definitions. Only the dtype headers move
+    # (Exception.h / ScalarType.h under torch/headeronly resolve on torch_musa).
+    '#include <torch/headeronly/util/Float8_e4m3fn.h>': '#include <c10/util/Float8_e4m3fn.h>',
+    '#include <torch/headeronly/util/Float8_e4m3fnuz.h>': '#include <c10/util/Float8_e4m3fnuz.h>',
+    '#include <torch/headeronly/util/BFloat16.h>': '#include <c10/util/BFloat16.h>',
+    '#include <torch/headeronly/util/Half.h>': '#include <c10/util/Half.h>',
 }

@@ -532,9 +532,10 @@ class TestMappingCount:
     def test_ext_replaced_mapping(self):
         from torchada._mapping import EXT_REPLACED_MAPPING
 
-        # Extensions are converted: .cu -> .mu, .cuh -> .muh for mcc compiler
-        assert EXT_REPLACED_MAPPING["cu"] == "mu"
-        assert EXT_REPLACED_MAPPING["cuh"] == "muh"
+        # Identity map: porting keeps the original .cu/.cuh names (no .mu/.muh
+        # rename) so it runs in place and source paths need no rewriting.
+        assert EXT_REPLACED_MAPPING["cu"] == "cu"
+        assert EXT_REPLACED_MAPPING["cuh"] == "cuh"
 
 
 class TestMappingRobustness:
@@ -617,13 +618,15 @@ class TestMappingApplication:
         assert "at::cuda" not in result
 
     def test_port_cuda_source_includes(self):
-        """Test include statement porting."""
+        """CUDA runtime headers are renamed, but a project .cuh include keeps
+        its extension: porting is in place, so there is no .cuh -> .muh rename."""
         from torchada.utils.cpp_extension import _port_cuda_source
 
         source = '#include <cuda_runtime.h>\n#include "my_file.cuh"'
         result = _port_cuda_source(source)
         assert "musa_runtime.h" in result
-        assert 'my_file.muh"' in result
+        assert 'my_file.cuh"' in result
+        assert 'my_file.muh"' not in result
 
     def test_port_cuda_source_types(self):
         """Test type replacement."""
@@ -1171,7 +1174,12 @@ setup(
                     del sys.modules["test_device_type"]
 
     def test_ported_source_contains_privateuse1(self):
-        """Verify the ported source code contains PrivateUse1, not MUSA."""
+        """Verify porting rewrites CUDA device types to PrivateUse1 in place.
+
+        Porting is in place: the source keeps its original .cu name and
+        location (no <dir>_musa mirror, no .cu -> .mu rename), and its CUDA
+        device types are rewritten to PrivateUse1.
+        """
         if not torchada.is_musa_platform():
             pytest.skip("Source porting test only applicable on MUSA platform")
 
@@ -1200,7 +1208,7 @@ setup(
             with open(setup_path, "w") as f:
                 f.write(setup_content)
 
-            # Build the extension (this triggers source porting)
+            # Build the extension (this triggers in-place source porting)
             result = subprocess.run(
                 [sys.executable, "setup.py", "build_ext", "--inplace"],
                 cwd=tmpdir,
@@ -1208,31 +1216,22 @@ setup(
                 text=True,
             )
 
-            # Find all ported .mu files
-            # The ported files are in {tmpdir}_musa directory (created by torchada)
-            ported_files = []
-            musa_dir = f"{tmpdir}_musa"
-            if os.path.exists(musa_dir):
-                for root, dirs, files in os.walk(musa_dir):
-                    for f in files:
-                        if f.endswith(".mu"):
-                            ported_files.append(os.path.join(root, f))
+            # In-place porting must not create a <dir>_musa mirror ...
+            assert not os.path.exists(
+                f"{tmpdir}_musa"
+            ), "in-place porting must not create a <dir>_musa mirror"
+            # ... nor rename .cu -> .mu: the source keeps its name and location.
+            assert not any(
+                f.endswith(".mu") for f in os.listdir(tmpdir)
+            ), "in-place porting must not rename .cu -> .mu"
 
-            # Also check inside tmpdir in case porting puts files there
-            for root, dirs, files in os.walk(tmpdir):
-                for f in files:
-                    if f.endswith(".mu"):
-                        ported_files.append(os.path.join(root, f))
-
-            assert (
-                len(ported_files) > 0
-            ), f"No .mu file found after porting. Build output:\n{result.stdout}"
-
-            # Read ported content
-            ported_content = ""
-            for pf in ported_files:
-                with open(pf, "r") as f:
-                    ported_content += f.read()
+            ported_cu = os.path.join(tmpdir, "device_type_test.cu")
+            assert os.path.exists(ported_cu), (
+                "ported source not found in place. Build output:\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+            with open(ported_cu, "r") as f:
+                ported_content = f.read()
 
             # Verify the mappings were applied correctly
             assert (
