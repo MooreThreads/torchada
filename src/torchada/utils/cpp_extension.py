@@ -25,9 +25,12 @@ Usage (preferred):
     )
 """
 
+import functools
+import inspect
 import logging
 import os
 import re
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from .._mapping import _MAPPING_RULE, EXT_REPLACED_MAPPING
@@ -62,6 +65,11 @@ _PORTABLE_SOURCE_EXTS = (
     ".hxx",
     ".inl",
     ".inc",
+    ".ipp",
+    ".tpp",
+    ".txx",
+    ".ixx",
+    ".cppm",
 )
 
 # MUSA-native sources are already MUSA and must NOT be CUDA→MUSA-substituted:
@@ -132,6 +140,105 @@ def _is_musa_file(path: str) -> bool:
     """
     ext = os.path.splitext(path)[1]
     return ext in [".cu", ".cuh", ".mu", ".muh"]
+
+
+def _with_explicit_musa_language(flags):
+    """Return MUSA compiler flags that force filename-independent parsing."""
+    result = list(flags or [])
+    for index, flag in enumerate(result):
+        if flag == "-x=musa" or flag == "-xmusa":
+            return result
+        if flag == "-x" and index + 1 < len(result) and result[index + 1] == "musa":
+            return result
+    # Keep this as the final pre-source language option so it overrides any
+    # earlier ``-x`` supplied by generic CUDA-oriented build configuration.
+    return [*result, "-x", "musa"]
+
+
+def _patch_musa_ninja_language(musa_ext):
+    """Force ``mcc`` to parse identity-named ``.cu`` files as MUSA.
+
+    torch_musa chooses its ``musa_compile`` Ninja rule via ``_is_musa_file``,
+    but that rule historically relied on the ``.mu`` suffix to select the MUSA
+    language. In-place porting deliberately keeps ``.cu`` names, so inject the
+    explicit language flag into ``musa_cflags`` (which appears before the input
+    path) for both setuptools and JIT extension builds.
+    """
+    original = getattr(musa_ext, "_write_ninja_file", None)
+    if original is None or getattr(original, "_torchada_explicit_musa_language", False):
+        return
+
+    parameters = list(inspect.signature(original).parameters)
+    if "musa_cflags" not in parameters:
+        return
+    musa_cflags_index = parameters.index("musa_cflags")
+
+    @functools.wraps(original)
+    def patched_write_ninja_file(*args, **kwargs):
+        args = list(args)
+        if "musa_cflags" in kwargs:
+            kwargs["musa_cflags"] = _with_explicit_musa_language(kwargs["musa_cflags"])
+        elif musa_cflags_index < len(args):
+            args[musa_cflags_index] = _with_explicit_musa_language(args[musa_cflags_index])
+        else:
+            kwargs["musa_cflags"] = _with_explicit_musa_language(None)
+        return original(*args, **kwargs)
+
+    patched_write_ninja_file._torchada_explicit_musa_language = True
+    musa_ext._write_ninja_file = patched_write_ninja_file
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    """Return whether ``path`` resolves to ``root`` or one of its descendants."""
+    try:
+        return os.path.commonpath(
+            (os.path.realpath(path), os.path.realpath(root))
+        ) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+def _coalesce_port_roots(paths):
+    """Canonicalize roots and retain only their shallowest non-overlapping set."""
+    roots = sorted(
+        {os.path.realpath(os.path.abspath(path)) for path in paths},
+        key=lambda path: (len(path.split(os.sep)), path),
+    )
+    result = []
+    for root in roots:
+        if not any(_path_is_within(root, ancestor) for ancestor in result):
+            result.append(root)
+    return result
+
+
+def _validate_portable_symlinks(source_dir: str) -> None:
+    """Reject portable symlink files before upstream ``realpath`` can escape.
+
+    SimplePorting resolves each filename before writing. Under in-place porting
+    that would modify a symlink target, potentially outside the project tree.
+    Failing explicitly preserves both the link and its target.
+    """
+    for root, _dirs, files in os.walk(source_dir):
+        for name in files:
+            path = os.path.join(root, name)
+            if os.path.islink(path) and os.path.splitext(name)[1].lower() in _PORTABLE_SOURCE_EXTS:
+                raise RuntimeError(f"Refusing to port symlinked CUDA/C++ source in place: {path}")
+
+
+def _create_in_place_porter(musa_sp, source_dir: str, mapping_rule):
+    """Construct SimplePorting without exposing ``<source>_musa`` to its init.
+
+    Upstream initialization unconditionally removes and recreates the computed
+    mirror directory. Seed it with a disposable directory, then redirect both
+    input and output to the real source only after construction has completed.
+    """
+    with tempfile.TemporaryDirectory(prefix="torchada-port-init-") as temp_dir:
+        seed_dir = os.path.join(temp_dir, "source")
+        os.makedirs(seed_dir)
+        porter = musa_sp.SimplePorting(cuda_dir_path=seed_dir, mapping_rule=mapping_rule)
+    porter.cuda_dir_path = source_dir
+    porter.musa_dir_path = source_dir
+    return porter
 
 
 def _patch_simple_porting_load_replaced_mapping(musa_sp):
@@ -215,17 +322,25 @@ def _patch_simple_porting_modify_file(musa_sp):
 
     def modify_file(self, cuda_filepath, musa_filepath):
         ext = os.path.splitext(cuda_filepath)[1].lower()
+        in_place = os.path.realpath(self.cuda_dir_path) == os.path.realpath(self.musa_dir_path)
         if ext in _MUSA_NATIVE_EXTS or ext not in _PORTABLE_SOURCE_EXTS:
             # Leave byte-identical: either MUSA-native (.mu/.muh — already MUSA,
             # substitution would corrupt it) or not a compiled source at all
             # (.py/.jinja/.md/...). In place (dst == src) leave it alone; for a
             # distinct destination (legacy mirror mode) copy it verbatim so the
             # mirror stays complete.
-            if os.path.abspath(cuda_filepath) != os.path.abspath(musa_filepath):
+            # SimplePorting.change_filename turns a dotless name such as
+            # ``Makefile`` into ``.Makefile``. When the roots are in-place, do
+            # not copy to that synthetic path (or overwrite a real hidden file).
+            if not in_place and os.path.abspath(cuda_filepath) != os.path.abspath(musa_filepath):
                 import shutil
 
                 shutil.copyfile(cuda_filepath, musa_filepath)
             return
+        if in_place and not _path_is_within(cuda_filepath, self.cuda_dir_path):
+            raise RuntimeError(
+                f"Refusing to port CUDA/C++ source outside the in-place root: {cuda_filepath}"
+            )
         with open(cuda_filepath, encoding="utf-8", errors="surrogateescape") as f:
             lines = f.readlines()
         out = []
@@ -300,8 +415,7 @@ _STABLE_ACCESSOR_METHODS = (
 # keeps already-inline / template / comment lines untouched, which makes the
 # inline rewrite idempotent.
 _TENSOR_INL_DEF_RE = re.compile(
-    r"^(?!\s*(?:inline|template|//|\*))"
-    r"([A-Za-z_][\w:<>,\s\*&]*?\bTensor::[A-Za-z_]\w*\s*\()"
+    r"^(?!\s*(?:inline|template|//|\*))" r"([A-Za-z_][\w:<>,\s\*&]*?\bTensor::[A-Za-z_]\w*\s*\()"
 )
 
 
@@ -379,8 +493,14 @@ def _patch_torch_musa_stable_headers() -> None:
     try:
         import torch_musa
 
-        roots.append(os.path.join(os.path.dirname(torch_musa.__file__),
-                                  "share", "generated_cuda_compatible", "include"))
+        roots.append(
+            os.path.join(
+                os.path.dirname(torch_musa.__file__),
+                "share",
+                "generated_cuda_compatible",
+                "include",
+            )
+        )
     except ImportError:
         pass
 
@@ -402,7 +522,9 @@ def _patch_torch_musa_stable_headers() -> None:
                     logger.warning(
                         "torchada: could not backport torch::stable::Tensor "
                         "accessors into %s (numel() anchor not found); "
-                        "libtorch-stable kernels may fail to compile", ts)
+                        "libtorch-stable kernels may fail to compile",
+                        ts,
+                    )
             if os.path.exists(ti):
                 with open(ti, encoding="utf-8") as f:
                     contents = f.read()
@@ -445,10 +567,12 @@ def _apply_musa_patches():
 
     This function patches:
     1. musa_ext._is_musa_file - to recognize .cu/.cuh files as MUSA sources
-    2. musa_sp.EXT_REPLACED_MAPPING - an identity map so porting keeps the
+    2. musa_ext._write_ninja_file - to pass ``-x musa`` before identity-named
+       .cu inputs instead of relying on the legacy .mu suffix
+    3. musa_sp.EXT_REPLACED_MAPPING - an identity map so porting keeps the
        original .cu/.cuh names (no .mu/.muh rename), so it can run in place
-    3. musa_sp._MAPPING_RULE - to apply CUDA->MUSA symbol mapping
-    4. musa_sp.SimplePorting.modify_file - restrict content substitution to
+    4. musa_sp._MAPPING_RULE - to apply CUDA->MUSA symbol mapping
+    5. musa_sp.SimplePorting.modify_file - restrict content substitution to
        compiled sources/headers and make in-place (dst == src) writes safe
 
     These patches are required to compile .cu files in place on MUSA platform.
@@ -467,6 +591,7 @@ def _apply_musa_patches():
 
         # Patch _is_musa_file to recognize .cu/.cuh files
         musa_ext._is_musa_file = _is_musa_file
+        _patch_musa_ninja_language(musa_ext)
 
         # Patch EXT_REPLACED_MAPPING to an identity map: porting keeps the
         # original .cu/.cuh names so it runs in place (no .mu/.muh rename)
@@ -864,9 +989,7 @@ def _get_build_extension_class():
                             }
                 """
 
-                # Track directories that have been ported (class-level for persistence)
                 _ported_dirs = set()
-
 
                 def get_mapping_rule(self):
                     """
@@ -899,34 +1022,17 @@ def _get_build_extension_class():
                     if mapping_rule is None:
                         mapping_rule = self.get_mapping_rule()
 
-                    source_dir = os.path.abspath(source_dir)
+                    source_dir = os.path.realpath(os.path.abspath(source_dir))
                     if source_dir in self._ported_dirs:
                         return source_dir
 
+                    _validate_portable_symlinks(source_dir)
                     musa_sp.LOGGER.setLevel(logging.ERROR)
-                    sp = musa_sp.SimplePorting(
-                        cuda_dir_path=source_dir, mapping_rule=mapping_rule
-                    )
-                    # Redirect the port output onto the source tree itself, then run;
-                    # the read-all modify_file patch makes src == dst writes safe.
-                    sp.musa_dir_path = source_dir
+                    sp = _create_in_place_porter(musa_sp, source_dir, mapping_rule)
                     sp.run()
-
-                    # SimplePorting.__init__ eagerly created an empty <dir>_musa
-                    # (its computed output dir, before we redirect to source_dir).
-                    # Remove only that empty directory: os.rmdir refuses a
-                    # non-empty dir, so a <dir>_musa that happens to hold real
-                    # content is never force-deleted.
-                    leftover = source_dir + "_musa"
-                    if os.path.isdir(leftover):
-                        try:
-                            os.rmdir(leftover)
-                        except OSError:
-                            pass
 
                     self._ported_dirs.add(source_dir)
                     return source_dir
-
 
                 @staticmethod
                 def _dir_has_portable_sources(path):
@@ -939,7 +1045,7 @@ def _get_build_extension_class():
                     try:
                         for _root, _dirs, files in os.walk(path):
                             for f in files:
-                                if f.endswith(_PORTABLE_SOURCE_EXTS):
+                                if os.path.splitext(f)[1].lower() in _PORTABLE_SOURCE_EXTS:
                                     return True
                     except OSError:
                         pass
@@ -965,41 +1071,36 @@ def _get_build_extension_class():
                     and the extension's source paths stay valid. So there is no
                     per-file include rewriting, no source-path remapping, and no
                     second mirror to cause cross-tree ODR. ``.cu``/``.cuh`` compile as
-                    MUSA via the patched ``_is_musa_file`` (which selects ``-x musa``).
+                    MUSA via the patched ``_is_musa_file`` and explicit
+                    ``-x musa`` compiler flag.
                     """
                     mapping_rule = self.get_mapping_rule()
-
+                    self._ported_dirs = set()
+                    candidate_dirs = []
                     for ext in self.extensions:
-                        # Port every project-local include root, plus the parent
-                        # directory of each source (so a source whose directory is
-                        # not itself an include root still gets ported). Include
-                        # roots come first so a nested source dir is skipped once
-                        # its ancestor root has been ported. The extension
-                        # allowlist in modify_file keeps this from rewriting
-                        # non-compiled files (build scripts, templates, docs).
-                        candidate_dirs = list(getattr(ext, "include_dirs", None) or [])
+                        # System filtering applies only to include roots. An
+                        # explicit source parent is always project-owned even
+                        # when the checkout lives under /opt, /usr/src, or a
+                        # site-packages tree.
+                        for include_dir in list(getattr(ext, "include_dirs", None) or []):
+                            root = os.path.realpath(os.path.abspath(include_dir))
+                            if not self._is_system_include_dir(root):
+                                candidate_dirs.append(root)
                         for src in list(getattr(ext, "sources", None) or []):
                             candidate_dirs.append(os.path.dirname(os.path.abspath(src)))
 
-                        for cand in candidate_dirs:
-                            root = os.path.abspath(cand)
-                            if any(
-                                root == done or root.startswith(done + os.sep)
-                                for done in self._ported_dirs
-                            ):
-                                continue
-                            if (
-                                os.path.isdir(root)
-                                and not self._is_system_include_dir(root)
-                                and self._dir_has_portable_sources(root)
-                            ):
-                                self._port_directory(root, mapping_rule)
                         # ext.sources and ext.include_dirs are intentionally left
                         # unchanged: the tree is ported in place, so the original
                         # paths and includes resolve as-is.
 
-                    super().run()
+                    # Coalesce all extensions at once so a child include root is
+                    # never ported and then recursively ported again through a
+                    # later source-parent ancestor.
+                    for root in _coalesce_port_roots(candidate_dirs):
+                        if os.path.isdir(root) and self._dir_has_portable_sources(root):
+                            self._port_directory(root, mapping_rule)
 
+                    super().run()
 
             return _MUSABuildExtension
         except ImportError:
