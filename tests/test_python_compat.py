@@ -39,7 +39,7 @@ class TestPython38Compatibility:
             except SyntaxError as e:
                 errors.append(f"{filepath}: {e}")
 
-        assert not errors, f"Syntax errors found:\n" + "\n".join(errors)
+        assert not errors, "Syntax errors found:\n" + "\n".join(errors)
 
     def test_all_modules_importable(self):
         """Test that all torchada modules can be imported."""
@@ -103,27 +103,36 @@ class TestPython38Compatibility:
         In Python 3.10+, you can use `int | str` for union types.
         In Python 3.8/3.9, you must use Union[int, str] from typing.
         """
-        # Pattern for union type operator in type hints
-        # Matches things like `: int | str` or `-> str | None`
-        pattern = r"(?::|->)\s*\w+\s*\|\s*\w+"
-
         errors = []
         for filepath in get_python_files():
             with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
+                source = f.read()
+            tree = ast.parse(source, filename=str(filepath))
 
-            for i, line in enumerate(content.split("\n"), 1):
-                # Skip comments
-                if line.strip().startswith("#"):
-                    continue
-                # Skip bitwise OR operations (likely not type hints)
-                if "==" in line or "!=" in line:
-                    continue
+            annotations = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.AnnAssign):
+                    annotations.append(node.annotation)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.returns is not None:
+                        annotations.append(node.returns)
+                    annotations.extend(
+                        arg.annotation
+                        for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+                        if arg.annotation is not None
+                    )
+                    if node.args.vararg is not None and node.args.vararg.annotation is not None:
+                        annotations.append(node.args.vararg.annotation)
+                    if node.args.kwarg is not None and node.args.kwarg.annotation is not None:
+                        annotations.append(node.args.kwarg.annotation)
 
-                if re.search(pattern, line):
-                    # Exclude dict merge operations and other valid uses
-                    if " | {" not in line and "} | " not in line:
-                        errors.append(f"{filepath}:{i}: {line.strip()}")
+            for annotation in annotations:
+                if any(
+                    isinstance(child, ast.BinOp) and isinstance(child.op, ast.BitOr)
+                    for child in ast.walk(annotation)
+                ):
+                    text = ast.get_source_segment(source, annotation) or "<annotation>"
+                    errors.append(f"{filepath}:{annotation.lineno}: {text}")
 
         assert not errors, (
             "Found Python 3.10+ union type operator. "
