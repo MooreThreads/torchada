@@ -23,7 +23,9 @@ Usage:
 
 import functools
 import inspect
+import os
 import sys
+import time
 import warnings
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, List, Optional
@@ -387,6 +389,66 @@ def _patch_torch_generator():
 
 # Store original graph class for patching
 _original_graph_class = None
+_cuda_graph_debug_dump_dir: Optional[str] = None
+
+
+def _configure_cuda_graph_debug_dump_dir() -> Optional[str]:
+    """Cache the optional graph debug dump directory from the environment."""
+    global _cuda_graph_debug_dump_dir
+
+    path_setting = os.environ.get("TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH")
+    if not path_setting:
+        _cuda_graph_debug_dump_dir = None
+        return None
+
+    dump_dir = os.path.abspath(os.path.expanduser(path_setting))
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        warnings.warn(f"TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH={path_setting!r} is unusable: {exc!r}")
+        _cuda_graph_debug_dump_dir = None
+        return None
+
+    _cuda_graph_debug_dump_dir = dump_dir
+    return dump_dir
+
+
+def _resolve_cuda_graph_debug_dump_path(dump_dir: str) -> str:
+    """Resolve the configured graph debug directory to a timestamped dot path."""
+    timestamp = str(time.time_ns())
+    return os.path.join(dump_dir, f"graph_{timestamp}.dot")
+
+
+def _enable_cuda_graph_debug_mode(graph_obj: Any) -> bool:
+    enable_debug_mode = getattr(graph_obj, "enable_debug_mode", None)
+    if enable_debug_mode is None:
+        warnings.warn(
+            "TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH is set but "
+            "graph.enable_debug_mode() is unavailable"
+        )
+        return False
+
+    try:
+        enable_debug_mode()
+    except Exception as exc:  # noqa: BLE001
+        warnings.warn(f"graph.enable_debug_mode() failed: {exc!r}")
+        return False
+    return True
+
+
+def _dump_cuda_graph_debug_dot(graph_obj: Any, dump_dir: str) -> None:
+    debug_dump = getattr(graph_obj, "debug_dump", None)
+    if debug_dump is None:
+        warnings.warn(
+            "TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH is set but "
+            "graph.debug_dump(path) is unavailable"
+        )
+        return
+
+    try:
+        debug_dump(_resolve_cuda_graph_debug_dump_path(dump_dir))
+    except Exception as exc:  # noqa: BLE001
+        warnings.warn(f"graph.debug_dump() failed: {exc!r}")
 
 
 def _patch_graph_context_manager():
@@ -406,6 +468,7 @@ def _patch_graph_context_manager():
     if not hasattr(torch.cuda, "graph"):
         return
 
+    _configure_cuda_graph_debug_dump_dir()
     _original_graph_class = torch.cuda.graph
 
     class GraphWrapper:
@@ -428,6 +491,10 @@ def _patch_graph_context_manager():
             if graph_obj is None:
                 raise TypeError("graph() missing required argument: 'cuda_graph'")
 
+            self._graph_obj = graph_obj
+            self._debug_dump_dir = None
+            self._debug_enabled = False
+
             # Create the original graph instance
             self._wrapped = _original_graph_class(
                 graph_obj,
@@ -437,10 +504,19 @@ def _patch_graph_context_manager():
             )
 
         def __enter__(self):
+            if _cuda_graph_debug_dump_dir:
+                self._debug_dump_dir = _cuda_graph_debug_dump_dir
+                self._debug_enabled = _enable_cuda_graph_debug_mode(self._graph_obj)
+            else:
+                self._debug_dump_dir = None
+                self._debug_enabled = False
             return self._wrapped.__enter__()
 
         def __exit__(self, exc_type, exc_value, traceback):
-            return self._wrapped.__exit__(exc_type, exc_value, traceback)
+            result = self._wrapped.__exit__(exc_type, exc_value, traceback)
+            if exc_type is None and self._debug_enabled and self._debug_dump_dir:
+                _dump_cuda_graph_debug_dot(self._graph_obj, self._debug_dump_dir)
+            return result
 
     # Copy over class attributes and docstring
     GraphWrapper.__doc__ = _original_graph_class.__doc__
@@ -1865,6 +1941,7 @@ def apply_patches():
     - Device string translation ("cuda" -> "musa")
     - torch.distributed with 'nccl' backend -> 'mccl'
     - torch.cuda.CUDAGraph -> torch.musa.MUSAGraph
+    - optional CUDA graph debug dumps via TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH
     - torch.cuda.nccl -> torch.musa.mccl
     - torch.amp.autocast(device_type='cuda') -> 'musa'
     - torch.utils.cpp_extension (CUDAExtension, BuildExtension) -> MUSA versions

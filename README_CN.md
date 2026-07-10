@@ -107,6 +107,18 @@ with torch.cuda.graph(cuda_graph=g):  # cuda_graph= 关键字参数在 MUSA 上�
     y = model(x)
 ```
 
+如果需要 dump MUSA graph 的 dot 文件用于调试，可以在运行前设置
+`TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH`。torchada 会在每次 graph capture 前调用
+`enable_debug_mode()`，并在 capture 结束后调用 `debug_dump(path)`：
+
+```bash
+TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH=./graph_dumps \
+python serve.py
+```
+
+该变量表示 dump 目录。torchada 会按需创建目录，并在其中写入带时间戳的文件，
+例如 `graph_1783512345678900000.dot`，避免多次 capture 时互相覆盖。
+
 ### torch.compile
 
 ```python
@@ -293,7 +305,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.70
+torchada>=0.1.71
 ```
 
 ### 步骤 2：条件导入

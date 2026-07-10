@@ -351,6 +351,58 @@ class TestCUDAGraph:
         ctx = torch.cuda.graph(cuda_graph=g, pool=pool, stream=stream)
         assert ctx is not None
 
+    @pytest.mark.musa
+    def test_graph_context_manager_debug_dump(self, tmp_path, monkeypatch):
+        """Graph debug dump captures a real GEMM graph and writes a dot file."""
+        import torch
+
+        import torchada
+        from torchada import _patch
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA-only test")
+        if torch.cuda.device_count() == 0:
+            pytest.skip("No GPU available")
+
+        monkeypatch.chdir(tmp_path)
+        dump_dir = tmp_path / "graph_dumps"
+        monkeypatch.setattr(_patch, "_cuda_graph_debug_dump_dir", None)
+        monkeypatch.setenv("TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH", "graph_dumps")
+        _patch._configure_cuda_graph_debug_dump_dir()
+        assert _patch._cuda_graph_debug_dump_dir == str(dump_dir)
+        monkeypatch.chdir(tmp_path.parent)
+
+        a = torch.randn(32, 32, device="cuda", dtype=torch.float32)
+        b = torch.randn(32, 32, device="cuda", dtype=torch.float32)
+        out = torch.empty(32, 32, device="cuda", dtype=torch.float32)
+
+        # Warm up GEMM before graph capture so the captured region is stable.
+        torch.mm(a, b, out=out)
+        expected = out.detach().clone()
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        dump_files = []
+        try:
+            with torch.cuda.graph(cuda_graph=graph):
+                torch.mm(a, b, out=out)
+
+            dump_files = sorted(dump_dir.glob("graph_*.dot"))
+            assert len(dump_files) == 1
+            assert dump_files[0].is_file()
+            assert dump_files[0].stat().st_size > 0
+
+            out.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+        finally:
+            for path in dump_files:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
 
 class TestDistributedBackend:
     """Test distributed backend patching."""
@@ -3111,9 +3163,7 @@ class TestStableCompatHeaders:
 
         from torchada.utils.cpp_extension import stable_compat_include_dir
 
-        p = os.path.join(
-            stable_compat_include_dir(), "torch", "headeronly", "core", "Dispatch.h"
-        )
+        p = os.path.join(stable_compat_include_dir(), "torch", "headeronly", "core", "Dispatch.h")
         assert os.path.isfile(p), f"Dispatch.h shim missing: {p}"
         text = open(p, encoding="utf-8").read()
         # The THO_DISPATCH_* macros vLLM/SGLang stable kernels use.
@@ -3127,9 +3177,7 @@ class TestStableCompatHeaders:
 
         from torchada.utils.cpp_extension import stable_compat_include_dir
 
-        p = os.path.join(
-            stable_compat_include_dir(), "torch", "csrc", "stable", "device.h"
-        )
+        p = os.path.join(stable_compat_include_dir(), "torch", "csrc", "stable", "device.h")
         assert os.path.isfile(p), f"device.h shim missing: {p}"
         text = open(p, encoding="utf-8").read()
         assert "struct Device" in text
@@ -3146,9 +3194,7 @@ class TestStableCompatHeaders:
         from torchada.utils.cpp_extension import stable_compat_include_dir
 
         text = open(
-            os.path.join(
-                stable_compat_include_dir(), "torch", "csrc", "stable", "device.h"
-            ),
+            os.path.join(stable_compat_include_dir(), "torch", "csrc", "stable", "device.h"),
             encoding="utf-8",
         ).read()
         assert "int32_t type_;" not in text, "type_ left uninitialized"
@@ -3162,9 +3208,7 @@ class TestStableCompatHeaders:
 
         from torchada.utils.cpp_extension import stable_compat_include_dir
 
-        p = os.path.join(
-            stable_compat_include_dir(), "torch", "csrc", "stable", "macros.h"
-        )
+        p = os.path.join(stable_compat_include_dir(), "torch", "csrc", "stable", "macros.h")
         assert os.path.isfile(p), f"macros.h shim missing: {p}"
         assert "library.h" in open(p, encoding="utf-8").read()
 
@@ -3257,10 +3301,7 @@ class TestStableCompatHeaders:
     def test_include_paths_appends_stable_compat_on_musa(self):
         """include_paths() auto-appends the stable_compat dir for device builds on MUSA."""
         import torchada
-        from torchada.utils.cpp_extension import (
-            include_paths,
-            stable_compat_include_dir,
-        )
+        from torchada.utils.cpp_extension import include_paths, stable_compat_include_dir
 
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
@@ -3273,10 +3314,7 @@ class TestStableCompatHeaders:
     def test_include_paths_omits_stable_compat_for_cpu_only(self):
         """include_paths(device_type='cpu') does not add the device stable_compat dir."""
         import torchada
-        from torchada.utils.cpp_extension import (
-            include_paths,
-            stable_compat_include_dir,
-        )
+        from torchada.utils.cpp_extension import include_paths, stable_compat_include_dir
 
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
