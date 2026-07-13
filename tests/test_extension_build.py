@@ -221,8 +221,8 @@ class TestMixedSourcesBuild:
     """
     Test building extensions with mixed source types (.cu, .cuh, .mu, .muh, .cpp).
 
-    This tests the fix for the issue where .mu files required manually specifying
-    the ported path (e.g., csrc_musa/foo.mu instead of csrc/foo.mu).
+    In-place porting keeps every source at its original path (no <dir>_musa
+    mirror, no .cu -> .mu rename), so a .mu source is listed as csrc/foo.mu.
     """
 
     def test_mixed_sources_dir_exists(self):
@@ -246,12 +246,12 @@ class TestMixedSourcesBuild:
         """
         Test building an extension with mixed .cu/.cuh/.mu/.muh/.cpp sources.
 
-        This is the key e2e test that verifies:
-        1. .cu files are ported to .mu in the _musa directory
-        2. .cuh files are ported to .muh in the _musa directory
-        3. .mu files that don't exist at original path are found in _musa directory
-        4. .muh files are handled correctly
-        5. .cpp files are ported for CUDA symbol translation
+        This is the key e2e test that verifies in-place porting:
+        1. .cu / .cuh files are ported in place (content substituted, names and
+           locations unchanged — no .mu/.muh rename)
+        2. .mu / .muh files already at their original path resolve directly
+        3. .cpp files are ported for CUDA symbol translation
+        4. no <dir>_musa mirror is created
         """
         if not _is_gpu_available():
             pytest.skip("CUDA/MUSA not available")
@@ -264,9 +264,8 @@ class TestMixedSourcesBuild:
             src_dir = os.path.join(tmpdir, "csrc")
             shutil.copytree(MIXED_SOURCES_DIR, src_dir)
 
-            # Create setup.py that uses CUDA-style paths for .mu files
-            # This tests the fix: users can specify csrc/mul_kernel.mu
-            # and torchada will find it in csrc_musa/mul_kernel.mu after porting
+            # setup.py lists sources at their real paths; in-place porting keeps
+            # them there (no csrc_musa mirror, no .cu -> .mu rename).
             setup_content = """
 import torchada  # noqa: F401 - Apply MUSA patches
 from setuptools import setup
@@ -279,8 +278,8 @@ setup(
             name="test_mixed_sources",
             sources=[
                 "csrc/bindings.cpp",      # C++ file with CUDA symbols
-                "csrc/add_kernel.cu",     # CUDA kernel -> ported to csrc_musa/add_kernel.mu
-                "csrc/mul_kernel.mu",     # MUSA kernel -> found in csrc_musa/mul_kernel.mu
+                "csrc/add_kernel.cu",     # CUDA kernel -> ported in place, name kept
+                "csrc/mul_kernel.mu",     # MUSA-native kernel -> left as-is
             ],
             include_dirs=["csrc"],        # Include dir for headers
         )
@@ -311,17 +310,17 @@ setup(
             ext_files = [f for f in os.listdir(tmpdir) if f.endswith(".so") or f.endswith(".pyd")]
             assert len(ext_files) > 0, "No extension file was built"
 
-            # Verify ported directory was created
-            ported_dir = os.path.join(tmpdir, "csrc_musa")
-            assert os.path.isdir(ported_dir), "Ported directory csrc_musa was not created"
-
-            # Verify ported files exist
+            # In-place porting: no <dir>_musa mirror, no .cu -> .mu rename.
+            assert not os.path.isdir(
+                os.path.join(tmpdir, "csrc_musa")
+            ), "in-place porting must not create a csrc_musa mirror"
+            # Sources keep their original names and locations.
             assert os.path.exists(
-                os.path.join(ported_dir, "add_kernel.mu")
-            ), "add_kernel.cu was not ported to add_kernel.mu"
+                os.path.join(src_dir, "add_kernel.cu")
+            ), "add_kernel.cu should be ported in place (name/location kept)"
             assert os.path.exists(
-                os.path.join(ported_dir, "utils.muh")
-            ), "utils.cuh was not ported to utils.muh"
+                os.path.join(src_dir, "mul_kernel.mu")
+            ), "mul_kernel.mu should resolve at its original path"
 
     def test_run_mixed_sources_extension(self):
         """Test running the mixed sources extension after building."""
@@ -410,14 +409,14 @@ SAME_NAME_DIR = os.path.join(CSRC_DIR, "same_name")
 )
 class TestSameNameFilePrecedence:
     """
-    Test that .mu files take precedence over .cu files when both exist.
+    Test that a .cu and a same-named .mu coexist under in-place porting.
 
-    This tests the fix for the issue where SimplePorting's file processing
-    order is non-deterministic, causing either the ported .cu or original .mu
-    to end up in the _musa directory depending on which is processed last.
-
-    The fix ensures that original .mu/.muh files are always copied after
-    porting, so they take precedence over auto-ported .cu/.cuh files.
+    With in-place porting there is no <dir>_musa mirror and no .cu -> .mu
+    rename, so kernel.cu and kernel.mu stay distinct files at their original
+    paths. The source listed in the build is the one compiled; a sibling .mu is
+    left in place. (The old mirror behavior — a .mu silently winning over a
+    same-named .cu inside the generated mirror — no longer applies; list the
+    .mu explicitly to build it.)
     """
 
     def test_same_name_dir_exists(self):
@@ -431,27 +430,24 @@ class TestSameNameFilePrecedence:
         assert os.path.exists(cu_path), f"kernel.cu not found: {cu_path}"
         assert os.path.exists(mu_path), f"kernel.mu not found: {mu_path}"
 
-    def test_mu_file_takes_precedence(self):
+    def test_cu_and_mu_coexist_in_place(self):
         """
-        Test that .mu file takes precedence when both .cu and .mu exist.
-
-        This is the key test: after porting, the csrc_musa/kernel.mu file
-        should contain the content from the original kernel.mu (magic number 123),
-        not the ported kernel.cu (magic number 42).
+        Build listing kernel.cu (kernel.mu also present): in-place porting keeps
+        both distinct files at their original paths, creates no csrc_musa mirror,
+        and builds the listed .cu (ported in place). The sibling .mu is untouched.
         """
         if not _is_gpu_available():
             pytest.skip("CUDA/MUSA not available")
 
         if not torchada.is_musa_platform():
-            pytest.skip("Same name precedence test only applicable on MUSA platform")
+            pytest.skip("In-place coexistence test only applicable on MUSA platform")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create csrc directory and copy source files
             csrc_dir = os.path.join(tmpdir, "csrc")
             shutil.copytree(SAME_NAME_DIR, csrc_dir)
 
-            # Create setup.py that only specifies the .cu file
-            # (simulating user who wants to build CUDA code)
+            # setup.py lists the .cu (a same-named .mu also exists in csrc/)
             setup_content = f"""
 import torchada  # noqa: F401 - Apply MUSA patches
 from setuptools import setup
@@ -464,7 +460,7 @@ setup(
             name="test_same_name",
             sources=[
                 "csrc/bindings.cpp",
-                "csrc/kernel.cu",  # .mu file exists too - should take precedence
+                "csrc/kernel.cu",  # kernel.mu also present; both coexist in place
             ],
         )
     ],
@@ -485,17 +481,21 @@ setup(
             )
             assert result.returncode == 0, f"Build failed: {result.stderr}"
 
-            # Check that csrc_musa/kernel.mu contains the MUSA version (magic 123)
-            ported_mu_path = os.path.join(tmpdir, "csrc_musa", "kernel.mu")
-            assert os.path.exists(ported_mu_path), f"Ported file not found: {ported_mu_path}"
+            # In-place: no mirror, no rename, both files still present in place.
+            assert not os.path.exists(
+                os.path.join(tmpdir, "csrc_musa")
+            ), "in-place porting must not create a csrc_musa mirror"
+            assert os.path.exists(
+                os.path.join(csrc_dir, "kernel.cu")
+            ), "kernel.cu must remain in place"
+            assert os.path.exists(
+                os.path.join(csrc_dir, "kernel.mu")
+            ), "sibling kernel.mu must be left in place"
 
-            with open(ported_mu_path, "r") as f:
-                content = f.read()
-                # The MUSA version returns 123, CUDA version returns 42
-                assert "return 123" in content, (
-                    f".mu file should take precedence but found ported .cu content. "
-                    f"Expected 'return 123' but got:\n{content}"
-                )
-                assert "return 42" not in content, (
-                    f"Found ported .cu content instead of original .mu. " f"Content:\n{content}"
-                )
+            # The listed .cu was ported in place and is the built source.
+            with open(os.path.join(csrc_dir, "kernel.cu"), "r") as f:
+                cu_content = f.read()
+            assert "return 42" in cu_content, (
+                "the listed kernel.cu (magic 42) should be the built source; "
+                f"got:\n{cu_content}"
+            )

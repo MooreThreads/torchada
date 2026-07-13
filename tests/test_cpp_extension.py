@@ -7,6 +7,7 @@ work correctly:
 """
 
 import os
+from types import SimpleNamespace
 
 # Import torchada first to apply patches
 import torchada  # noqa: F401
@@ -138,9 +139,10 @@ class TestMusaPatches:
         if torchada.is_musa_platform():
             import torch_musa.utils.simple_porting as musa_sp
 
-            # Extensions are converted: .cu -> .mu, .cuh -> .muh for mcc compiler
-            assert musa_sp.EXT_REPLACED_MAPPING["cu"] == "mu"
-            assert musa_sp.EXT_REPLACED_MAPPING["cuh"] == "muh"
+            # In-place porting retains filenames; mcc receives an explicit
+            # ``-x musa`` flag instead of relying on .mu/.muh suffixes.
+            assert musa_sp.EXT_REPLACED_MAPPING["cu"] == "cu"
+            assert musa_sp.EXT_REPLACED_MAPPING["cuh"] == "cuh"
 
     def test_mapping_rule_exists(self):
         """Test _MAPPING_RULE is set."""
@@ -167,3 +169,42 @@ class TestMusaPatches:
             assert rules.get("cudaStream_t") == "musaStream_t"
             assert rules.get("at::cuda") == "at::musa"
             assert rules.get("c10::cuda") == "c10::musa"
+
+
+class TestMusaNinjaLanguagePatch:
+    """Test the filename-independent mcc language selection patch."""
+
+    def test_adds_explicit_language_once(self):
+        from torchada.utils.cpp_extension import _with_explicit_musa_language
+
+        assert _with_explicit_musa_language(["-O3"]) == ["-O3", "-x", "musa"]
+        assert _with_explicit_musa_language(["-x", "musa", "-O3"]) == [
+            "-x",
+            "musa",
+            "-O3",
+        ]
+        assert _with_explicit_musa_language(["-x=musa", "-O3"]) == ["-x=musa", "-O3"]
+        assert _with_explicit_musa_language(["-x", "cuda"]) == [
+            "-x",
+            "cuda",
+            "-x",
+            "musa",
+        ]
+
+    def test_patches_positional_and_keyword_musa_cflags(self):
+        from torchada.utils.cpp_extension import _patch_musa_ninja_language
+
+        calls = []
+
+        def write_ninja(path, musa_cflags):
+            calls.append((path, musa_cflags))
+
+        module = SimpleNamespace(_write_ninja_file=write_ninja)
+        _patch_musa_ninja_language(module)
+        module._write_ninja_file("positional", ["-O2"])
+        module._write_ninja_file(path="keyword", musa_cflags=["-g"])
+
+        assert calls == [
+            ("positional", ["-O2", "-x", "musa"]),
+            ("keyword", ["-g", "-x", "musa"]),
+        ]

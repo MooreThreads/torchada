@@ -1,8 +1,6 @@
 """cuda_runtime CUDA->MUSA porting rules."""
 
 MAPPING = {
-    '.cuh"': '.muh"',
-    '.cuh>': '.muh>',
     'cudaMalloc': 'musaMalloc',
     'cudaFree': 'musaFree',
     'cudaMemcpy': 'musaMemcpy',

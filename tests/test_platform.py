@@ -2,6 +2,9 @@
 Tests for platform detection and initialization.
 """
 
+import re
+from pathlib import Path
+
 
 class TestPlatformDetection:
     """Test platform detection functionality."""
@@ -56,7 +59,20 @@ class TestPlatformDetection:
 
         version = torchada.get_version()
         assert version == torchada.__version__
+        assert version == "0.1.70"
         assert isinstance(version, str)
+
+    def test_project_version_matches_runtime_version(self):
+        """The package metadata and runtime version must stay in sync."""
+        import torchada
+
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        match = re.search(
+            r'^version = "([^"]+)"$', pyproject.read_text(encoding="utf-8"), re.MULTILINE
+        )
+
+        assert match is not None
+        assert match.group(1) == torchada.__version__
 
     def test_get_platform(self):
         """Test get_platform helper."""
