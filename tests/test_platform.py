@@ -59,7 +59,7 @@ class TestPlatformDetection:
 
         version = torchada.get_version()
         assert version == torchada.__version__
-        assert version == "0.1.70"
+        assert version == "0.1.71"
         assert isinstance(version, str)
 
     def test_project_version_matches_runtime_version(self):

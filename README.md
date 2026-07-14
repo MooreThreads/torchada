@@ -107,6 +107,20 @@ with torch.cuda.graph(cuda_graph=g):  # cuda_graph= keyword works on MUSA
     y = model(x)
 ```
 
+To dump MUSA graph dot files for debugging, set
+`TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH` before running your program. torchada will
+call `enable_debug_mode()` before each graph capture and `debug_dump(path)` after
+the capture completes:
+
+```bash
+TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH=./graph_dumps \
+python serve.py
+```
+
+The value is a dump directory. torchada creates it if needed and writes
+timestamped files such as `graph_1783512345678900000.dot` inside it, so
+repeated captures do not overwrite one another.
+
 ### torch.compile
 
 ```python
@@ -298,7 +312,7 @@ See `src/torchada/_mapping.py` for the complete mapping table (380+ mappings).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.70
+torchada>=0.1.71
 ```
 
 ### Step 2: Conditional Import
