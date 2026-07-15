@@ -1265,31 +1265,52 @@ class TestCudaArchGuardPorting:
     unsupported-hardware branch of the guard.
     """
 
-    def test_bare_and_parenthesised_forms_are_mapped(self):
+    @pytest.mark.parametrize(
+        "src,dst",
+        [
+            ("__CUDA_ARCH__ < 800", "__MUSA_ARCH__ < 220"),
+            ("__CUDA_ARCH__ >= 800", "__MUSA_ARCH__ >= 220"),
+            ("__CUDA_ARCH__ < 900", "__MUSA_ARCH__ < 310"),
+            ("__CUDA_ARCH__ >= 900", "__MUSA_ARCH__ >= 310"),
+        ],
+    )
+    def test_comparison_is_mapped(self, src, dst):
         from torchada._mapping import _MAPPING_RULE
 
-        for src, dst in (
-            ("__CUDA_ARCH__ < 800", "__MUSA_ARCH__ < 220"),
-            ("(__CUDA_ARCH__ < 800)", "(__MUSA_ARCH__ < 220)"),
-            ("__CUDA_ARCH__ >= 800", "__MUSA_ARCH__ >= 220"),
-            ("(__CUDA_ARCH__ >= 800)", "(__MUSA_ARCH__ >= 220)"),
-            ("__CUDA_ARCH__ >= 900", "__MUSA_ARCH__ >= 310"),
-            ("(__CUDA_ARCH__ >= 900)", "(__MUSA_ARCH__ >= 310)"),
-        ):
-            assert _MAPPING_RULE[src] == dst
+        assert _MAPPING_RULE[src] == dst
 
-    def test_bare_guard_keeps_no_nvidia_threshold(self):
-        """The spelling upstream actually uses has no parentheses."""
+    @pytest.mark.parametrize(
+        "guard,expected",
+        [
+            # the spelling upstream actually uses: no parentheses
+            (
+                "#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800",
+                "__MUSA_ARCH__ < 220",
+            ),
+            # a parenthesised comparison is covered by the same rule, which is why
+            # no separate parenthesised rule is needed
+            ("#if (__CUDA_ARCH__ < 800)", "(__MUSA_ARCH__ < 220)"),
+            # here the parentheses wrap the whole expression, not the comparison
+            (
+                "#if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800) || defined(USE_ROCM)",
+                "__MUSA_ARCH__ >= 220)",
+            ),
+            ("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900", "__MUSA_ARCH__ >= 310"),
+            ("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900", "__MUSA_ARCH__ < 310"),
+        ],
+    )
+    def test_guard_keeps_no_nvidia_threshold(self, guard, expected):
         from torchada.utils.cpp_extension import _port_cuda_source
 
-        source = "#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800\n"
-        result = _port_cuda_source(source)
+        result = _port_cuda_source(guard)
 
-        assert "__MUSA_ARCH__ < 220" in result
-        # The bug: the macro is renamed while NVIDIA's threshold survives, so the
-        # guard reads `310 < 800` and is always true. (The `defined(...)` operand is
+        assert expected in result
+        # The bug: the macro is renamed while NVIDIA's threshold survives, so a guard
+        # reads e.g. `310 < 800` and is always true. (The `defined(...)` operand is
         # renamed by torch_musa's own general.json, not by these rules.)
-        assert "__MUSA_ARCH__ < 800" not in result
+        for nvidia in ("__MUSA_ARCH__ < 800", "__MUSA_ARCH__ >= 800",
+                       "__MUSA_ARCH__ < 900", "__MUSA_ARCH__ >= 900"):
+            assert nvidia not in result
 
     def test_guard_selects_supported_branch_on_mp31(self):
         """mp_31 reports __MUSA_ARCH__ == 310; the ported guard must be false."""
