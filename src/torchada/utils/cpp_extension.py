@@ -82,6 +82,38 @@ _MUSA_NATIVE_EXTS = (
     ".muh",
 )
 
+# A vendor mapping header spells each CUDA name in terms of its MUSA
+# counterpart (`#define cudaEventDisableTiming musaEventDisableTiming`,
+# `#define CU_MEMORYTYPE_DEVICE MU_MEMORYTYPE_DEVICE`). Substituting the defined
+# name as well collapses the line to `#define musaX musaX` -- a self-reference
+# that shadows the real definition (`driver_types.h`) and leaves the symbol
+# expanding to an undeclared identifier. Such a line is already MUSA-aware, so
+# it is kept verbatim. Names never collide across the two sides of a genuine
+# alias (`#define cudaCheck cudaCheckImpl` still ports), so only the degenerate
+# mapping is skipped.
+_SELF_REF_DEFINE_RE = re.compile(
+    r"^\s*#\s*define\s+(\w+)(?:\([^()]*\))?\s+\(*\s*(\w+)\s*(?:\([^()]*\))?\s*\)*\s*$"
+)
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r"//.*")
+
+
+def _collapses_to_self_reference(ported: str) -> bool:
+    """Whether a ported logical line became a self-referential ``#define X X``.
+
+    Matches the whole logical line, since a mapping may put its replacement past
+    a backslash continuation. Trailing comments and redundant parentheses around
+    the replacement are ignored first: ``#define X (X)`` and ``#define X X /* n */``
+    shadow the real definition exactly as ``#define X X`` does, and vendor headers
+    routinely annotate their mappings. Only the decision reads the stripped text;
+    the line itself is emitted untouched.
+    """
+    flat = re.sub(r"\\\s*\n\s*", " ", ported)
+    flat = _BLOCK_COMMENT_RE.sub(" ", flat)
+    flat = _LINE_COMMENT_RE.sub("", flat)
+    match = _SELF_REF_DEFINE_RE.match(flat)
+    return match is not None and match.group(1) == match.group(2)
+
 
 def _get_cuda_home() -> Optional[str]:
     """
@@ -293,10 +325,11 @@ def _patch_simple_porting_open(musa_sp):
 
 def _patch_simple_porting_modify_file(musa_sp):
     """Make ``SimplePorting.modify_file`` (a) only rewrite compiled C/C++/CUDA
-    files and (b) read the whole source before writing, so porting a file **in
-    place** (destination path == source path) is safe.
+    files, (b) read the whole source before writing, so porting a file **in
+    place** (destination path == source path) is safe, and (c) keep CUDA→MUSA
+    mapping lines that substitution would collapse into a self-reference.
 
-    Two problems with the stock method under in-place porting:
+    Three problems with the stock method under in-place porting:
 
     1. ``SimplePorting.run`` walks *every* file in the tree and calls
        ``modify_file`` on each, regardless of extension. In the legacy
@@ -318,6 +351,16 @@ def _patch_simple_porting_modify_file(musa_sp):
        the source handle is open, zeroing the file when src == dst. Reading all
        lines up front before opening the destination makes the in-place write
        safe.
+
+    3. A project-local vendor header may already map CUDA onto MUSA itself
+       (``#define cudaEventDisableTiming musaEventDisableTiming``). Substituting
+       the defined name turns it into ``#define musaEventDisableTiming
+       musaEventDisableTiming``, which shadows the runtime's real definition
+       with a self-reference, so the symbol expands to an undeclared identifier
+       and every translation unit using it fails to compile. In mirror mode the
+       original header stayed intact and only the throwaway copy was mangled;
+       in place there is no intact copy left. Lines that collapse this way are
+       kept verbatim -- see ``_collapses_to_self_reference``.
     """
 
     def modify_file(self, cuda_filepath, musa_filepath):
@@ -343,15 +386,38 @@ def _patch_simple_porting_modify_file(musa_sp):
             )
         with open(cuda_filepath, encoding="utf-8", errors="surrogateescape") as f:
             lines = f.readlines()
-        out = []
-        for line in lines:
+
+        def port_line(line):
             if line.startswith("*") or line.startswith("/") or line == "":
-                out.append(line)
-                continue
+                return line
             for k, v in self.mapping_rule:
                 if "cub/" not in line:
                     line = line.replace(k, v)
-            out.append(line)
+            return line
+
+        out = []
+        src_group = []
+        ported_group = []
+
+        def flush_group():
+            ported_text = "".join(ported_group)
+            if _collapses_to_self_reference(ported_text):
+                out.append("".join(src_group))
+            else:
+                out.append(ported_text)
+            src_group.clear()
+            ported_group.clear()
+
+        # Accumulate each logical line (backslash continuations included) so a
+        # mapping that collapses to `#define X X` can be reverted as a whole.
+        for line in lines:
+            src_group.append(line)
+            ported_group.append(port_line(line))
+            if not line.rstrip("\n").endswith("\\"):
+                flush_group()
+        if src_group:
+            flush_group()
+
         with open(musa_filepath, "w", encoding="utf-8", errors="surrogateescape") as f_musa:
             f_musa.writelines(out)
 
