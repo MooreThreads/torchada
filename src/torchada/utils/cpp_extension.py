@@ -92,17 +92,25 @@ _MUSA_NATIVE_EXTS = (
 # alias (`#define cudaCheck cudaCheckImpl` still ports), so only the degenerate
 # mapping is skipped.
 _SELF_REF_DEFINE_RE = re.compile(
-    r"^\s*#\s*define\s+(\w+)(?:\([^()]*\))?\s+(\w+)(?:\([^()]*\))?\s*$"
+    r"^\s*#\s*define\s+(\w+)(?:\([^()]*\))?\s+\(*\s*(\w+)\s*(?:\([^()]*\))?\s*\)*\s*$"
 )
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r"//.*")
 
 
 def _collapses_to_self_reference(ported: str) -> bool:
     """Whether a ported logical line became a self-referential ``#define X X``.
 
-    Takes the whole logical line: a mapping header may put the replacement past
-    a backslash continuation, and that form collapses identically.
+    Matches the whole logical line, since a mapping may put its replacement past
+    a backslash continuation. Trailing comments and redundant parentheses around
+    the replacement are ignored first: ``#define X (X)`` and ``#define X X /* n */``
+    shadow the real definition exactly as ``#define X X`` does, and vendor headers
+    routinely annotate their mappings. Only the decision reads the stripped text;
+    the line itself is emitted untouched.
     """
     flat = re.sub(r"\\\s*\n\s*", " ", ported)
+    flat = _BLOCK_COMMENT_RE.sub(" ", flat)
+    flat = _LINE_COMMENT_RE.sub("", flat)
     match = _SELF_REF_DEFINE_RE.match(flat)
     return match is not None and match.group(1) == match.group(2)
 

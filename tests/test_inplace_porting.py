@@ -155,6 +155,44 @@ def test_vendor_mapping_defines_are_kept_verbatim(tmp_path):
     assert "#define musaEventDisableTiming musaEventDisableTiming" not in ported
 
 
+def test_annotated_and_parenthesized_mappings_are_kept_verbatim(tmp_path):
+    """Mappings still collapse when annotated or wrapped in redundant parens.
+
+    `#define X (X)` and `#define X X /* note */` shadow the real definition
+    exactly as `#define X X` does, and vendor headers routinely write both.
+    """
+    source_dir = tmp_path / "gpu_vendor"
+    source_dir.mkdir()
+    header = source_dir / "musa.h"
+    header.write_text(
+        "#define cudaEventDisableTiming musaEventDisableTiming /**< no timing */\n"
+        "#define cudaHostRegisterIoMemory musaHostRegisterIoMemory // mapped I/O\n"
+        "#define cudaSuccess (musaSuccess)\n"
+        "#define CU_MEMORYTYPE_DEVICE \\\n"
+        "    MU_MEMORYTYPE_DEVICE /* device memory */\n",
+        encoding="utf-8",
+    )
+
+    command = _build_extension_command()
+    command._port_directory(
+        str(source_dir),
+        {
+            "cudaEventDisableTiming": "musaEventDisableTiming",
+            "cudaHostRegisterIoMemory": "musaHostRegisterIoMemory",
+            "cudaSuccess": "musaSuccess",
+            "CU_MEMORYTYPE_DEVICE": "MU_MEMORYTYPE_DEVICE",
+        },
+    )
+
+    ported = header.read_text(encoding="utf-8")
+    assert "#define cudaEventDisableTiming musaEventDisableTiming /**< no timing */\n" in ported
+    assert "#define cudaHostRegisterIoMemory musaHostRegisterIoMemory // mapped I/O\n" in ported
+    assert "#define cudaSuccess (musaSuccess)\n" in ported
+    assert (
+        "#define CU_MEMORYTYPE_DEVICE \\\n    MU_MEMORYTYPE_DEVICE /* device memory */\n"
+    ) in ported
+
+
 def test_aliasing_defines_still_port(tmp_path):
     """Only the degenerate mapping is skipped; a real alias must still port."""
     source_dir = tmp_path / "csrc"
@@ -162,7 +200,10 @@ def test_aliasing_defines_still_port(tmp_path):
     header = source_dir / "helpers.h"
     header.write_text(
         f"#define {TOKEN}_ALIAS {TOKEN}_IMPL\n"
+        f"#define {TOKEN}_ALIAS2 {TOKEN}_IMPL // aliased\n"
+        f"#define {TOKEN}_PAREN ({TOKEN}_IMPL)\n"
         f"#define {TOKEN}_FLAG 0x02\n"
+        f"#define {TOKEN}_FLAG2 0x02 /**< annotated */\n"
         f"void call() {{ {TOKEN}(); }}\n",
         encoding="utf-8",
     )
@@ -172,7 +213,10 @@ def test_aliasing_defines_still_port(tmp_path):
 
     assert header.read_text(encoding="utf-8") == (
         f"#define {PORTED_TOKEN}_ALIAS {PORTED_TOKEN}_IMPL\n"
+        f"#define {PORTED_TOKEN}_ALIAS2 {PORTED_TOKEN}_IMPL // aliased\n"
+        f"#define {PORTED_TOKEN}_PAREN ({PORTED_TOKEN}_IMPL)\n"
         f"#define {PORTED_TOKEN}_FLAG 0x02\n"
+        f"#define {PORTED_TOKEN}_FLAG2 0x02 /**< annotated */\n"
         f"void call() {{ {PORTED_TOKEN}(); }}\n"
     )
 
