@@ -1253,3 +1253,51 @@ setup(
             assert (
                 "at::kCUDA" not in ported_content
             ), "at::kCUDA should be ported to at::kPrivateUse1"
+
+
+class TestCudaArchGuardPorting:
+    """Arch comparisons must be ported together with their threshold.
+
+    torch_musa's general.json renames the bare `__CUDA_ARCH__` to `__MUSA_ARCH__`
+    but cannot know the threshold is NVIDIA's. The two scales are unrelated
+    (sm_80 -> mp_22, sm_90 -> mp_31), so a surviving `__MUSA_ARCH__ < 800` is true
+    on every current MUSA arch (mp_31 reports 310) and silently selects the
+    unsupported-hardware branch of the guard.
+    """
+
+    def test_bare_and_parenthesised_forms_are_mapped(self):
+        from torchada._mapping import _MAPPING_RULE
+
+        for src, dst in (
+            ("__CUDA_ARCH__ < 800", "__MUSA_ARCH__ < 220"),
+            ("(__CUDA_ARCH__ < 800)", "(__MUSA_ARCH__ < 220)"),
+            ("__CUDA_ARCH__ >= 800", "__MUSA_ARCH__ >= 220"),
+            ("(__CUDA_ARCH__ >= 800)", "(__MUSA_ARCH__ >= 220)"),
+            ("__CUDA_ARCH__ >= 900", "__MUSA_ARCH__ >= 310"),
+            ("(__CUDA_ARCH__ >= 900)", "(__MUSA_ARCH__ >= 310)"),
+        ):
+            assert _MAPPING_RULE[src] == dst
+
+    def test_bare_guard_keeps_no_nvidia_threshold(self):
+        """The spelling upstream actually uses has no parentheses."""
+        from torchada.utils.cpp_extension import _port_cuda_source
+
+        source = "#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800\n"
+        result = _port_cuda_source(source)
+
+        assert "__MUSA_ARCH__ < 220" in result
+        # The bug: the macro is renamed while NVIDIA's threshold survives, so the
+        # guard reads `310 < 800` and is always true. (The `defined(...)` operand is
+        # renamed by torch_musa's own general.json, not by these rules.)
+        assert "__MUSA_ARCH__ < 800" not in result
+
+    def test_guard_selects_supported_branch_on_mp31(self):
+        """mp_31 reports __MUSA_ARCH__ == 310; the ported guard must be false."""
+        from torchada.utils.cpp_extension import _port_cuda_source
+
+        result = _port_cuda_source("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800")
+        threshold = int(result.split("__MUSA_ARCH__ <")[1].strip().rstrip(")"))
+        assert 310 >= threshold, (
+            f"ported guard is `__MUSA_ARCH__ < {threshold}`, which is true on mp_31 "
+            "(310) and would disable the supported path"
+        )
