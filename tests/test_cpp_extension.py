@@ -99,6 +99,35 @@ class TestCUDAExtension:
         )
         assert ext.extra_compile_args is not None
 
+    def test_translate_nvjpeg_link_args(self):
+        from torchada.utils.cpp_extension import _translate_link_args
+
+        kwargs = {
+            "libraries": ["jpeg", "nvjpeg"],
+            "define_macros": [("JPEG_FOUND", 1), ("NVJPEG_FOUND", 1)],
+        }
+
+        translated = _translate_link_args(kwargs)
+
+        assert translated["libraries"] == ["jpeg", "mtjpeg"]
+        assert translated["define_macros"] == [
+            ("JPEG_FOUND", 1),
+            ("MTJPEG_FOUND", 1),
+        ]
+        assert kwargs["libraries"] == ["jpeg", "nvjpeg"]
+
+    def test_porting_keeps_project_cuda_header_names(self):
+        from torchada.utils.cpp_extension import _narrow_cuda_header_mapping
+
+        rules = dict(
+            _narrow_cuda_header_mapping(
+                [("cudaMalloc", "musaMalloc"), ("cuda.h", "musa.h")]
+            )
+        )
+
+        assert "cuda.h" not in rules
+        assert rules['#include <cuda.h>'] == '#include <musa.h>'
+        assert rules['#include "cuda.h"'] == '#include "musa.h"'
 
 class TestMusaPatches:
     """Test patches applied to torch_musa for extension building."""

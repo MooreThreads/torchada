@@ -23,6 +23,7 @@ Usage:
 
 import functools
 import inspect
+import logging
 import os
 import sys
 import time
@@ -34,6 +35,8 @@ import torch
 
 from ._cpp_ops import get_module
 from ._platform import is_musa_platform
+
+logger = logging.getLogger(__name__)
 
 _patched = False
 _original_init_process_group = None
@@ -319,6 +322,18 @@ def _patch_torch_device():
 
     # Replace torch.device with our wrapper
     torch.device = DeviceFactoryWrapper
+
+    # TorchScript recognizes the original torch.device as an aten builtin.
+    # Register the wrapper under the same builtin so importing torchada does
+    # not make otherwise scriptable functions fail during compilation.
+    try:
+        from torch.jit._builtins import _register_builtin
+
+        _register_builtin(DeviceFactoryWrapper, "aten::device")
+    except (AttributeError, ImportError, RuntimeError, TypeError):
+        logger.debug(
+            "Unable to register torch.device as a TorchScript builtin", exc_info=True
+        )
 
 
 # Store original torch.Generator for patching

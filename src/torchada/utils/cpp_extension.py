@@ -292,11 +292,55 @@ def _patch_simple_porting_load_replaced_mapping(musa_sp):
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            return original_method(self)
+            result = original_method(self)
+            # torch_musa's broad ``cuda.h`` rule also rewrites project-local
+            # headers such as ``decode_jpegs_cuda.h`` even though their file
+            # names are kept unchanged. Narrow it to actual CUDA header
+            # includes so relative project includes keep resolving.
+            self.mapping_rule = _narrow_cuda_header_mapping(self.mapping_rule)
+            return result
         finally:
             sys.stdout = old_stdout
 
     musa_sp.SimplePorting.load_replaced_mapping = patched_load_replaced_mapping
+
+
+def _narrow_cuda_header_mapping(mapping_rule):
+    """Keep the cuda.h mapping from rewriting project-local header names."""
+    narrowed = [(key, value) for key, value in mapping_rule if key != "cuda.h"]
+    narrowed.extend(
+        [
+            ('#include <cuda.h>', '#include <musa.h>'),
+            ('#include "cuda.h"', '#include "musa.h"'),
+        ]
+    )
+    return sorted(narrowed, key=lambda item: len(item[0]), reverse=True)
+
+
+_INCLUDE_DIRECTIVE_RE = re.compile(r'^\s*#\s*include\s*[<"](?P<header>[^>"]+)[>"]')
+_NVJPEG_PREFIX_RULES = frozenset(("nvjpeg", "NVJPEG"))
+
+
+def _replace_porting_line(line, mapping_rule):
+    """Apply mappings without rewriting nvJPEG text in project header paths."""
+    for key, value in mapping_rule:
+        if key == value:
+            continue
+        if key in _NVJPEG_PREFIX_RULES:
+            include = _INCLUDE_DIRECTIVE_RE.match(line)
+            if include:
+                start, end = include.span("header")
+                header = line[start:end]
+                if key == "nvjpeg" and header == "nvjpeg.h":
+                    header = f"{value}.h"
+                line = (
+                    line[:start].replace(key, value)
+                    + header
+                    + line[end:].replace(key, value)
+                )
+                continue
+        line = line.replace(key, value)
+    return line
 
 
 def _patch_simple_porting_open(musa_sp):
@@ -390,9 +434,8 @@ def _patch_simple_porting_modify_file(musa_sp):
         def port_line(line):
             if line.startswith("*") or line.startswith("/") or line == "":
                 return line
-            for k, v in self.mapping_rule:
-                if "cub/" not in line:
-                    line = line.replace(k, v)
+            if "cub/" not in line:
+                line = _replace_porting_line(line, self.mapping_rule)
             return line
 
         out = []
@@ -712,16 +755,12 @@ def _port_cuda_source(source_code: str, mapping_rules: Optional[Dict[str, str]] 
     if mapping_rules is None:
         mapping_rules = _MAPPING_RULE
 
-    result = source_code
-
     # Sort rules by length (longest first) to avoid partial replacements
     sorted_rules = sorted(mapping_rules.items(), key=lambda x: len(x[0]), reverse=True)
-
-    for cuda_symbol, musa_symbol in sorted_rules:
-        if cuda_symbol != musa_symbol:
-            result = result.replace(cuda_symbol, musa_symbol)
-
-    return result
+    return "".join(
+        _replace_porting_line(line, sorted_rules)
+        for line in source_code.splitlines(keepends=True)
+    )
 
 
 def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None) -> List[str]:
@@ -963,6 +1002,25 @@ def _translate_compile_args(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return new_kwargs
 
 
+def _translate_link_args(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate canonical CUDA library and feature names used by extensions."""
+    new_kwargs = kwargs.copy()
+
+    if kwargs.get("libraries") is not None:
+        new_kwargs["libraries"] = [
+            "mtjpeg" if library == "nvjpeg" else library
+            for library in kwargs["libraries"]
+        ]
+
+    if kwargs.get("define_macros") is not None:
+        new_kwargs["define_macros"] = [
+            ("MTJPEG_FOUND" if name == "NVJPEG_FOUND" else name, value)
+            for name, value in kwargs["define_macros"]
+        ]
+
+    return new_kwargs
+
+
 def _create_musa_extension(name: str, sources: List[str], *args, **kwargs):
     """Create a MUSA extension using torch_musa's MUSAExtension.
 
@@ -980,8 +1038,9 @@ def _create_musa_extension(name: str, sources: List[str], *args, **kwargs):
     # backport now so csrc/libtorch_stable/*.cu can compile.
     _ensure_stable_headers_patched()
 
-    # Translate 'nvcc' to 'mcc' in extra_compile_args
+    # Translate CUDA compiler, library, and feature-macro names to MUSA.
     kwargs = _translate_compile_args(kwargs)
+    kwargs = _translate_link_args(kwargs)
 
     try:
         import torch_musa.utils.musa_extension as musa_ext
