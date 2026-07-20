@@ -167,6 +167,40 @@ class TestCuDNNMappings:
         assert _MAPPING_RULE["cudnnSetStream"] == "mudnnSetStream"
 
 
+class TestNVJPEGMappings:
+    """Test nvJPEG to MTJPEG mappings."""
+
+    def test_nvjpeg_prefixes(self):
+        from torchada._mapping import _MAPPING_RULE
+
+        assert _MAPPING_RULE["nvjpeg"] == "mtjpeg"
+        assert _MAPPING_RULE["NVJPEG"] == "MTJPEG"
+
+    def test_porting_preserves_project_header_names(self):
+        from torchada.utils.cpp_extension import _port_cuda_source
+
+        source = (
+            '#include "nvjpeg_helpers.h"\n'
+            '#include "nvjpeg.h"\n'
+            '#  include <nvjpeg.h>\n'
+            'nvjpegStatus_t status = NVJPEG_STATUS_SUCCESS;\n'
+        )
+
+        result = _port_cuda_source(source)
+
+        assert '#include "nvjpeg_helpers.h"' in result
+        assert '#include "mtjpeg.h"' in result
+        assert '#  include <mtjpeg.h>' in result
+        assert "mtjpegStatus_t status = MTJPEG_STATUS_SUCCESS" in result
+
+    def test_cuda_event_header(self):
+        from torchada._mapping import _MAPPING_RULE
+
+        assert _MAPPING_RULE["#include <ATen/cuda/CUDAEvent.h>"] == (
+            '#include "torch_musa/csrc/core/MUSAEvent.h"'
+        )
+
+
 class TestCUDARuntimeMappings:
     """Test CUDA runtime to MUSA runtime mappings."""
 

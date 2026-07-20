@@ -3,6 +3,11 @@ Tests for device string patching (cuda -> musa translation).
 """
 
 import pytest
+import torch
+
+
+def _make_torch_device(device: str):
+    return torch.device(device)
 
 
 class TestTensorDevicePatching:
@@ -390,6 +395,16 @@ class TestDeviceIndexVariants:
         else:
             assert device2.type == "cuda"
         assert device2.index == 0
+
+    def test_torch_device_remains_a_torchscript_builtin(self):
+        """Test importing torchada keeps torch.device scriptable."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch.device")
+
+        scripted = torch.jit.script(_make_torch_device)
+        assert scripted("musa") == torch.device("musa")
 
 
 class TestDeviceContextManager:

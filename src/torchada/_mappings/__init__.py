@@ -6,6 +6,7 @@ from . import cublas as _cublas
 from . import curand as _curand
 from . import cudnn as _cudnn
 from . import nccl as _nccl
+from . import nvjpeg as _nvjpeg
 from . import cusparse as _cusparse
 from . import cusolver as _cusolver
 from . import cufft as _cufft
@@ -28,6 +29,7 @@ MAPPING_RULE = {
     **_curand.MAPPING,
     **_cudnn.MAPPING,
     **_nccl.MAPPING,
+    **_nvjpeg.MAPPING,
     **_cusparse.MAPPING,
     **_cusolver.MAPPING,
     **_cufft.MAPPING,
