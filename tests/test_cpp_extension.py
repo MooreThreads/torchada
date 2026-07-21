@@ -129,6 +129,22 @@ class TestCUDAExtension:
         assert rules['#include <cuda.h>'] == '#include <musa.h>'
         assert rules['#include "cuda.h"'] == '#include "musa.h"'
 
+    def test_porting_translates_torch_cuda_header(self):
+        from torchada.utils.cpp_extension import _narrow_cuda_header_mapping, _replace_porting_line
+
+        rules = _narrow_cuda_header_mapping([("cuda.h", "musa.h")])
+
+        assert (
+            _replace_porting_line("#include <torch/cuda.h>\n", rules) == "#include <torch/musa.h>\n"
+        )
+        assert (
+            _replace_porting_line('#include "torch/cuda.h"\n', rules) == '#include "torch/musa.h"\n'
+        )
+
+        project_include = '#include "project/decode_jpegs_cuda.h"\n'
+        assert _replace_porting_line(project_include, rules) == project_include
+
+
 class TestMusaPatches:
     """Test patches applied to torch_musa for extension building."""
 

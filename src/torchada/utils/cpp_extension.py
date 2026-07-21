@@ -306,12 +306,14 @@ def _patch_simple_porting_load_replaced_mapping(musa_sp):
 
 
 def _narrow_cuda_header_mapping(mapping_rule):
-    """Keep the cuda.h mapping from rewriting project-local header names."""
+    """Port CUDA headers without rewriting project-local header names."""
     narrowed = [(key, value) for key, value in mapping_rule if key != "cuda.h"]
     narrowed.extend(
         [
             ('#include <cuda.h>', '#include <musa.h>'),
             ('#include "cuda.h"', '#include "musa.h"'),
+            ('#include <torch/cuda.h>', '#include <torch/musa.h>'),
+            ('#include "torch/cuda.h"', '#include "torch/musa.h"'),
         ]
     )
     return sorted(narrowed, key=lambda item: len(item[0]), reverse=True)
