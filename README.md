@@ -44,13 +44,14 @@ print(torch.cuda.device_count())
 torch.cuda.synchronize()
 ```
 
-That's it! All `torch.cuda.*` APIs are automatically redirected to `torch.musa.*`.
+That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.musa.*`.
 
 ## What Works
 
 | Feature | Example |
 |---------|---------|
 | Device operations | `tensor.cuda()`, `model.cuda()`, `torch.device("cuda")` |
+| Tensor factories | `torch.zeros(..., device="cuda")`, `torch.asarray(..., device="cuda")` → MUSA |
 | Memory management | `torch.cuda.memory_allocated()`, `empty_cache()` |
 | Synchronization | `torch.cuda.synchronize()`, `Stream`, `Event` |
 | Mixed precision | `torch.cuda.amp.autocast()`, `GradScaler()` |
@@ -59,12 +60,14 @@ That's it! All `torch.cuda.*` APIs are automatically redirected to `torch.musa.*
 | Profiler | `ProfilerActivity.CUDA` → uses PrivateUse1 |
 | Custom Ops | `Library.impl(..., "CUDA")` → uses PrivateUse1 |
 | Distributed | `dist.init_process_group(backend='nccl')` → uses MCCL |
-| torch.compile | `torch.compile(model)` with all backends |
-| C++ Extensions | `CUDAExtension`, `BuildExtension`, `load()` |
+| torch.compile | Inductor with AOT-cacheable tensor factory wrappers |
+| C++ Extensions | `CUDAExtension`, `BuildExtension`, in-place source porting, stable-ABI shims |
 | FlexAttention | `torch.nn.attention.flex_attention` works on MUSA |
+| C++ nvJPEG porting | nvJPEG source and build settings → MTJPEG |
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
 | Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `Stream`, `Event`, ... |
 | Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
+| Triton Fused MoE | Triton 3.2.0 MTT S5000 tuning configs for vLLM and SGLang |
 
 ## Examples
 
@@ -130,15 +133,78 @@ import torch
 compiled_model = torch.compile(model.cuda(), backend='inductor')
 ```
 
+Tensor factory calls such as `torch.zeros(..., device="cuda")`,
+`torch.asarray(..., device="cuda")`, and the `*_like` family also translate
+explicit CUDA devices to MUSA. The factory wrappers remain compatible with
+CUDA Graph capture and `torch.compile` AOT caching. The patched
+`torch.device(...)` also remains usable from TorchScript.
+
+### Triton Fused MoE Tuning
+
+torchada bundles Triton 3.2.0 fused-MoE configurations tuned on MTT S5000 for
+vLLM and SGLang. The bundled set includes BF16, FP8 W8A8, and shared-expert
+shapes, plus a consistent up/down-projection layout for JoyAI-LLM-Flash. Tuning
+results are environment-specific; use custom configurations for other Triton,
+hardware, or workload combinations.
+
+On import, torchada points SGLang and vLLM to the bundled configurations through
+`SGLANG_MOE_CONFIG_DIR` and `VLLM_TUNED_CONFIG_FOLDER`. Existing environment
+values are never overwritten, so set either variable before importing torchada
+to use custom configurations.
+
+### SGLang FlashAttention
+
+When the MUSA `flash_attn_interface` package is available, torchada redirects
+`sgl_kernel.flash_attn` imports to it. For legacy MUSA FA3 entry points whose
+signature cannot accept the newer SGLang `only_qv` keyword, the wrapper drops
+only that keyword; implementations that natively accept it are left unchanged.
+
 ### Building C++ Extensions
 
 ```python
 import torchada  # Must import before torch.utils.cpp_extension
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
-# Standard CUDAExtension works — torchada handles CUDA→MUSA translation
+# Standard CUDAExtension works — torchada handles CUDA→MUSA translation.
 ext = CUDAExtension("my_ext", sources=["kernel.cu"])
 ```
+
+If an extension uses nvJPEG, keep its existing CUDA build settings:
+
+```python
+jpeg_ext = CUDAExtension(
+    "jpeg_ext",
+    sources=["decode.cu"],
+    libraries=["nvjpeg"],
+    define_macros=[("NVJPEG_FOUND", "1")],
+)
+```
+
+On MUSA, `BuildExtension` ports project-local C/C++/CUDA source and header
+contents **in place**. Original `.cu`/`.cuh` names and paths are preserved and
+no `<dir>_musa` mirror is created; native `.mu`/`.muh` files and non-source
+files are left unchanged. Because eligible source files are rewritten during
+the build, use a clean or disposable checkout when the original CUDA contents
+must be preserved. Symlinked portable sources and headers are rejected to avoid
+modifying a target outside the project tree.
+
+The porter translates CUDA architecture guards together with their thresholds
+and preserves already-correct CUDA-to-MUSA mapping defines that would otherwise
+collapse into self-references. It also maps canonical `nvjpeg*`/`NVJPEG*`
+symbols and exact `nvjpeg.h` includes to MTJPEG, plus `libraries=["nvjpeg"]` to
+`mtjpeg` and `NVJPEG_FOUND` to `MTJPEG_FOUND` on MUSA. CUDA builds keep their
+original settings.
+
+torchada also provides compatibility headers and source porting for the
+libtorch stable-ABI kernels used by recent vLLM and SGLang releases on
+torch_musa 2.9. The patched `torch.utils.cpp_extension.include_paths()` exposes
+the compatibility include directory on MUSA. Custom stable-ABI builds should
+add `stable_compat_include_dir()` explicitly, and kernels that use `TORCH_BOX`
+must force-include the path returned by `stable_compat_box_header()`. Both
+helpers are available from `torchada.utils.cpp_extension`. The torch_musa 2.9
+header backport runs lazily and best-effort at extension-build time; read-only
+headers are left unchanged. A plain `import torchada` does not modify PyTorch or
+torch_musa headers.
 
 ### Custom Ops
 
@@ -273,7 +339,7 @@ if torchada.is_gpu_device(device):  # Works on both CUDA and MUSA
 # Or: device.type in ("cuda", "musa")
 ```
 
-## API Reference
+## Selected API Reference
 
 | Function | Description |
 |----------|-------------|
@@ -303,8 +369,13 @@ When building C++ extensions, torchada automatically translates CUDA symbols to 
 | `at::cuda` | `at::musa` |
 | `c10::cuda` | `c10::musa` |
 | `#include <cuda/*>` | `#include <musa/*>` |
+| `__CUDA_ARCH__ < 800` | `__MUSA_ARCH__ < 220` |
+| `nvjpeg.h`, `nvjpeg*`, `NVJPEG*` | `mtjpeg.h`, `mtjpeg*`, `MTJPEG*` |
+| `libraries=["nvjpeg"]` | `libraries=["mtjpeg"]` |
+| `NVJPEG_FOUND` | `MTJPEG_FOUND` |
 
-See `src/torchada/_mapping.py` for the complete mapping table (380+ mappings).
+See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
+`src/torchada/_mapping.py` remains the compatibility aggregation entry point.
 
 ## Integrating torchada into Your Project
 
@@ -349,14 +420,14 @@ if is_nvidia() or is_musa():
 
 | Project | Category | Status | Tracking |
 |---------|----------|--------|----------|
-| [SGLang](https://github.com/sgl-project/sglang) | Model Serving | ✅ Merged | - |
+| [SGLang](https://github.com/sgl-project/sglang) | Model Serving | ✅ Merged | — |
 | [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | Model Serving | ✅ Merged | — |
-| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | ✅ Merged | - |
+| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | ✅ Merged | — |
 | [Xinference](https://github.com/xorbitsai/inference) | Model Serving | ✅ Merged | — |
 | [LightLLM](https://github.com/ModelTC/LightLLM) | Model Serving | ✅ Merged | — |
 | [LightX2V](https://github.com/ModelTC/LightX2V) | Image/Video Generation | ✅ Merged | — |
 | [Chitu](https://github.com/thu-pacman/chitu) | Model Serving | ✅ Merged | — |
-| [Mooncake](https://github.com/kvcache-ai/Mooncake) | KVCache | ✅ Merged | - |
+| [Mooncake](https://github.com/kvcache-ai/Mooncake) | KVCache | ✅ Merged | — |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | Image/Video Generation | 🚧 In Progress | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
 
 ## License

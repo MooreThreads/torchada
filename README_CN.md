@@ -44,13 +44,14 @@ print(torch.cuda.device_count())
 torch.cuda.synchronize()
 ```
 
-就这么简单！所有 `torch.cuda.*` API 会自动重定向到 `torch.musa.*`。
+就这么简单！支持的 `torch.cuda.*` API 会自动重定向到 `torch.musa.*`。
 
 ## 支持的功能
 
 | 功能 | 示例 |
 |------|------|
 | 设备操作 | `tensor.cuda()`, `model.cuda()`, `torch.device("cuda")` |
+| 张量工厂函数 | `torch.zeros(..., device="cuda")`、`torch.asarray(..., device="cuda")` → MUSA |
 | 显存管理 | `torch.cuda.memory_allocated()`, `empty_cache()` |
 | 同步 | `torch.cuda.synchronize()`, `Stream`, `Event` |
 | 混合精度 | `torch.cuda.amp.autocast()`, `GradScaler()` |
@@ -59,12 +60,14 @@ torch.cuda.synchronize()
 | 性能分析 | `ProfilerActivity.CUDA` → 使用 PrivateUse1 |
 | 自定义算子 | `Library.impl(..., "CUDA")` → 使用 PrivateUse1 |
 | 分布式训练 | `dist.init_process_group(backend='nccl')` → 使用 MCCL |
-| torch.compile | `torch.compile(model)` 支持所有后端 |
-| C++ 扩展 | `CUDAExtension`, `BuildExtension`, `load()` |
+| torch.compile | Inductor，以及支持 AOT 缓存的张量工厂函数包装器 |
+| C++ 扩展 | `CUDAExtension`、`BuildExtension`、源码原地移植、稳定 ABI 兼容层 |
 | FlexAttention | `torch.nn.attention.flex_attention` 支持 MUSA 设备 |
+| C++ nvJPEG 移植 | nvJPEG 源码及构建配置 → MTJPEG |
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
 | 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`Stream`、`Event` 等 |
 | Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
+| Triton 融合 MoE | 面向 vLLM 和 SGLang 的 Triton 3.2.0 MTT S5000 调优配置 |
 
 ## 示例
 
@@ -128,15 +131,70 @@ import torch
 compiled_model = torch.compile(model.cuda(), backend='inductor')
 ```
 
+`torch.zeros(..., device="cuda")`、`torch.asarray(..., device="cuda")` 以及
+`*_like` 系列张量工厂函数也会把显式 CUDA 设备转换为 MUSA。这些包装器与
+CUDA Graph capture 和 `torch.compile` AOT 缓存保持兼容。打补丁后的
+`torch.device(...)` 也仍可在 TorchScript 中使用。
+
+### Triton 融合 MoE 调优
+
+torchada 为 vLLM 和 SGLang 内置在 MTT S5000 上调优的 Triton 3.2.0 融合 MoE
+配置。内置配置包括 BF16、FP8 W8A8 和共享专家形状，以及布局一致的
+JoyAI-LLM-Flash 上、下投影配置。调优结果与环境相关；其他 Triton 版本、硬件或
+工作负载组合应使用自定义配置。
+
+导入时，torchada 会通过 `SGLANG_MOE_CONFIG_DIR` 和
+`VLLM_TUNED_CONFIG_FOLDER` 将 SGLang 与 vLLM 指向内置配置。已有环境变量不会
+被覆盖；如需使用自定义配置，请在导入 torchada 前设置相应变量。
+
+### SGLang FlashAttention
+
+当 MUSA `flash_attn_interface` 包可用时，torchada 会将
+`sgl_kernel.flash_attn` 导入重定向到该实现。如果旧版 MUSA FA3 入口的函数签名
+无法接受 SGLang 新版调用方传入的 `only_qv` 参数，包装器只会丢弃这一关键字；
+如果实现原生支持该参数，则保持不变。
+
 ### 构建 C++ 扩展
 
 ```python
 import torchada  # 必须在 torch.utils.cpp_extension 之前导入
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
-# 标准 CUDAExtension 可直接使用 — torchada 处理 CUDA→MUSA 转换
+# 标准 CUDAExtension 可直接使用 — torchada 处理 CUDA→MUSA 转换。
 ext = CUDAExtension("my_ext", sources=["kernel.cu"])
 ```
+
+如果扩展使用 nvJPEG，可以保留现有 CUDA 构建配置：
+
+```python
+jpeg_ext = CUDAExtension(
+    "jpeg_ext",
+    sources=["decode.cu"],
+    libraries=["nvjpeg"],
+    define_macros=[("NVJPEG_FOUND", "1")],
+)
+```
+
+在 MUSA 上，`BuildExtension` 会**原地**移植项目内的 C/C++/CUDA 源码及头文件
+内容。原有 `.cu`/`.cuh` 文件名和路径保持不变，也不会创建 `<dir>_musa` 镜像；
+原生 `.mu`/`.muh` 文件及非源码文件保持不变。由于符合条件的源码会在构建时被
+改写，如果需要保留原始 CUDA 内容，请使用干净或一次性的检出目录进行构建。为
+避免修改项目目录之外的链接目标，移植器会拒绝符号链接形式的可移植源码和头文件。
+
+移植器会同时转换 CUDA 架构条件及其阈值，并保留那些原本正确、但转换后会坍缩
+为自引用的 CUDA→MUSA 映射宏。它还会将规范形式的 `nvjpeg*`/`NVJPEG*` 符号及
+精确的 `nvjpeg.h` include 转换为 MTJPEG，并在 MUSA 上把
+`libraries=["nvjpeg"]` 转换为 `mtjpeg`、把 `NVJPEG_FOUND` 转换为
+`MTJPEG_FOUND`。CUDA 构建仍保留原始配置。
+
+torchada 还为近期 vLLM 和 SGLang 在 torch_musa 2.9 上使用的 libtorch 稳定 ABI
+内核提供兼容头文件及源码移植支持。在 MUSA 上，打补丁后的
+`torch.utils.cpp_extension.include_paths()` 会返回该兼容 include 目录。自定义
+稳定 ABI 构建应显式加入 `stable_compat_include_dir()`；使用 `TORCH_BOX` 的内核
+还必须通过编译器强制 include `stable_compat_box_header()` 返回的头文件。这两个
+辅助函数都位于 `torchada.utils.cpp_extension`。torch_musa 2.9 头文件回补只会在
+扩展构建时延迟、尽力执行；只读头文件保持不变。单纯 `import torchada` 不会修改
+PyTorch 或 torch_musa 头文件。
 
 ### 自定义算子
 
@@ -266,7 +324,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 # 或者: device.type in ("cuda", "musa")
 ```
 
-## API 参考
+## 常用 API 参考
 
 | 函数 | 描述 |
 |------|------|
@@ -296,8 +354,13 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 | `at::cuda` | `at::musa` |
 | `c10::cuda` | `c10::musa` |
 | `#include <cuda/*>` | `#include <musa/*>` |
+| `__CUDA_ARCH__ < 800` | `__MUSA_ARCH__ < 220` |
+| `nvjpeg.h`、`nvjpeg*`、`NVJPEG*` | `mtjpeg.h`、`mtjpeg*`、`MTJPEG*` |
+| `libraries=["nvjpeg"]` | `libraries=["mtjpeg"]` |
+| `NVJPEG_FOUND` | `MTJPEG_FOUND` |
 
-完整映射表（380+ 条映射）请参见 `src/torchada/_mapping.py`。
+按 API 领域组织的 400+ 条映射规则请参见 `src/torchada/_mappings/`。
+`src/torchada/_mapping.py` 保留为兼容性聚合入口。
 
 ## 将 torchada 集成到你的项目
 
@@ -349,8 +412,7 @@ if is_nvidia() or is_musa():
 | [LightLLM](https://github.com/ModelTC/LightLLM) | 模型服务 | ✅ 已合并 | — |
 | [LightX2V](https://github.com/ModelTC/LightX2V) | 图像/视频生成 | ✅ 已合并 | — |
 | [赤兔](https://github.com/thu-pacman/chitu) | 模型服务 | ✅ 已合并 | — |
-| [赤兔](https://github.com/thu-pacman/chitu) | 模型服务 | ✅ 已合并 | — |
-| [Mooncake](https://github.com/kvcache-ai/Mooncake) | KV 缓存 | ✅ 已合并 | - |
+| [Mooncake](https://github.com/kvcache-ai/Mooncake) | KV 缓存 | ✅ 已合并 | — |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | 图像/视频生成 | 🚧 进行中 | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
 
 
