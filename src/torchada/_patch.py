@@ -1640,6 +1640,9 @@ class _AcceleratorModuleWrapper(ModuleType):
         "set_device_idx": "set_device",
         "current_device_index": "current_device",
         "current_device_idx": "current_device",
+        # MUSA: torch.accelerator.get_memory_info (torch 2.10+) is absent on
+        # torch_musa 2.9; mem_get_info has the same (free, total) contract.
+        "get_memory_info": "mem_get_info",
     }
 
     # Special attribute mappings for attributes not at top level of torch_musa.
