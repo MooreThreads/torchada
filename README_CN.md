@@ -192,9 +192,16 @@ torchada 还为近期 vLLM 和 SGLang 在 torch_musa 2.9 上使用的 libtorch �
 `torch.utils.cpp_extension.include_paths()` 会返回该兼容 include 目录。自定义
 稳定 ABI 构建应显式加入 `stable_compat_include_dir()`；使用 `TORCH_BOX` 的内核
 还必须通过编译器强制 include `stable_compat_box_header()` 返回的头文件。这两个
-辅助函数都位于 `torchada.utils.cpp_extension`。torch_musa 2.9 头文件回补只会在
-扩展构建时延迟、尽力执行；只读头文件保持不变。单纯 `import torchada` 不会修改
-PyTorch 或 torch_musa 头文件。
+辅助函数都位于 `torchada.utils.cpp_extension`。自定义 stable ABI 扩展应通过
+上述方式显式加入兼容头。torch_musa 2.9 头文件回补会在 MUSA 扩展构建时延迟、
+尽力执行；torch 2.11 及更新版本已经原生提供 stable ABI，因此会跳过回补。单纯
+`import torchada` 不会修改 PyTorch 或 torch_musa 头文件。
+
+原地 CUDA 到 MUSA 的转换会继续按原有规则保护系统 include 目录。可以通过环境变量
+`TORCHADA_EXCLUDE_DIRS` 额外配置要排除的目录；每一项可以是目录路径，也可以是目录
+名称，使用平台路径分隔符，也支持逗号分隔。名称会按完整路径组件匹配，因此
+`TORCHADA_EXCLUDE_DIRS=torch_musa` 可以直接排除 `/home/torch_musa`，无需填写完整路径。
+即使源目录位于排除目录下，扩展显式提供的源目录仍会执行转换。
 
 ### 自定义算子
 

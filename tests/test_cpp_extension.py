@@ -145,6 +145,88 @@ class TestCUDAExtension:
         assert _replace_porting_line(project_include, rules) == project_include
 
 
+class TestStableHeaderBackportVersionSelection:
+    """Only torch versions predating 2.11 need the compatibility backport."""
+
+    def test_torch_29_requires_backport(self, monkeypatch):
+        import torch
+
+        from torchada.utils.cpp_extension import _stable_header_backport_required
+
+        for version in ("2.9.0", "2.9.0+mtgpu"):
+            monkeypatch.setattr(torch, "__version__", version)
+            assert _stable_header_backport_required() is True
+
+    def test_torch_211_has_native_stable_abi(self, monkeypatch):
+        import torch
+
+        from torchada.utils.cpp_extension import _stable_header_backport_required
+
+        for version in ("2.11.0", "2.11.0.dev20260730+mtgpu", "3.0.0"):
+            monkeypatch.setattr(torch, "__version__", version)
+            assert _stable_header_backport_required() is False
+
+
+class TestDependencyIncludeProtection:
+    """Editable dependency paths are never treated as project porting roots."""
+
+    def test_dependency_package_and_checkout_paths_overlap(self):
+        from torchada.utils.cpp_extension import _path_overlaps_any
+
+        dependency_package = "/home/torch_musa/torch_musa"
+
+        assert _path_overlaps_any("/home/torch_musa", [dependency_package])
+        assert _path_overlaps_any(
+            "/home/torch_musa/torch_musa/share/generated_cuda_compatible",
+            [dependency_package],
+        )
+        assert not _path_overlaps_any("/home/torchvision", [dependency_package])
+
+    def test_exclude_dirs_can_be_configured_by_environment(self, monkeypatch, tmp_path):
+        from torchada.utils import cpp_extension
+
+        excluded = tmp_path / "dependency"
+        excluded.mkdir()
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", str(excluded))
+
+        assert cpp_extension._configured_exclude_dirs() == [str(excluded)]
+
+    def test_exclude_dirs_accepts_package_names(self, monkeypatch, tmp_path):
+        from torchada.utils import cpp_extension
+
+        package = tmp_path / "torch_musa"
+        package.mkdir()
+        module_file = package / "__init__.py"
+        module_file.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            cpp_extension.importlib,
+            "import_module",
+            lambda name: SimpleNamespace(__file__=str(module_file)),
+        )
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", "torch_musa")
+
+        assert cpp_extension._configured_exclude_dirs() == [str(package)]
+
+    def test_exclude_dir_name_matches_path_component(self, monkeypatch):
+        from torchada.utils import cpp_extension
+
+        def unavailable(_name):
+            raise ImportError
+
+        monkeypatch.setattr(cpp_extension.importlib, "import_module", unavailable)
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", "torch_musa")
+
+        assert cpp_extension._is_configured_exclude_dir("/home/torch_musa")
+        assert cpp_extension._is_configured_exclude_dir("/home/torch_musa/include")
+        assert not cpp_extension._is_configured_exclude_dir("/home/torch_musa_extra")
+
+    def test_empty_exclude_dirs_adds_nothing(self, monkeypatch):
+        from torchada.utils import cpp_extension
+
+        monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", "")
+        assert cpp_extension._configured_exclude_dirs() == []
+
+
 class TestMusaPatches:
     """Test patches applied to torch_musa for extension building."""
 

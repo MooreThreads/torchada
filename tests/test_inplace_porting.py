@@ -244,3 +244,52 @@ def test_source_parent_is_not_filtered_as_system_include(tmp_path, monkeypatch):
 
     assert source.read_text(encoding="utf-8") == f"{PORTED_TOKEN}\n"
     assert command._ported_dirs == {os.path.realpath(source_dir)}
+
+
+def test_unset_exclude_dirs_keeps_original_include_filter(monkeypatch):
+    from torchada.utils.cpp_extension import BuildExtension
+
+    monkeypatch.delenv("TORCHADA_EXCLUDE_DIRS", raising=False)
+
+    assert BuildExtension._is_system_include_dir("/usr/include")
+    assert BuildExtension._is_system_include_dir("/opt/dependency")
+    assert BuildExtension._is_system_include_dir("/venv/site-packages/dependency")
+    assert not BuildExtension._is_system_include_dir("/home/project/include")
+
+
+def test_editable_dependency_include_root_is_not_ported(tmp_path, monkeypatch):
+    """An editable torch_musa checkout stays an include path, not a port root."""
+    from torchada.utils.cpp_extension import BuildExtension
+
+    project_dir = tmp_path / "vision"
+    dependency_dir = tmp_path / "torch_musa"
+    project_dir.mkdir()
+    dependency_package = dependency_dir / "torch_musa"
+    dependency_package.mkdir(parents=True)
+
+    source = project_dir / "kernel.cu"
+    dependency_header = dependency_package / "dependency.h"
+    source.write_text(f"{TOKEN}\n", encoding="utf-8")
+    dependency_header.write_text(f"{TOKEN}\n", encoding="utf-8")
+
+    monkeypatch.setenv("TORCHADA_EXCLUDE_DIRS", "torch_musa")
+
+    class CustomBuildExtension(BuildExtension):
+        def get_mapping_rule(self):
+            return MAPPING
+
+    command = CustomBuildExtension(Distribution())
+    command.extensions = [
+        Extension(
+            "test_editable_dependency",
+            sources=[str(source)],
+            include_dirs=[str(dependency_dir)],
+        )
+    ]
+    monkeypatch.setattr(BuildExtension.__mro__[1], "run", lambda self: None)
+
+    command.run()
+
+    assert source.read_text(encoding="utf-8") == f"{PORTED_TOKEN}\n"
+    assert dependency_header.read_text(encoding="utf-8") == f"{TOKEN}\n"
+    assert command._ported_dirs == {os.path.realpath(project_dir)}
