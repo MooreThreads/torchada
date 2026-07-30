@@ -1,4 +1,100 @@
 #pragma once
+#include <torch/version.h>
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/headeronly/util/Exception.h>
+#include <cstdint>
+#include <musa_runtime.h>
+
+// This header can be force-included unconditionally by downstream build files.
+// PyTorch 2.11+ already provides the boxer, Device, HeaderOnlyArrayRef and the
+// stable free functions below, so compiling the backport there would redefine
+// native stable-ABI symbols.
+
+// --- Always-on shims (needed on every torch_musa version) ---
+// CUDA_VERSION guards in the kernels: define low so the sm100/Blackwell fast
+// paths (also gated on cc_major>=10) compile out on MUSA. torchada also passes
+// -DCUDA_VERSION=0 via the build, but define here for direct/JIT use.
+#ifndef CUDA_VERSION
+#define CUDA_VERSION 0
+#endif
+
+// Stable-ABI runtime-error check used by some libtorch-stable kernels (e.g.
+// minimax_reduce_rms_kernel). The ported kernel calls musa* runtime APIs that
+// return a musaError_t (0 == success); wrap them in STD_TORCH_CHECK.
+// mcc translates STD_CUDA_CHECK -> STD_MUSA_CHECK at the source level, so both
+// names are guarded here.
+#ifndef STD_CUDA_CHECK
+#define STD_CUDA_CHECK(EXPR)                                              \
+  do {                                                                   \
+    auto _musa_err = (EXPR);                                             \
+    STD_TORCH_CHECK(_musa_err == 0, "MUSA runtime error: ",             \
+                    static_cast<int64_t>(_musa_err));                    \
+  } while (0)
+#endif
+#ifndef STD_MUSA_CHECK
+#define STD_MUSA_CHECK(EXPR) STD_CUDA_CHECK(EXPR)
+#endif
+
+// Kernel-launch error check used by some libtorch-stable kernels after a <<<>>>
+// launch (e.g. selective_scan). Checks the last runtime error via the same
+// STD_CUDA_CHECK path.
+#ifndef STD_CUDA_KERNEL_LAUNCH_CHECK
+#define STD_CUDA_KERNEL_LAUNCH_CHECK() STD_CUDA_CHECK(musaGetLastError())
+#endif
+#ifndef STD_MUSA_KERNEL_LAUNCH_CHECK
+#define STD_MUSA_KERNEL_LAUNCH_CHECK() STD_CUDA_KERNEL_LAUNCH_CHECK()
+#endif
+
+// Newer torch_musa exposes the BLAS handle through its stable C shim. Keep a
+// CUDA-named forwarding wrapper for downstream sources that bypass source
+// porting; normally the mapping rule rewrites the call directly to the MUSA
+// name. This avoids depending on torch_musa's private C++ handle-pool ABI.
+#if TORCH_VERSION_MAJOR > 2 || \
+    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11)
+#include <torch/csrc/stable/c/shim.h>
+static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
+  return torch_get_current_musa_blas_handle(ret);
+}
+#else
+// torch_musa 2.9 has no stable C shim for the BLAS handle. Retain the legacy
+// fallback only for that compatibility path.
+struct _mublasHandle_t;
+typedef struct _mublasHandle_t* mublasHandle_t;
+namespace at {
+namespace musa {
+mublasHandle_t getCurrentMUSABlasHandle();
+}
+}
+static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
+  auto handle = at::musa::getCurrentMUSABlasHandle();
+  *ret = reinterpret_cast<void*>(handle);
+  return handle ? 0 : 1;  // fail fast on a null handle instead of crashing in muBLAS
+}
+#endif
+
+// torch_musa's AOTI C-shim exposes aoti_torch_get_current_musa_stream, not the
+// upstream _cuda_ spelling that libtorch-stable kernels (torch_utils.h) call.
+// Forward so those kernels compile against the upstream name.
+#ifndef TORCHADA_HAVE_AOTI_CUDA_STREAM
+#define TORCHADA_HAVE_AOTI_CUDA_STREAM 1
+static inline AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index,
+                                                                void** ret) {
+  return aoti_torch_get_current_musa_stream(device_index, ret);
+}
+#endif
+
+// Some libtorch-stable kernels reference TORCH_UTILS_CHECK, which torch_musa's
+// stable headers do not define; alias it to the stable check macro.
+#ifndef TORCH_UTILS_CHECK
+#define TORCH_UTILS_CHECK STD_TORCH_CHECK
+#endif
+
+// --- torch < 2.11 backport: boxer, Device, stable free functions ---
+// PyTorch 2.11+ already provides the boxer, Device, HeaderOnlyArrayRef and the
+// stable free functions below, so compiling the backport there would redefine
+// native stable-ABI symbols.
+#if TORCH_VERSION_MAJOR < 2 || \
+    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 11)
 // torchada stable-ABI compat: TORCH_BOX + small helpers.
 //
 // torch_musa 2.9.0's torch::stable runtime predates the TORCH_BOX boxer family
@@ -16,7 +112,6 @@
 // kernels call. Define the stable Device here -- BEFORE <tensor.h> -- so the
 // torchada-patched tensor_struct.h accessors (gated on TORCHADA_STABLE_ACCESSORS)
 // can reference it; empty/from_blob are defined after <tensor.h> below.
-#include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <c10/util/ArrayRef.h>
 #include <optional>
 #include <vector>
@@ -123,69 +218,6 @@ inline Tensor from_blob(void* data, c10::IntArrayRef sizes,
 }  // namespace stable
 }  // namespace torch
 
-// CUDA_VERSION guards in the kernels: define low so the sm100/Blackwell fast
-// paths (also gated on cc_major>=10) compile out on MUSA. torchada also passes
-// -DCUDA_VERSION=0 via the build, but define here for direct/JIT use.
-#ifndef CUDA_VERSION
-#define CUDA_VERSION 0
-#endif
-
-// Stable-ABI runtime-error check used by some libtorch-stable kernels (e.g.
-// minimax_reduce_rms_kernel). The ported kernel calls musa* runtime APIs that
-// return a musaError_t (0 == success); wrap them in STD_TORCH_CHECK.
-#ifndef STD_CUDA_CHECK
-#define STD_CUDA_CHECK(EXPR)                                              \
-  do {                                                                   \
-    auto _musa_err = (EXPR);                                             \
-    STD_TORCH_CHECK(_musa_err == 0, "MUSA runtime error: ",             \
-                    static_cast<int64_t>(_musa_err));                    \
-  } while (0)
-#endif
-
-// Kernel-launch error check used by some libtorch-stable kernels after a <<<>>>
-// launch (e.g. selective_scan). Checks the last runtime error via the same
-// STD_CUDA_CHECK path.
-#ifndef STD_CUDA_KERNEL_LAUNCH_CHECK
-#define STD_CUDA_KERNEL_LAUNCH_CHECK() STD_CUDA_CHECK(musaGetLastError())
-#endif
-
-// torch_get_current_cuda_blas_handle has no AOTI stable-ABI shim on torch_musa,
-// but torch_musa exposes the stream-bound current handle through its handle pool
-// (at::musa::getCurrentMUSABlasHandle). Forward-declare it (resolved at import
-// time from the already-loaded libtorch_musa) and return the muBLAS handle so the
-// gptq cuBLAS->muBLAS GEMM path works. mublasHandle_t per
-// /usr/local/musa/include/internal/mublas_types.h; the typedef is harmless if a
-// later <mublas.h> (via the cublas_v2.h->mublas.h mapping) repeats it.
-struct _mublasHandle_t;
-typedef struct _mublasHandle_t* mublasHandle_t;
-namespace at {
-namespace musa {
-mublasHandle_t getCurrentMUSABlasHandle();
-}
-}  // namespace at
-static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
-  auto handle = at::musa::getCurrentMUSABlasHandle();
-  *ret = reinterpret_cast<void*>(handle);
-  return handle ? 0 : 1;  // fail fast on a null handle instead of crashing in muBLAS
-}
-
-// torch_musa's AOTI C-shim exposes aoti_torch_get_current_musa_stream, not the
-// upstream _cuda_ spelling that libtorch-stable kernels (torch_utils.h) call.
-// Forward so those kernels compile against the upstream name.
-#ifndef TORCHADA_HAVE_AOTI_CUDA_STREAM
-#define TORCHADA_HAVE_AOTI_CUDA_STREAM 1
-static inline AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index,
-                                                                void** ret) {
-  return aoti_torch_get_current_musa_stream(device_index, ret);
-}
-#endif
-
-// Some libtorch-stable kernels reference TORCH_UTILS_CHECK, which torch_musa's
-// stable headers do not define; alias it to the stable check macro.
-#ifndef TORCH_UTILS_CHECK
-#define TORCH_UTILS_CHECK STD_TORCH_CHECK
-#endif
-
 namespace torchada_stable {
 
 template <class T>
@@ -249,3 +281,5 @@ inline void boxed(StableIValue* stack, uint64_t /*nargs*/, uint64_t /*nout*/) {
 #ifndef TORCH_BOX
 #define TORCH_BOX(func) (&::torchada_stable::boxed<func>)
 #endif
+
+#endif  // torch < 2.11

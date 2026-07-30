@@ -20,6 +20,14 @@ class TestStableAbiMappingRules:
             == "aoti_torch_get_current_musa_stream"
         )
 
+    def test_stable_blas_handle_symbol_rule(self):
+        from torchada._mapping import _MAPPING_RULE
+
+        assert (
+            _MAPPING_RULE["torch_get_current_cuda_blas_handle"]
+            == "torch_get_current_musa_blas_handle"
+        )
+
     def test_stable_impl_dispatch_key_rekey(self):
         """STABLE_TORCH_LIBRARY_IMPL registers under the literal dispatch-key
         token; MUSA tensors are PrivateUse1, so the block must be re-keyed."""
@@ -50,6 +58,12 @@ class TestStableAbiSourcePorting:
             "auto s = aoti_torch_get_current_cuda_stream(0, &p);")
         assert "aoti_torch_get_current_musa_stream" in ported
         assert "aoti_torch_get_current_cuda_stream" not in ported
+
+    def test_port_rewrites_stable_blas_handle(self):
+        ported = self._port(
+            "auto e = torch_get_current_cuda_blas_handle(&handle);")
+        assert "torch_get_current_musa_blas_handle" in ported
+        assert "torch_get_current_cuda_blas_handle" not in ported
 
     def test_port_rekeys_stable_impl_block(self):
         ported = self._port(

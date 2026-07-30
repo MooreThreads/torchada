@@ -3180,6 +3180,8 @@ class TestStableCompatHeaders:
         p = os.path.join(stable_compat_include_dir(), "torch", "csrc", "stable", "device.h")
         assert os.path.isfile(p), f"device.h shim missing: {p}"
         text = open(p, encoding="utf-8").read()
+        assert "#include_next <torch/csrc/stable/device.h>" in text
+        assert "TORCHADA_HAS_NATIVE_STABLE_DEVICE" in text
         assert "struct Device" in text
         assert "enum class DeviceType" in text
         # Predicates vLLM stable kernels call on a Device.
@@ -3219,6 +3221,21 @@ class TestStableCompatHeaders:
         text = open(stable_compat_box_header(), encoding="utf-8").read()
         assert "#define TORCH_BOX(func)" in text
         assert "namespace torchada_stable" in text
+
+    def test_box_header_disables_backport_on_torch_211(self):
+        """An unconditional downstream -include must not redefine native 2.11 ABI."""
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        assert "TORCH_VERSION_MINOR < 11" in text
+        assert "#endif  // torch < 2.11" in text
+
+    def test_box_header_uses_stable_musa_blas_shim_on_torch_211(self):
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        assert "#include <torch/csrc/stable/c/shim.h>" in text
+        assert "return torch_get_current_musa_blas_handle(ret);" in text
 
     def test_box_header_backports_free_functions(self):
         """The box header supplies the torch::stable free functions torch_musa 2.9 lacks.
