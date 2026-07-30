@@ -169,6 +169,23 @@ static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
   return handle ? 0 : 1;  // fail fast on a null handle instead of crashing in muBLAS
 }
 
+// torch_musa's AOTI C-shim exposes aoti_torch_get_current_musa_stream, not the
+// upstream _cuda_ spelling that libtorch-stable kernels (torch_utils.h) call.
+// Forward so those kernels compile against the upstream name.
+#ifndef TORCHADA_HAVE_AOTI_CUDA_STREAM
+#define TORCHADA_HAVE_AOTI_CUDA_STREAM 1
+static inline AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index,
+                                                                void** ret) {
+  return aoti_torch_get_current_musa_stream(device_index, ret);
+}
+#endif
+
+// Some libtorch-stable kernels reference TORCH_UTILS_CHECK, which torch_musa's
+// stable headers do not define; alias it to the stable check macro.
+#ifndef TORCH_UTILS_CHECK
+#define TORCH_UTILS_CHECK STD_TORCH_CHECK
+#endif
+
 namespace torchada_stable {
 
 template <class T>
