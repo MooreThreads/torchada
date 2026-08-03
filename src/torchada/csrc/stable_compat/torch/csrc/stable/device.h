@@ -3,6 +3,19 @@
 // include it for torch::stable::Device / DeviceType. Provide them on the AOTI
 // C-shim. The force-included box header pulls this in before <tensor.h> so the
 // patched tensor_struct.h device() accessor can return it.
+//
+// Newer torch_musa provides a native device.h after this compatibility include
+// directory in the search path. Forward to that complete wrapper (including
+// device_inl.h), rather than including device_struct.h alone and silently
+// dropping inline definitions such as the string constructor.
+#if defined(__has_include_next)
+#if __has_include_next(<torch/csrc/stable/device.h>)
+#include_next <torch/csrc/stable/device.h>
+#define TORCHADA_HAS_NATIVE_STABLE_DEVICE 1
+#endif
+#endif
+
+#ifndef TORCHADA_HAS_NATIVE_STABLE_DEVICE
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <cstdint>
 namespace torch {
@@ -40,3 +53,4 @@ struct Device {
 };
 }  // namespace stable
 }  // namespace torch
+#endif  // TORCHADA_HAS_NATIVE_STABLE_DEVICE

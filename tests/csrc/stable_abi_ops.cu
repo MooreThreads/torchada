@@ -18,6 +18,7 @@
 // ATen headers here (ATen/Dispatch.h also defines ::detail::scalar_type and
 // would clash with the headeronly Dispatch shim). Launch on the default stream.
 #include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/Dispatch.h>  // torchada THO_DISPATCH shim
 #include <cuda_runtime.h>
@@ -70,11 +71,23 @@ torch::stable::Tensor passthrough(torch::stable::Tensor& input) { return input; 
 // scalar int return (boxer must from<int64_t>)
 int64_t numel_of(torch::stable::Tensor& input) { return input.numel(); }
 
+torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& input) {
+#if defined(USE_MUSA)
+  STD_TORCH_CHECK(input.device().is_privateuseone(), "Tensor must be on MUSA device");
+#else
+  STD_TORCH_CHECK(input.device().is_cuda(), "Tensor must be on CUDA device");
+#endif
+  return torch::stable::from_blob(input.mutable_data_ptr(), input.sizes(),
+                                  input.strides(), input.device(),
+                                  input.scalar_type());
+}
+
 STABLE_TORCH_LIBRARY(torchada_stable_test, m) {
   m.def("negate(Tensor! out, Tensor input) -> ()");
   m.def("scale(Tensor! out, Tensor input, float s) -> ()");
   m.def("passthrough(Tensor input) -> Tensor");
   m.def("numel_of(Tensor input) -> int");
+  m.def("weak_ref_tensor(Tensor input) -> Tensor");
 }
 
 // MUSA tensors are PrivateUse1; torchada's _mapping.py rewrites the upstream
@@ -84,4 +97,5 @@ STABLE_TORCH_LIBRARY_IMPL(torchada_stable_test, PrivateUse1, m) {
   m.impl("scale", TORCH_BOX(&scale));
   m.impl("passthrough", TORCH_BOX(&passthrough));
   m.impl("numel_of", TORCH_BOX(&numel_of));
+  m.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
 }

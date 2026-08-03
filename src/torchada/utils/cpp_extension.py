@@ -26,6 +26,7 @@ Usage (preferred):
 """
 
 import functools
+import importlib
 import inspect
 import logging
 import os
@@ -241,6 +242,61 @@ def _coalesce_port_roots(paths):
         if not any(_path_is_within(root, ancestor) for ancestor in result):
             result.append(root)
     return result
+
+
+def _configured_exclusions() -> Tuple[List[str], List[str]]:
+    """Resolve extra path roots and directory names excluded from porting.
+
+    ``TORCHADA_EXCLUDE_DIRS`` is a path-list (``os.pathsep`` separated; commas
+    are accepted as well). A bare entry such as ``torch_musa`` matches that
+    directory name anywhere in an include path. If it is also importable, its
+    package root is protected as well. The value adds to the existing system
+    directory rules and is read at build time.
+    """
+    value = os.environ.get("TORCHADA_EXCLUDE_DIRS", "")
+    separator_pattern = rf"[{re.escape(os.pathsep)},]"
+    roots = []
+    names = []
+    for item in (part.strip() for part in re.split(separator_pattern, value)):
+        if not item:
+            continue
+
+        expanded = os.path.expanduser(os.path.expandvars(item))
+        if os.path.isabs(expanded) or os.sep in expanded:
+            roots.append(os.path.realpath(os.path.abspath(expanded)))
+            continue
+
+        names.append(item)
+        try:
+            module = importlib.import_module(item)
+        except (ImportError, AttributeError, OSError):
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file:
+            roots.append(os.path.realpath(os.path.dirname(module_file)))
+
+    return _coalesce_port_roots(roots), names
+
+
+def _configured_exclude_dirs() -> List[str]:
+    """Return path roots configured through ``TORCHADA_EXCLUDE_DIRS``."""
+    return _configured_exclusions()[0]
+
+
+def _is_configured_exclude_dir(path: str) -> bool:
+    """Return whether ``path`` matches a configured root or directory name."""
+    roots, names = _configured_exclusions()
+    if _path_overlaps_any(path, roots):
+        return True
+    path_parts = os.path.realpath(path).split(os.sep)
+    return any(name in path_parts for name in names)
+
+
+def _path_overlaps_any(path: str, roots: List[str]) -> bool:
+    """Return whether ``path`` contains or is contained by a protected root."""
+    return any(
+        _path_is_within(path, root) or _path_is_within(root, path) for root in roots
+    )
 
 
 def _validate_portable_symlinks(source_dir: str) -> None:
@@ -926,6 +982,27 @@ def library_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
             return torch_library_paths(cuda=include_device)
 
 
+def _stable_header_backport_required() -> bool:
+    """Return whether this torch version needs the stable-ABI header backport.
+
+    torch 2.11 and newer provide the stable ABI directly. The supported torch
+    2.9 line still needs torchada's compatibility backport. Parse only the
+    major/minor prefix so vendor and development suffixes do not affect the
+    decision.
+    """
+    import torch
+
+    match = re.match(r"^(\d+)\.(\d+)", str(torch.__version__))
+    if match is None:
+        logger.warning(
+            "Unable to determine whether torch %r needs the stable header backport; "
+            "applying it for compatibility",
+            torch.__version__,
+        )
+        return True
+    return (int(match.group(1)), int(match.group(2))) < (2, 11)
+
+
 class CUDAExtension:
     """
     A wrapper that creates either a torch CUDAExtension or MUSA MUSAExtension.
@@ -945,11 +1022,9 @@ class CUDAExtension:
             **kwargs: Additional keyword arguments
         """
         platform = detect_platform()
-
         if platform == Platform.MUSA:
             return _create_musa_extension(name, sources, *args, **kwargs)
-        else:
-            return _create_cuda_extension(name, sources, *args, **kwargs)
+        return _create_cuda_extension(name, sources, *args, **kwargs)
 
 
 class CppExtension:
@@ -1036,9 +1111,10 @@ def _create_musa_extension(name: str, sources: List[str], *args, **kwargs):
     """
     # Ensure patches are applied
     _apply_musa_patches()
-    # Building a MUSA extension: apply the (on-disk) libtorch-stable header
-    # backport now so csrc/libtorch_stable/*.cu can compile.
-    _ensure_stable_headers_patched()
+    # torch 2.9 needs the compatibility backport; torch 2.11+ provides the
+    # stable ABI directly.
+    if _stable_header_backport_required():
+        _ensure_stable_headers_patched()
 
     # Translate CUDA compiler, library, and feature-macro names to MUSA.
     kwargs = _translate_compile_args(kwargs)
@@ -1131,9 +1207,10 @@ def _get_build_extension_class():
                     return _MAPPING_RULE.copy()
 
                 def build_extensions(self):
-                    # Building now: apply the (on-disk) libtorch-stable header
-                    # backport before the compiler reads the torch headers.
-                    _ensure_stable_headers_patched()
+                    # torch 2.9 needs the compatibility backport; torch 2.11+
+                    # provides the stable ABI directly.
+                    if _stable_header_backport_required():
+                        _ensure_stable_headers_patched()
                     # Register .cu, .cuh as valid source extensions
                     self.compiler.src_extensions += [".cu", ".cuh"]
                     super().build_extensions()
@@ -1180,12 +1257,19 @@ def _get_build_extension_class():
 
                 @staticmethod
                 def _is_system_include_dir(path):
-                    return (
+                    is_system_path = (
                         path.startswith("/usr/")
                         or path.startswith("/opt/")
                         or "site-packages" in path
                         or "dist-packages" in path
                     )
+                    if is_system_path:
+                        return True
+
+                    # Additional dependency roots can be supplied as paths or
+                    # package names, including editable installs such as
+                    # TORCHADA_EXCLUDE_DIRS=torch_musa.
+                    return _is_configured_exclude_dir(path)
 
                 def run(self):
                     """Port each project-local include root's CUDA sources to MUSA

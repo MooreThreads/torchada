@@ -202,9 +202,18 @@ the compatibility include directory on MUSA. Custom stable-ABI builds should
 add `stable_compat_include_dir()` explicitly, and kernels that use `TORCH_BOX`
 must force-include the path returned by `stable_compat_box_header()`. Both
 helpers are available from `torchada.utils.cpp_extension`. The torch_musa 2.9
-header backport runs lazily and best-effort at extension-build time; read-only
-headers are left unchanged. A plain `import torchada` does not modify PyTorch or
-torch_musa headers.
+header backport runs lazily and best-effort at MUSA extension
+build time on torch 2.9; read-only headers are left unchanged. Torch 2.11 and
+newer provide the stable ABI directly, so the backport is skipped. A plain
+`import torchada` does not modify PyTorch or torch_musa headers.
+
+In-place CUDA-to-MUSA porting protects system include roots by default. Set
+`TORCHADA_EXCLUDE_DIRS` to add excluded roots for your environment. Entries may
+be directory paths or directory names and are separated by the platform path
+separator; commas are also accepted. A name matches a complete path component,
+so `TORCHADA_EXCLUDE_DIRS=torch_musa` excludes `/home/torch_musa` without the
+full path. Explicit source directories remain eligible for porting even when
+they are below an excluded root.
 
 ### Custom Ops
 
@@ -383,7 +392,7 @@ See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.77
+torchada>=0.1.78
 ```
 
 ### Step 2: Conditional Import

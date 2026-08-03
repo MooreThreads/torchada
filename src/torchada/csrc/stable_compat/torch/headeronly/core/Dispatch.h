@@ -11,8 +11,14 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/Exception.h>  // STD_TORCH_CHECK
+#include <torch/version.h>
 #include <c10/core/ScalarType.h>
 
+// torch 2.11+ provides these through ScalarType.h. Keep only the dispatch
+// macros below on that version: torch_musa's generated compatible include tree
+// may still omit Dispatch.h itself.
+#if TORCH_VERSION_MAJOR < 2 || \
+    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 11)
 namespace torch {
 namespace headeronly {
 namespace impl {
@@ -25,6 +31,7 @@ inline const char* toString(torch::headeronly::ScalarType t) {
 }
 }  // namespace headeronly
 }  // namespace torch
+#endif  // torch < 2.11
 
 #define THO_PRIVATE_CASE_TYPE_USING_HINT_TMPL(PRELUDE, enum_type, HINT, ...) \
   case enum_type: {                                                          \
