@@ -32,7 +32,23 @@ def _gpu_available() -> bool:
 
 
 _SETUP_TEMPLATE = """\
+import os
+import pathlib
 import torchada  # noqa: F401
+import torchada.utils.cpp_extension as cpp_extension
+os.environ["TORCHADA_EXCLUDE_DIRS"] = {exclude_dir!r}
+
+if {expect_backport!r}:
+    _original_backport = cpp_extension._ensure_stable_headers_patched
+    def _record_backport():
+        pathlib.Path("backport-called").write_text("1")
+        _original_backport()
+    cpp_extension._ensure_stable_headers_patched = _record_backport
+else:
+    def _unexpected_backport():
+        raise AssertionError("torchada patched stable headers on torch >= 2.11")
+    cpp_extension._ensure_stable_headers_patched = _unexpected_backport
+
 from setuptools import setup
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
@@ -41,10 +57,10 @@ setup(
     ext_modules=[CUDAExtension(
         name="torchada_stable_test",
         sources=["stable_abi_ops.cu"],
-        include_dirs=[{inc!r}],
+        include_dirs={include_dirs!r},
         extra_compile_args={{
-            "nvcc": ["-DCUDA_VERSION=0", "-DENABLE_FP8", "-include", {box!r}],
-            "cxx": ["force_mcc", "-include", {box!r}],
+            "nvcc": {nvcc_args!r},
+            "cxx": {cxx_args!r},
         }},
         # AOTI stable-ABI shims live in libtorch_cpu.so.
         libraries=["c10", "torch", "torch_cpu", "torch_python", "musart"],
@@ -54,22 +70,29 @@ setup(
 """
 
 
-@pytest.mark.musa
-@pytest.mark.gpu
-@pytest.mark.slow
-@pytest.mark.skipif(not _gpu_available(), reason="requires a MUSA GPU")
-def test_stable_abi_shim_general_signatures(tmp_path):
+def _run_stable_abi_shim_test(tmp_path, expect_backport, use_compat_headers):
     import torch
 
     shutil.copy(OPS_CU, tmp_path)
     (tmp_path / "setup.py").write_text(
-        _SETUP_TEMPLATE.format(inc=stable_compat_include_dir(),
-                               box=stable_compat_box_header()))
+        _SETUP_TEMPLATE.format(
+            expect_backport=expect_backport,
+            exclude_dir=stable_compat_include_dir(),
+            include_dirs=[stable_compat_include_dir()] if use_compat_headers else [],
+            nvcc_args=["-DUSE_MUSA"] + ([
+                "-DCUDA_VERSION=0", "-DENABLE_FP8", "-include",
+                stable_compat_box_header()
+            ] if use_compat_headers else []),
+            cxx_args=["force_mcc", "-include", stable_compat_box_header()]
+            if use_compat_headers else ["force_mcc"],
+        ))
 
     res = subprocess.run(
         [sys.executable, "setup.py", "build_ext", "--inplace"],
         cwd=tmp_path, capture_output=True, text=True)
     assert res.returncode == 0, f"build failed:\n{res.stderr[-4000:]}"
+    marker = tmp_path / "backport-called"
+    assert marker.exists() is expect_backport
 
     so = glob.glob(str(tmp_path / "torchada_stable_test*.so"))
     assert so, "extension .so not produced"
@@ -99,3 +122,36 @@ def test_stable_abi_shim_general_signatures(tmp_path):
     assert ns.passthrough(x).data_ptr() == x.data_ptr()
     # (4) scalar int return     -> from<int64_t>
     assert int(ns.numel_of(x)) == 8
+
+    x = torch.arange(24, device=dev).reshape(4, 6)[:, ::2]
+    alias = ns.weak_ref_tensor(x)
+    assert alias.data_ptr() == x.data_ptr()
+    assert alias.shape == x.shape
+    assert alias.stride() == x.stride()
+    assert alias.dtype == x.dtype
+    alias.add_(1)
+    assert torch.equal(alias, x)
+
+
+def _torch_minor() -> int:
+    import torch
+
+    return int(torch.__version__.split(".")[1])
+
+
+@pytest.mark.musa
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.skipif(not _gpu_available(), reason="requires a MUSA GPU")
+@pytest.mark.skipif(_torch_minor() != 9, reason="requires torch 2.9")
+def test_stable_abi_ops_with_torch29_backport(tmp_path):
+    _run_stable_abi_shim_test(tmp_path, expect_backport=True, use_compat_headers=True)
+
+
+@pytest.mark.musa
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.skipif(not _gpu_available(), reason="requires a MUSA GPU")
+@pytest.mark.skipif(_torch_minor() < 11, reason="requires torch 2.11 or newer")
+def test_stable_abi_ops_with_native_torch211_abi(tmp_path):
+    _run_stable_abi_shim_test(tmp_path, expect_backport=False, use_compat_headers=False)
