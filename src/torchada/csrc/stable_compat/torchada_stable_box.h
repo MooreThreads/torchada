@@ -27,7 +27,7 @@
 #define STD_CUDA_CHECK(EXPR)                                              \
   do {                                                                   \
     auto _musa_err = (EXPR);                                             \
-    STD_TORCH_CHECK(_musa_err == 0, "MUSA runtime error: ",             \
+    STD_TORCH_CHECK(_musa_err == 0, "MUSA runtime error: ",              \
                     static_cast<int64_t>(_musa_err));                    \
   } while (0)
 #endif
