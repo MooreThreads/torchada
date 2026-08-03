@@ -65,6 +65,23 @@ class TestStableAbiSourcePorting:
         assert "torch_get_current_musa_blas_handle" in ported
         assert "torch_get_current_cuda_blas_handle" not in ported
 
+    def test_ported_blas_handle_has_torch_29_fallback(self):
+        """The symbol emitted by porting must exist on the torch 2.9 path."""
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        ported = self._port(
+            "auto e = torch_get_current_cuda_blas_handle(&handle);")
+        symbol = "torch_get_current_musa_blas_handle"
+        assert symbol in ported
+
+        with open(stable_compat_box_header(), encoding="utf-8") as f:
+            header = f.read()
+        torch_29_branch = header.split(
+            "// torch_musa 2.9 has no stable C shim", 1
+        )[1].split("#endif", 1)[0]
+        assert f"static inline AOTITorchError {symbol}(void** ret)" in torch_29_branch
+        assert f"return {symbol}(ret);" in torch_29_branch
+
     def test_port_rekeys_stable_impl_block(self):
         ported = self._port(
             "STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) { ops.impl(\"x\", f); }")

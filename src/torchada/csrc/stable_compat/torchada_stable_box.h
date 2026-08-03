@@ -56,8 +56,9 @@ static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
   return torch_get_current_musa_blas_handle(ret);
 }
 #else
-// torch_musa 2.9 has no stable C shim for the BLAS handle. Retain the legacy
-// fallback only for that compatibility path.
+// torch_musa 2.9 has no stable C shim for the BLAS handle. Provide the MUSA
+// name produced by source porting through the legacy C++ handle-pool API, then
+// keep the CUDA name as a forwarding wrapper for unported sources.
 struct _mublasHandle_t;
 typedef struct _mublasHandle_t* mublasHandle_t;
 namespace at {
@@ -65,10 +66,13 @@ namespace musa {
 mublasHandle_t getCurrentMUSABlasHandle();
 }
 }
-static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
+static inline AOTITorchError torch_get_current_musa_blas_handle(void** ret) {
   auto handle = at::musa::getCurrentMUSABlasHandle();
   *ret = reinterpret_cast<void*>(handle);
   return handle ? 0 : 1;  // fail fast on a null handle instead of crashing in muBLAS
+}
+static inline AOTITorchError torch_get_current_cuda_blas_handle(void** ret) {
+  return torch_get_current_musa_blas_handle(ret);
 }
 #endif
 
