@@ -718,6 +718,7 @@ class _CudaModuleWrapper(ModuleType):
     # Maps attribute name -> dot-separated path within torch_musa
     _SPECIAL_ATTRS = {
         "StreamContext": "core.stream.StreamContext",
+        "streams": "core.stream",
     }
 
     # Attribute name remappings (CUDA name -> MUSA name)
@@ -835,6 +836,19 @@ def _patch_torch_cuda_module():
         # Patch torch.cuda.amp
         if hasattr(torch.musa, "amp"):
             sys.modules["torch.cuda.amp"] = torch.musa.amp
+
+        # PyTorch 2.11 Dynamo guards access torch.cuda.streams.Stream.  The
+        # torch_musa stream module lives at torch_musa.core.stream and is not
+        # exported as torch_musa.streams, so expose the CUDA-compatible module
+        # path without replacing any stream implementation.
+        try:
+            import torch_musa.core.stream as musa_streams
+
+            if not hasattr(torch.musa, "streams"):
+                torch.musa.streams = musa_streams
+            sys.modules["torch.cuda.streams"] = musa_streams
+        except ImportError:
+            pass
 
         # Patch torch.cuda.graphs - MUSAGraph should be accessible as CUDAGraph
         if hasattr(torch.musa, "graphs"):

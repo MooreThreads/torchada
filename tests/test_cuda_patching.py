@@ -712,6 +712,20 @@ class TestStreamAndEvent:
 
             assert torch.cuda.StreamContext is torch_musa.core.stream.StreamContext
 
+    def test_streams_module(self):
+        """Test the torch.cuda.streams module path used by PyTorch Dynamo."""
+        import sys
+        import torch
+
+        import torchada
+
+        if torchada.is_musa_platform():
+            import torch_musa.core.stream
+
+            assert torch.cuda.streams is torch_musa.core.stream
+            assert sys.modules["torch.cuda.streams"] is torch_musa.core.stream
+            assert torch.cuda.streams.Stream is torch_musa.core.stream.Stream
+
     def test_stream_cuda_stream_property(self):
         """Test stream.cuda_stream returns same value as stream.musa_stream on MUSA."""
         import torch
