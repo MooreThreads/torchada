@@ -23,6 +23,33 @@ def _build_extension_command():
     return BuildExtension(Distribution())
 
 
+def test_stable_library_impl_cuda_key_is_rekeyed_for_any_namespace(tmp_path):
+    source_dir = tmp_path / "csrc"
+    source_dir.mkdir()
+    source = source_dir / "registration.cpp"
+    source.write_text(
+        "STABLE_TORCH_LIBRARY_IMPL(custom_ops, CUDA, m) {}\n"
+        "STABLE_TORCH_LIBRARY_IMPL(\n"
+        "    third_party_ops,\n"
+        "    CUDA,\n"
+        "    m) {}\n"
+        "STABLE_TORCH_LIBRARY_IMPL(custom_ops, CPU, m) {}\n",
+        encoding="utf-8",
+    )
+
+    command = _build_extension_command()
+    command._port_directory(str(source_dir), {})
+
+    assert source.read_text(encoding="utf-8") == (
+        "STABLE_TORCH_LIBRARY_IMPL(custom_ops, PrivateUse1, m) {}\n"
+        "STABLE_TORCH_LIBRARY_IMPL(\n"
+        "    third_party_ops,\n"
+        "    PrivateUse1,\n"
+        "    m) {}\n"
+        "STABLE_TORCH_LIBRARY_IMPL(custom_ops, CPU, m) {}\n"
+    )
+
+
 def test_existing_mirror_sibling_is_preserved(tmp_path):
     source_dir = tmp_path / "csrc"
     mirror_dir = tmp_path / "csrc_musa"

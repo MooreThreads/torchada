@@ -377,6 +377,20 @@ def _narrow_cuda_header_mapping(mapping_rule):
 
 _INCLUDE_DIRECTIVE_RE = re.compile(r'^\s*#\s*include\s*[<"](?P<header>[^>"]+)[>"]')
 _NVJPEG_PREFIX_RULES = frozenset(("nvjpeg", "NVJPEG"))
+_STABLE_LIBRARY_IMPL_CUDA_RE = re.compile(
+    r"(\bSTABLE_TORCH_LIBRARY_IMPL\s*\(\s*[A-Za-z_]\w*\s*,\s*)CUDA(\s*,)"
+)
+
+
+def _rekey_stable_library_impl(source_code):
+    """Register stable-ABI CUDA implementations on MUSA's dispatch key.
+
+    The dispatch key is a bare macro argument, so mappings such as
+    ``torch::kCUDA -> torch::kPrivateUse1`` cannot match it.  Handle every
+    valid library namespace and whitespace layout, including multiline macro
+    invocations, instead of maintaining project-specific literal mappings.
+    """
+    return _STABLE_LIBRARY_IMPL_CUDA_RE.sub(r"\1PrivateUse1\2", source_code)
 
 
 def _replace_porting_line(line, mapping_rule):
@@ -487,7 +501,8 @@ def _patch_simple_porting_modify_file(musa_sp):
                 f"Refusing to port CUDA/C++ source outside the in-place root: {cuda_filepath}"
             )
         with open(cuda_filepath, encoding="utf-8", errors="surrogateescape") as f:
-            lines = f.readlines()
+            source_code = _rekey_stable_library_impl(f.read())
+            lines = source_code.splitlines(keepends=True)
 
         def port_line(line):
             if line.startswith("*") or line.startswith("/") or line == "":
@@ -812,6 +827,8 @@ def _port_cuda_source(source_code: str, mapping_rules: Optional[Dict[str, str]] 
     """
     if mapping_rules is None:
         mapping_rules = _MAPPING_RULE
+
+    source_code = _rekey_stable_library_impl(source_code)
 
     # Sort rules by length (longest first) to avoid partial replacements
     sorted_rules = sorted(mapping_rules.items(), key=lambda x: len(x[0]), reverse=True)
