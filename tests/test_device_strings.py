@@ -10,6 +10,25 @@ def _make_torch_device(device: str):
     return torch.device(device)
 
 
+def _script_arange_default(count: int):
+    return torch.arange(count)
+
+
+def _script_arange_cuda(count: int):
+    return torch.arange(count, device="cuda")
+
+
+def _script_cuda_string():
+    return "cuda"
+
+
+class _ScriptFactoryModule(torch.nn.Module):
+    def forward(self, count: int, indexed: bool):
+        if indexed:
+            return torch.arange(count, device="cuda:0")
+        return torch.arange(count, device="cuda")
+
+
 class TestTensorDevicePatching:
     """Test tensor device string patching."""
 
@@ -405,6 +424,81 @@ class TestDeviceIndexVariants:
 
         scripted = torch.jit.script(_make_torch_device)
         assert scripted("musa") == torch.device("musa")
+
+    def test_wrapped_factory_remains_a_torchscript_builtin(self):
+        """Test importing torchada keeps torch factories scriptable."""
+        import torchada
+        from torch.jit._builtins import _find_builtin
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch factories")
+
+        assert _find_builtin(torch.arange) == "aten::arange"
+        scripted = torch.jit.script(_script_arange_default)
+        assert torch.equal(scripted(4), torch.arange(4))
+
+    def test_torchscript_function_translates_cuda_device_constant(self):
+        """Test scripted factory calls translate a CUDA device constant."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch factories")
+
+        scripted = torch.jit.script(_script_arange_cuda)
+        graph = str(scripted.graph)
+        assert 'Device = prim::Constant[value="musa"]' in graph
+        assert 'Device = prim::Constant[value="cuda"]' not in graph
+
+    def test_torchscript_module_translates_nested_cuda_device_constants(self):
+        """Test module methods and nested blocks translate indexed devices."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch factories")
+
+        scripted = torch.jit.script(_ScriptFactoryModule())
+        graph = str(scripted.forward.graph)
+        assert 'Device = prim::Constant[value="musa"]' in graph
+        assert 'Device = prim::Constant[value="musa:0"]' in graph
+        assert 'Device = prim::Constant[value="cuda"]' not in graph
+        assert 'Device = prim::Constant[value="cuda:0"]' not in graph
+
+    def test_torchscript_keeps_plain_cuda_strings(self):
+        """Test graph rewriting does not change ordinary string constants."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch factories")
+
+        scripted = torch.jit.script(_script_cuda_string)
+        assert scripted() == "cuda"
+
+    @pytest.mark.gpu
+    def test_torchscript_function_executes_on_musa(self):
+        """Test a scripted CUDA factory call executes on MUSA."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch factories")
+
+        result = torch.jit.script(_script_arange_cuda)(4)
+        assert result.device.type == "musa"
+        assert torch.equal(result.cpu(), torch.arange(4))
+
+    @pytest.mark.gpu
+    def test_torchscript_module_executes_nested_device_branches_on_musa(self):
+        """Test rewritten module branches execute on the requested MUSA device."""
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required with patched torch factories")
+
+        scripted = torch.jit.script(_ScriptFactoryModule())
+        for indexed in (False, True):
+            result = scripted(4, indexed)
+            assert result.device.type == "musa"
+            assert result.device.index == 0
+            assert torch.equal(result.cpu(), torch.arange(4))
 
 
 class TestDeviceContextManager:
