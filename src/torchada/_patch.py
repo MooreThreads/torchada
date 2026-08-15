@@ -566,6 +566,66 @@ def _wrap_factory_function(original_fn: Callable) -> Callable:
     return wrapped_fn
 
 
+def _register_jit_builtin_alias(original_fn: Callable, wrapped_fn: Callable) -> None:
+    """Keep a wrapped torch factory function scriptable as its original op."""
+    try:
+        from torch.jit._builtins import _find_builtin, _register_builtin
+
+        builtin = _find_builtin(original_fn)
+        if builtin is not None:
+            _register_builtin(wrapped_fn, builtin)
+    except (ImportError, AttributeError):
+        pass
+
+
+def _rewrite_jit_cuda_device_constants(block: Any) -> None:
+    """Translate typed CUDA device constants in a JIT graph block to MUSA."""
+    for node in block.nodes():
+        if (
+            node.kind() == "prim::Constant"
+            and node.hasAttribute("value")
+            and node.kindOf("value") == "s"
+            and str(node.output().type()) == "Device"
+        ):
+            device = node.s("value")
+            translated = _translate_device(device)
+            if translated != device:
+                node.s_("value", translated)
+
+        for nested_block in node.blocks():
+            _rewrite_jit_cuda_device_constants(nested_block)
+
+
+def _rewrite_scripted_object_device_constants(scripted: Any) -> Any:
+    """Translate CUDA device constants in a scripted function or module."""
+    graph = getattr(scripted, "graph", None)
+    if graph is not None:
+        _rewrite_jit_cuda_device_constants(graph)
+
+    modules = getattr(scripted, "modules", None)
+    if modules is not None:
+        for module in modules():
+            script_module = getattr(module, "_c", None)
+            if script_module is None:
+                continue
+            for method_name in script_module._method_names():
+                method = script_module._get_method(method_name)
+                _rewrite_jit_cuda_device_constants(method.graph)
+    return scripted
+
+
+def _wrap_jit_script(original_script: Callable) -> Callable:
+    """Rewrite CUDA device constants immediately after scripting."""
+
+    @functools.wraps(original_script)
+    def wrapped_script(*args, **kwargs):
+        return _rewrite_scripted_object_device_constants(
+            original_script(*args, **kwargs)
+        )
+
+    return wrapped_script
+
+
 # Minimal fallback used only if torch's private device-constructor registry is
 # unavailable; the live set is normally discovered at runtime (see below).
 _FALLBACK_FACTORY_FUNCTIONS = (
@@ -2038,7 +2098,9 @@ def apply_patches():
         if original_fn is None or hasattr(original_fn, "__wrapped__"):
             continue  # missing on this torch, or already wrapped
         original_fns.append(original_fn)
-        setattr(torch, fn_name, _wrap_factory_function(original_fn))
+        wrapped_fn = _wrap_factory_function(original_fn)
+        _register_jit_builtin_alias(original_fn, wrapped_fn)
+        setattr(torch, fn_name, wrapped_fn)
         wrapped_names.append(fn_name)
 
     # PyTorch's __torch_function__ dispatch (e.g. the ``with torch.device(...):``
@@ -2054,6 +2116,11 @@ def apply_patches():
         pass
 
     _mark_factory_wrappers_cacheable(wrapped_names)
+
+    if not getattr(torch.jit.script, "_torchada_device_wrapper", False):
+        wrapped_script = _wrap_jit_script(torch.jit.script)
+        wrapped_script._torchada_device_wrapper = True
+        torch.jit.script = wrapped_script
 
     _patched = True
 
