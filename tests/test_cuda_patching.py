@@ -2755,6 +2755,128 @@ class TestFlashAttnPatching:
                 if mod is not None:
                     sys.modules[name] = mod
 
+    @staticmethod
+    def _install_fa3_test_provider(monkeypatch, flash_attn_func, native_forward=None):
+        import sys
+        from types import ModuleType
+
+        flash_attn = ModuleType("flash_attn_interface")
+        flash_attn.flash_attn_func = flash_attn_func
+        if native_forward is not None:
+            flash_attn._flash_attn_forward = native_forward
+        sgl_kernel = ModuleType("sgl_kernel")
+        sgl_kernel.__path__ = []
+        sgl_kernel.flash_attn = flash_attn
+        monkeypatch.setitem(sys.modules, "flash_attn_interface", flash_attn)
+        monkeypatch.setitem(sys.modules, "sgl_kernel", sgl_kernel)
+        monkeypatch.setitem(sys.modules, "sgl_kernel.flash_attn", flash_attn)
+        return flash_attn
+
+    def test_missing_fa3_private_forward_is_adapted(self, monkeypatch):
+        """Adapt the public output+LSE API to Ring's private FA3 contract."""
+        from torchada._patch import _patch_flash_attn
+
+        calls = []
+
+        def flash_attn_func(
+            q,
+            k,
+            v,
+            *,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1),
+            softcap=0.0,
+            return_softmax_lse=False,
+        ):
+            calls.append(
+                {
+                    "q": q,
+                    "k": k,
+                    "v": v,
+                    "softmax_scale": softmax_scale,
+                    "causal": causal,
+                    "window_size": window_size,
+                    "softcap": softcap,
+                    "return_softmax_lse": return_softmax_lse,
+                }
+            )
+            return "output", "softmax_lse"
+
+        flash_attn = self._install_fa3_test_provider(monkeypatch, flash_attn_func)
+
+        _patch_flash_attn()
+        from flash_attn_interface import _flash_attn_forward
+
+        assert _flash_attn_forward is flash_attn._flash_attn_forward
+        result = flash_attn._flash_attn_forward(
+            "q",
+            "k",
+            "v",
+            softmax_scale=0.125,
+            causal=True,
+            window_size_left=32,
+            window_size_right=16,
+            softcap=4.0,
+        )
+
+        assert result == ("output", "softmax_lse", None, None)
+        assert calls == [
+            {
+                "q": "q",
+                "k": "k",
+                "v": "v",
+                "softmax_scale": 0.125,
+                "causal": True,
+                "window_size": (32, 16),
+                "softcap": 4.0,
+                "return_softmax_lse": True,
+            }
+        ]
+        assert flash_attn._flash_attn_forward.__name__ == "_flash_attn_forward"
+        assert flash_attn._flash_attn_forward._torchada_compat_shim is True
+        first = flash_attn._flash_attn_forward
+        _patch_flash_attn()
+        assert flash_attn._flash_attn_forward is first
+
+        def native_forward(q, k, v, **kwargs):
+            return q, k, v, kwargs
+
+        native_provider = self._install_fa3_test_provider(
+            monkeypatch, flash_attn_func, native_forward
+        )
+        _patch_flash_attn()
+        assert native_provider._flash_attn_forward is native_forward
+
+    def test_fa3_private_forward_fails_closed_without_lse(self, monkeypatch):
+        """Require both a public LSE parameter and a valid LSE result."""
+        from torchada._patch import _patch_flash_attn
+
+        def no_lse_support(q, k, v):
+            return q
+
+        flash_attn = self._install_fa3_test_provider(monkeypatch, no_lse_support)
+        _patch_flash_attn()
+        assert not hasattr(flash_attn, "_flash_attn_forward")
+
+        def invalid_lse_result(
+            q,
+            k,
+            v,
+            *,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1),
+            softcap=0.0,
+            return_softmax_lse=False,
+        ):
+            return q
+
+        flash_attn = self._install_fa3_test_provider(monkeypatch, invalid_lse_result)
+        _patch_flash_attn()
+        with pytest.raises(RuntimeError, match="must return"):
+            flash_attn._flash_attn_forward("q", "k", "v")
+
 
 class TestAcceleratorModuleWrapper:
     """Test the _AcceleratorModuleWrapper priority / fallback logic in isolation.

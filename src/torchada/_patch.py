@@ -1587,6 +1587,55 @@ def _patch_flash_attn():
             continue
         setattr(flash_attn_interface, _name, _drop_only_qv(_func))
 
+    # Ring Attention imports the private forward API for its softmax LSE.
+    # Adapt the public output+LSE contract only when the provider omits it.
+    if not hasattr(flash_attn_interface, "_flash_attn_forward"):
+        _public_flash_attn = getattr(flash_attn_interface, "flash_attn_func", None)
+        try:
+            _public_parameters = inspect.signature(_public_flash_attn).parameters
+        except (TypeError, ValueError):
+            _public_parameters = {}
+
+        if callable(_public_flash_attn) and "return_softmax_lse" in _public_parameters:
+
+            def _flash_attn_forward(
+                q,
+                k,
+                v,
+                *,
+                softmax_scale=None,
+                causal=False,
+                window_size_left=-1,
+                window_size_right=-1,
+                softcap=0.0,
+            ):
+                """Adapt public FA3 output+LSE to its low-level Ring contract."""
+                result = _public_flash_attn(
+                    q,
+                    k,
+                    v,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
+                    window_size=(window_size_left, window_size_right),
+                    softcap=softcap,
+                    return_softmax_lse=True,
+                )
+                if not isinstance(result, (tuple, list)) or len(result) < 2:
+                    raise RuntimeError(
+                        "flash_attn_func(return_softmax_lse=True) must return "
+                        "(output, softmax_lse)"
+                    )
+                output, softmax_lse = result[:2]
+                # Inference-only Ring consumers use output and LSE; the public
+                # API does not expose the private dropout auxiliaries.
+                return output, softmax_lse, None, None
+
+            _flash_attn_forward.__name__ = "_flash_attn_forward"
+            _flash_attn_forward.__qualname__ = "_flash_attn_forward"
+            _flash_attn_forward.__module__ = flash_attn_interface.__name__
+            _flash_attn_forward._torchada_compat_shim = True
+            flash_attn_interface._flash_attn_forward = _flash_attn_forward
+
 
 class _CDLLWrapper:
     """
