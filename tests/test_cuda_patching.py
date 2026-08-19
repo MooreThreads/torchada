@@ -2930,6 +2930,22 @@ class TestAcceleratorModuleWrapper:
         # empty_cache is in _MUSA_OVERRIDES, so torch.musa wins
         assert wrapper.empty_cache == "musa_fallback"
 
+    def test_remapped_musa_override_takes_precedence(self):
+        """Overrides must resolve torch.musa APIs through _REMAP_ATTRS.
+
+        PyTorch 2.11 exposes torch.accelerator.get_memory_info(), but its
+        implementation does not support the MUSA allocator. torch.musa keeps
+        the equivalent API under the older mem_get_info name, so the override
+        must use that remapped attribute instead of leaving the broken official
+        implementation in place.
+        """
+        musa_mem_get_info = object()
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"get_memory_info": "official_but_broken"},
+            musa_attrs={"mem_get_info": musa_mem_get_info},
+        )
+        assert wrapper.get_memory_info is musa_mem_get_info
+
     def test_fallback_to_musa_when_accelerator_missing(self):
         """Attributes absent from torch.accelerator must fall back to torch.musa."""
         wrapper, _, _ = self._make_wrapper(

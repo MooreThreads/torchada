@@ -1804,8 +1804,9 @@ class _AcceleratorModuleWrapper(ModuleType):
         # broken on MUSA (they route through torch._C._accelerator_* which
         # doesn't dispatch to the MUSA allocator).
         for name in self._MUSA_OVERRIDES:
-            if hasattr(original_accel, name) and hasattr(musa_module, name):
-                self._set_override(name, getattr(musa_module, name))
+            musa_name = self._REMAP_ATTRS.get(name, name)
+            if hasattr(original_accel, name) and hasattr(musa_module, musa_name):
+                self._set_override(name, getattr(musa_module, musa_name))
 
     def _set_override(self, name, value):
         """Install an override that takes precedence over the wrapped modules."""
