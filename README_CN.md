@@ -275,8 +275,9 @@ with torch.accelerator.stream(torch.musa.Stream()):
     ...
 ```
 
-**前向兼容性：** 包装器始终优先使用真正的 `torch.accelerator` 实现，只有在缺少属性时才回退到
-`torch.musa`，因此升级到提供官方实现的未来 PyTorch 版本时无需任何更改 —— 您将自动获得上游版本。
+**前向兼容性：** 包装器优先使用真正的 `torch.accelerator` 实现，只有在缺少属性时才回退到
+`torch.musa`。唯一例外是 `2.11.0.post2` 之前的 torch_musa：已知有问题的 accelerator 内存 API
+会被强制转发到 `torch.musa`。从 `2.11.0.post2` 开始，将自动使用已修复的官方实现。
 
 ## 平台检测
 
