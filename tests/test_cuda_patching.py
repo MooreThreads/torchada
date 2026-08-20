@@ -2901,6 +2901,8 @@ class TestAcceleratorModuleWrapper:
             ("2.11.0.post2+future/musa/build", False),
             ("2.11.0.post10+musa5.2.0", False),
             ("2.12.0+musa6.0.0", False),
+            ("not-a-version+musa5.2.0", True),
+            ("", True),
             (None, True),
         ),
     )
@@ -3154,7 +3156,7 @@ class TestTorchAcceleratorPatching:
 
         # Must not raise on either side of the torch_musa post2 boundary.
         torch.accelerator.empty_cache()
-        if _musa_accelerator_overrides_required(torch.musa.__version__):
+        if _musa_accelerator_overrides_required(getattr(torch.musa, "__version__", None)):
             assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
         else:
             assert torch.accelerator.empty_cache is torch.accelerator._original_accel.empty_cache
@@ -3173,6 +3175,10 @@ class TestTorchAcceleratorPatching:
         assert isinstance(torch.accelerator.memory_reserved(), int)
         assert isinstance(torch.accelerator.max_memory_reserved(), int)
         assert isinstance(torch.accelerator.memory_stats(), dict)
+        memory_info = torch.accelerator.get_memory_info()
+        assert isinstance(memory_info, tuple)
+        assert len(memory_info) == 2
+        assert all(isinstance(value, int) for value in memory_info)
         torch.accelerator.reset_peak_memory_stats()
 
     def test_rng_apis_fall_back_to_musa(self):

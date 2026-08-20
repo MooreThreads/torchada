@@ -1739,9 +1739,28 @@ def _musa_accelerator_overrides_required(version) -> bool:
         return True
 
     public_version = str(version).split("+", 1)[0]
-    return torch.torch_version.TorchVersion(public_version) < torch.torch_version.TorchVersion(
-        _TORCH_MUSA_ACCELERATOR_FIX_VERSION
-    )
+    try:
+        # Use PyTorch's vendored PEP 440 parser so post releases compare
+        # semantically (post10 > post2) without adding a torchada dependency.
+        from torch._vendor.packaging.version import InvalidVersion, Version
+    except ImportError:
+        # If the parser is unavailable, keep the workaround enabled: disabling
+        # it could re-expose the allocator failure this gate fixes.
+        logger.warning(
+            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            version,
+        )
+        return True
+    try:
+        return Version(public_version) < Version(_TORCH_MUSA_ACCELERATOR_FIX_VERSION)
+    except InvalidVersion:
+        # An unknown or malformed version must keep the workaround enabled:
+        # disabling it could re-expose the allocator failure this gate fixes.
+        logger.warning(
+            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            version,
+        )
+        return True
 
 
 class _AcceleratorModuleWrapper(ModuleType):
