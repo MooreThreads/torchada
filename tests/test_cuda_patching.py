@@ -715,6 +715,7 @@ class TestStreamAndEvent:
     def test_streams_module(self):
         """Test the torch.cuda.streams module path used by PyTorch Dynamo."""
         import sys
+
         import torch
 
         import torchada
@@ -2887,7 +2888,35 @@ class TestAcceleratorModuleWrapper:
     official implementations of APIs that currently fall back to torch.musa).
     """
 
-    def _make_wrapper(self, accel_attrs=None, musa_attrs=None):
+    @pytest.mark.parametrize(
+        ("musa_version", "expected"),
+        (
+            ("2.10.0", True),
+            ("2.11.0", True),
+            ("2.11.0.post1+musa5.2.0", True),
+            ("2.11.0.post1+musa5.3.0", True),
+            ("2.11.0.post2", False),
+            ("2.11.0.post2+musa5.2.0", False),
+            ("2.11.0.post2+musa5.3.0", False),
+            ("2.11.0.post2+future/musa/build", False),
+            ("2.11.0.post10+musa5.2.0", False),
+            ("2.12.0+musa6.0.0", False),
+            ("not-a-version+musa5.2.0", True),
+            ("", True),
+            (None, True),
+        ),
+    )
+    def test_musa_accelerator_override_version_boundary(self, musa_version, expected):
+        from torchada._patch import _musa_accelerator_overrides_required
+
+        assert _musa_accelerator_overrides_required(musa_version) is expected
+
+    def _make_wrapper(
+        self,
+        accel_attrs=None,
+        musa_attrs=None,
+        musa_version="2.11.0.post1+musa5.2.0",
+    ):
         from types import ModuleType
 
         from torchada._patch import _AcceleratorModuleWrapper
@@ -2897,6 +2926,8 @@ class TestAcceleratorModuleWrapper:
             setattr(accel, k, v)
 
         musa = ModuleType("fake_torch_musa")
+        if musa_version is not None:
+            musa.__version__ = musa_version
         for k, v in (musa_attrs or {}).items():
             setattr(musa, k, v)
 
@@ -2917,11 +2948,12 @@ class TestAcceleratorModuleWrapper:
         assert wrapper.manual_seed == "official_impl"
 
     def test_musa_overrides_take_precedence_when_both_exist(self):
-        """Memory APIs in _MUSA_OVERRIDES use torch.musa even when torch.accelerator has them.
+        """Affected torch_musa versions override official accelerator memory APIs.
 
         Starting in PyTorch 2.9+, torch.accelerator.empty_cache() exists but
         routes through torch._C._accelerator_* which doesn't work with the MUSA
-        allocator. The wrapper must override it to use torch.musa.empty_cache().
+        allocator before torch_musa 2.11.0.post2. The wrapper must override it
+        to use torch.musa.empty_cache() on those releases.
         """
         wrapper, _, _ = self._make_wrapper(
             accel_attrs={"empty_cache": "official_impl"},
@@ -2929,6 +2961,41 @@ class TestAcceleratorModuleWrapper:
         )
         # empty_cache is in _MUSA_OVERRIDES, so torch.musa wins
         assert wrapper.empty_cache == "musa_fallback"
+
+    def test_remapped_musa_override_takes_precedence(self):
+        """Overrides must resolve torch.musa APIs through _REMAP_ATTRS.
+
+        PyTorch 2.11 exposes torch.accelerator.get_memory_info(), but its
+        implementation does not support the MUSA allocator. torch.musa keeps
+        the equivalent API under the older mem_get_info name, so the override
+        must use that remapped attribute instead of leaving the broken official
+        implementation in place.
+        """
+        musa_mem_get_info = object()
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"get_memory_info": "official_but_broken"},
+            musa_attrs={"mem_get_info": musa_mem_get_info},
+        )
+        assert wrapper.get_memory_info is musa_mem_get_info
+
+    def test_fixed_torch_musa_keeps_official_accelerator_api(self):
+        """torch_musa post2+ must use its fixed torch.accelerator implementation."""
+        wrapper, _, _ = self._make_wrapper(
+            accel_attrs={"get_memory_info": "official_fixed_impl"},
+            musa_attrs={"mem_get_info": "legacy_musa_impl"},
+            musa_version="2.11.0.post2+musa5.2.0",
+        )
+        assert wrapper.get_memory_info == "official_fixed_impl"
+        assert "get_memory_info" not in wrapper._overrides
+
+    def test_fixed_version_still_remaps_when_official_api_is_missing(self):
+        """The version gate must not disable the normal torch.musa fallback."""
+        musa_mem_get_info = object()
+        wrapper, _, _ = self._make_wrapper(
+            musa_attrs={"mem_get_info": musa_mem_get_info},
+            musa_version="2.11.0.post2+musa5.2.0",
+        )
+        assert wrapper.get_memory_info is musa_mem_get_info
 
     def test_fallback_to_musa_when_accelerator_missing(self):
         """Attributes absent from torch.accelerator must fall back to torch.musa."""
@@ -3071,8 +3138,8 @@ class TestTorchAcceleratorPatching:
         # Function objects should come from the real torch.accelerator module
         assert torch.accelerator.is_available.__module__ == "torch.accelerator"
 
-    def test_empty_cache_falls_back_to_musa(self):
-        """torch.accelerator.empty_cache() must work via torch.musa fallback.
+    def test_empty_cache_uses_version_appropriate_implementation(self):
+        """torch.accelerator.empty_cache() must use the compatible implementation.
 
         Regression test for the user-reported AttributeError:
             >>> torch.accelerator.empty_cache()
@@ -3085,12 +3152,17 @@ class TestTorchAcceleratorPatching:
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
-        # Must not raise
-        torch.accelerator.empty_cache()
-        assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
+        from torchada._patch import _musa_accelerator_overrides_required
 
-    def test_memory_apis_fall_back_to_musa(self):
-        """Memory query APIs missing from torch.accelerator must work via fallback."""
+        # Must not raise on either side of the torch_musa post2 boundary.
+        torch.accelerator.empty_cache()
+        if _musa_accelerator_overrides_required(getattr(torch.musa, "__version__", None)):
+            assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
+        else:
+            assert torch.accelerator.empty_cache is torch.accelerator._original_accel.empty_cache
+
+    def test_memory_apis_work(self):
+        """Memory APIs must work through either the compatibility or native path."""
         import torch
 
         import torchada
@@ -3103,6 +3175,10 @@ class TestTorchAcceleratorPatching:
         assert isinstance(torch.accelerator.memory_reserved(), int)
         assert isinstance(torch.accelerator.max_memory_reserved(), int)
         assert isinstance(torch.accelerator.memory_stats(), dict)
+        memory_info = torch.accelerator.get_memory_info()
+        assert isinstance(memory_info, tuple)
+        assert len(memory_info) == 2
+        assert all(isinstance(value, int) for value in memory_info)
         torch.accelerator.reset_peak_memory_stats()
 
     def test_rng_apis_fall_back_to_musa(self):

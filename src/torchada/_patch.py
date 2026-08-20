@@ -331,9 +331,7 @@ def _patch_torch_device():
 
         _register_builtin(DeviceFactoryWrapper, "aten::device")
     except (AttributeError, ImportError, RuntimeError, TypeError):
-        logger.debug(
-            "Unable to register torch.device as a TorchScript builtin", exc_info=True
-        )
+        logger.debug("Unable to register torch.device as a TorchScript builtin", exc_info=True)
 
 
 # Store original torch.Generator for patching
@@ -619,9 +617,7 @@ def _wrap_jit_script(original_script: Callable) -> Callable:
 
     @functools.wraps(original_script)
     def wrapped_script(*args, **kwargs):
-        return _rewrite_scripted_object_device_constants(
-            original_script(*args, **kwargs)
-        )
+        return _rewrite_scripted_object_device_constants(original_script(*args, **kwargs))
 
     return wrapped_script
 
@@ -1725,6 +1721,48 @@ class _CDLLWrapper:
 _original_ctypes_CDLL = None
 
 
+_TORCH_MUSA_ACCELERATOR_FIX_VERSION = "2.11.0.post2"
+
+
+def _musa_accelerator_overrides_required(version) -> bool:
+    """Return whether torch.accelerator still needs MUSA memory overrides.
+
+    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs.  Older
+    releases still need torchada to force those calls through torch.musa.
+    Ignore the local version suffix (for example ``+musa5.2.0``), because it
+    identifies the MUSA stack build rather than the torch_musa fix level.
+
+    If a torch_musa build does not expose a version, retain the compatibility
+    overrides rather than risking the known runtime failure.
+    """
+    if version is None:
+        return True
+
+    public_version = str(version).split("+", 1)[0]
+    try:
+        # Use PyTorch's vendored PEP 440 parser so post releases compare
+        # semantically (post10 > post2) without adding a torchada dependency.
+        from torch._vendor.packaging.version import InvalidVersion, Version
+    except ImportError:
+        # If the parser is unavailable, keep the workaround enabled: disabling
+        # it could re-expose the allocator failure this gate fixes.
+        logger.warning(
+            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            version,
+        )
+        return True
+    try:
+        return Version(public_version) < Version(_TORCH_MUSA_ACCELERATOR_FIX_VERSION)
+    except InvalidVersion:
+        # An unknown or malformed version must keep the workaround enabled:
+        # disabling it could re-expose the allocator failure this gate fixes.
+        logger.warning(
+            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            version,
+        )
+        return True
+
+
 class _AcceleratorModuleWrapper(ModuleType):
     """
     Wrapper module that extends torch.accelerator with fallbacks to torch.musa.
@@ -1774,10 +1812,11 @@ class _AcceleratorModuleWrapper(ModuleType):
         "StreamContext": "core.stream.StreamContext",
     }
 
-    # Memory APIs that exist on torch.accelerator (PyTorch 2.9+) but internally
-    # call torch._C._accelerator_* C++ functions which fail on MUSA because the
-    # MUSA allocator is not a CUDA DeviceAllocator. These are overridden to
-    # delegate to torch.musa, following the same pattern as synchronize().
+    # Before torch_musa 2.11.0.post2, memory APIs that exist on
+    # torch.accelerator internally call torch._C._accelerator_* C++ functions
+    # which fail on MUSA because the MUSA allocator is not a CUDA
+    # DeviceAllocator. On those releases, delegate to torch.musa following the
+    # same pattern as synchronize().
     # When an API in this list exists on the original torch.accelerator AND on
     # torch.musa, we install an override that prefers torch.musa over the
     # upstream implementation.
@@ -1800,12 +1839,15 @@ class _AcceleratorModuleWrapper(ModuleType):
         self._musa_module = musa_module
         self._overrides = {}
 
-        # Apply MUSA overrides for memory APIs that exist upstream but are
-        # broken on MUSA (they route through torch._C._accelerator_* which
-        # doesn't dispatch to the MUSA allocator).
-        for name in self._MUSA_OVERRIDES:
-            if hasattr(original_accel, name) and hasattr(musa_module, name):
-                self._set_override(name, getattr(musa_module, name))
+        # torch_musa versions before 2.11.0.post2 route these APIs through
+        # torch._C._accelerator_* without dispatching to the MUSA allocator.
+        # Newer versions provide working unified accelerator implementations,
+        # so preserve those instead of forcing the torch.musa compatibility path.
+        if _musa_accelerator_overrides_required(getattr(musa_module, "__version__", None)):
+            for name in self._MUSA_OVERRIDES:
+                musa_name = self._REMAP_ATTRS.get(name, name)
+                if hasattr(original_accel, name) and hasattr(musa_module, musa_name):
+                    self._set_override(name, getattr(musa_module, musa_name))
 
     def _set_override(self, name, value):
         """Install an override that takes precedence over the wrapped modules."""
@@ -1937,10 +1979,10 @@ def _patch_torch_accelerator():
        delegates to torch.musa.synchronize().
 
     2. Overrides for memory APIs that exist on torch.accelerator (PyTorch 2.9+)
-       but are broken on MUSA because they route through torch._C._accelerator_*
-       C++ functions that don't dispatch to the MUSA allocator. These are
-       redirected to torch.musa implementations (see _AcceleratorModuleWrapper
-       ._MUSA_OVERRIDES).
+       but are broken before torch_musa 2.11.0.post2 because they route through
+       torch._C._accelerator_* C++ functions that don't dispatch to the MUSA
+       allocator. On affected versions, these are redirected to torch.musa
+       implementations (see _AcceleratorModuleWrapper._MUSA_OVERRIDES).
 
     3. Forward compatibility for APIs that PyTorch is expected to add to
        torch.accelerator in future releases but are not yet present (Stream,
@@ -1950,12 +1992,6 @@ def _patch_torch_accelerator():
     4. device_index(idx) and stream(s) context managers, which are not yet
        present on torch.accelerator in torch 2.7.
 
-    TODO(torchada): README.md / README_CN.md claim "the wrapper always prefers
-    the real torch.accelerator implementation and only falls back to torch.musa
-    when an attribute is missing". That is no longer accurate after adding the
-    memory API overrides (point 2 above). Update those documents to describe
-    the actual resolution order: (1) torchada overrides, (2) real torch.accelerator,
-    (3) fallback to torch.musa.
     """
     global _original_torch_accelerator
 

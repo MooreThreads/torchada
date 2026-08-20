@@ -289,11 +289,11 @@ with torch.accelerator.stream(torch.musa.Stream()):
     ...
 ```
 
-**Forward compatibility:** The wrapper always prefers the real
-`torch.accelerator` implementation and only falls back to `torch.musa` when an
-attribute is missing, so upgrading to a future PyTorch release that ships
-official implementations requires no changes on your side — you will
-automatically get the upstream version.
+**Forward compatibility:** The wrapper prefers the real `torch.accelerator`
+implementation and only falls back to `torch.musa` when an attribute is
+missing. The exception is torch_musa releases before `2.11.0.post2`, where
+known-broken accelerator memory APIs are forced through `torch.musa`. Starting
+with `2.11.0.post2`, the fixed official implementations are used automatically.
 
 ## Platform Detection
 
@@ -392,7 +392,7 @@ See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.82
+torchada>=0.1.83
 ```
 
 ### Step 2: Conditional Import

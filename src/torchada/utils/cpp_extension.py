@@ -1274,6 +1274,15 @@ def _get_build_extension_class():
 
                 @staticmethod
                 def _is_system_include_dir(path):
+                    # The stable-ABI compatibility headers are torchada-owned
+                    # inputs, not downstream project sources.  This matters for
+                    # editable/source installs where the package lives outside
+                    # site-packages: porting this directory in place rewrites
+                    # the CUDA-named forwarding shims into self-recursive MUSA
+                    # declarations and breaks every subsequent native build.
+                    if _path_overlaps_any(path, [stable_compat_include_dir()]):
+                        return True
+
                     is_system_path = (
                         path.startswith("/usr/")
                         or path.startswith("/opt/")
