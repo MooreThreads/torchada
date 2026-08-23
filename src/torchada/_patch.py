@@ -65,6 +65,17 @@ def patch_function(func: Callable[[], None]) -> Callable[[], None]:
     return func
 
 
+@patch_function
+def _patch_visible_devices_env():
+    if "CUDA_VISIBLE_DEVICES" not in os.environ and "MUSA_VISIBLE_DEVICES" in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["MUSA_VISIBLE_DEVICES"]
+    elif (
+        "MUSA_VISIBLE_DEVICES" not in os.environ
+        and "CUDA_VISIBLE_DEVICES" in os.environ
+    ):
+        os.environ["MUSA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+
+
 def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
     """
     Decorator to guard a patch function with import checks.
@@ -106,6 +117,39 @@ def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
         return wrapper
 
     return decorator
+
+
+@patch_function
+@requires_import("torch._inductor.template_heuristics.registry")
+def _patch_inductor_template_heuristics():
+    """Reuse CUDA Inductor template heuristics for CUDA-compatible MUSA templates."""
+    if not is_musa_platform():
+        return
+
+    import torch._inductor.template_heuristics.registry as registry
+
+    heuristic_registry = getattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", None)
+    if not isinstance(heuristic_registry, dict):
+        return
+
+    changed = False
+    for key, heuristic_class in list(heuristic_registry.items()):
+        if len(key) != 3:
+            continue
+        template_name, device_type, op_name = key
+        if device_type != "cuda":
+            continue
+        if not isinstance(template_name, str) or not template_name.startswith("triton::"):
+            continue
+        musa_key = (template_name, "musa", op_name)
+        if musa_key not in heuristic_registry:
+            heuristic_registry[musa_key] = heuristic_class
+            changed = True
+
+    if changed:
+        heuristic_cache = getattr(registry, "_HEURISTIC_CACHE", None)
+        if isinstance(heuristic_cache, dict):
+            heuristic_cache.clear()
 
 
 # Cache for translated device strings - avoids repeated string operations
@@ -2122,6 +2166,7 @@ def apply_patches():
     - torch.cuda.nccl -> torch.musa.mccl
     - torch.amp.autocast(device_type='cuda') -> 'musa'
     - torch.utils.cpp_extension (CUDAExtension, BuildExtension) -> MUSA versions
+    - CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES environment fallback
     - torch._inductor.autotune_process.CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES
     - torch.accelerator.synchronize() -> torch.musa.synchronize()
     - torch.accelerator context managers (device_index, stream) for forward compatibility

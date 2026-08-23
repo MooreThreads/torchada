@@ -4,6 +4,8 @@ Tests for torch.cuda patching functionality.
 These tests verify that torch.cuda.* APIs work transparently on MUSA.
 """
 
+import os
+
 import pytest
 
 
@@ -1080,6 +1082,60 @@ class TestTensorIsCuda:
                 if "MUSA" in str(e) or "invalid device function" in str(e):
                     pytest.skip(f"MUSA driver issue: {e}")
                 raise
+
+
+class TestVisibleDevicesEnv:
+    """Test CUDA_VISIBLE_DEVICES and MUSA_VISIBLE_DEVICES fallback."""
+
+    def test_cuda_visible_devices_env_falls_back_to_musa_visible_devices(
+        self, monkeypatch
+    ):
+        """Test CUDA_VISIBLE_DEVICES is copied to MUSA_VISIBLE_DEVICES."""
+        from torchada import _patch
+
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
+        monkeypatch.delenv("MUSA_VISIBLE_DEVICES", raising=False)
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["MUSA_VISIBLE_DEVICES"] == "1,3"
+
+    def test_musa_visible_devices_env_falls_back_to_cuda_visible_devices(
+        self, monkeypatch
+    ):
+        """Test MUSA_VISIBLE_DEVICES is copied to CUDA_VISIBLE_DEVICES."""
+        from torchada import _patch
+
+        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "0")
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+    def test_existing_visible_devices_envs_are_not_overwritten(self, monkeypatch):
+        """Test explicit visible device envs have priority."""
+        from torchada import _patch
+
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
+        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "0")
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1,3"
+        assert os.environ["MUSA_VISIBLE_DEVICES"] == "0"
+
+    def test_visible_devices_env_absent_noop(self, monkeypatch):
+        """Test no visible device envs are added when both are absent."""
+        from torchada import _patch
+
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("MUSA_VISIBLE_DEVICES", raising=False)
+
+        _patch._patch_visible_devices_env()
+
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+        assert "MUSA_VISIBLE_DEVICES" not in os.environ
 
 
 class TestAutotuneProcess:
