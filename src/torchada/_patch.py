@@ -108,6 +108,39 @@ def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
     return decorator
 
 
+@patch_function
+@requires_import("torch._inductor.template_heuristics.registry")
+def _patch_inductor_template_heuristics():
+    """Reuse CUDA Inductor template heuristics for CUDA-compatible MUSA templates."""
+    if not is_musa_platform():
+        return
+
+    import torch._inductor.template_heuristics.registry as registry
+
+    heuristic_registry = getattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", None)
+    if not isinstance(heuristic_registry, dict):
+        return
+
+    changed = False
+    for key, heuristic_class in list(heuristic_registry.items()):
+        if len(key) != 3:
+            continue
+        template_name, device_type, op_name = key
+        if device_type != "cuda":
+            continue
+        if not isinstance(template_name, str) or not template_name.startswith("triton::"):
+            continue
+        musa_key = (template_name, "musa", op_name)
+        if musa_key not in heuristic_registry:
+            heuristic_registry[musa_key] = heuristic_class
+            changed = True
+
+    if changed:
+        heuristic_cache = getattr(registry, "_HEURISTIC_CACHE", None)
+        if isinstance(heuristic_cache, dict):
+            heuristic_cache.clear()
+
+
 # Cache for translated device strings - avoids repeated string operations
 _device_str_cache = {}
 
