@@ -348,14 +348,9 @@ at::Tensor& log_inplace_musa_impl(at::Tensor& self) {
 // time. If set, the override is not registered and torch_musa's default
 // implementation is used.
 //
-// Uncomment m.impl() lines to activate custom implementations.
 // ============================================================================
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-    // Example: Register neg override only if not disabled
-    // if (torchada::is_override_enabled("neg")) {
-    //     m.impl("neg", torchada::neg_musa_impl);
-    // }
     if (torchada::is_override_enabled("multinomial")) {
         m.impl("multinomial", torchada::multinomial_musa_impl);
     }

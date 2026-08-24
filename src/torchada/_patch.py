@@ -67,12 +67,9 @@ def patch_function(func: Callable[[], None]) -> Callable[[], None]:
 
 @patch_function
 def _patch_visible_devices_env():
-    if "CUDA_VISIBLE_DEVICES" not in os.environ and "MUSA_VISIBLE_DEVICES" in os.environ:
+    if "MUSA_VISIBLE_DEVICES" in os.environ:
         os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["MUSA_VISIBLE_DEVICES"]
-    elif (
-        "MUSA_VISIBLE_DEVICES" not in os.environ
-        and "CUDA_VISIBLE_DEVICES" in os.environ
-    ):
+    elif "CUDA_VISIBLE_DEVICES" in os.environ:
         os.environ["MUSA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
 
 
@@ -134,7 +131,7 @@ def _patch_inductor_template_heuristics():
 
     changed = False
     for key, heuristic_class in list(heuristic_registry.items()):
-        if len(key) != 3:
+        if not isinstance(key, tuple) or len(key) != 3:
             continue
         template_name, device_type, op_name = key
         if device_type != "cuda":
