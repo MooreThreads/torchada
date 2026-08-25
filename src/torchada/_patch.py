@@ -69,8 +69,8 @@ def patch_function(func: Callable[[], None]) -> Callable[[], None]:
 def _patch_visible_devices_env():
     if "MUSA_VISIBLE_DEVICES" in os.environ:
         os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["MUSA_VISIBLE_DEVICES"]
-    elif "CUDA_VISIBLE_DEVICES" in os.environ:
-        os.environ["MUSA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+    else:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
 
 def requires_import(*module_names: str) -> Callable[[Callable], Callable]:

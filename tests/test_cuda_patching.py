@@ -1087,8 +1087,19 @@ class TestTensorIsCuda:
 class TestVisibleDevicesEnv:
     """Test CUDA_VISIBLE_DEVICES and MUSA_VISIBLE_DEVICES fallback."""
 
-    def test_cuda_visible_devices_env_falls_back_to_musa_visible_devices(self, monkeypatch):
-        """Test CUDA_VISIBLE_DEVICES is copied to MUSA_VISIBLE_DEVICES."""
+    def test_musa_visible_devices_syncs_to_cuda_visible_devices(self, monkeypatch):
+        """Test CUDA_VISIBLE_DEVICES mirrors MUSA_VISIBLE_DEVICES."""
+        from torchada import _patch
+
+        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "1,3")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1,3"
+
+    def test_cuda_visible_devices_is_cleared_when_musa_is_absent(self, monkeypatch):
+        """Test CUDA_VISIBLE_DEVICES is removed when MUSA is not configured."""
         from torchada import _patch
 
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
@@ -1096,30 +1107,18 @@ class TestVisibleDevicesEnv:
 
         _patch._patch_visible_devices_env()
 
-        assert os.environ["MUSA_VISIBLE_DEVICES"] == "1,3"
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
-    def test_musa_visible_devices_env_falls_back_to_cuda_visible_devices(self, monkeypatch):
-        """Test MUSA_VISIBLE_DEVICES is copied to CUDA_VISIBLE_DEVICES."""
+    def test_empty_musa_visible_devices_clears_cuda_value(self, monkeypatch):
+        """Test an explicitly empty MUSA value is mirrored exactly."""
         from torchada import _patch
 
-        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "0")
-        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
 
         _patch._patch_visible_devices_env()
 
-        assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
-
-    def test_musa_visible_devices_overrides_cuda_visible_devices(self, monkeypatch):
-        """Test the MUSA setting wins when both variables are explicit."""
-        from torchada import _patch
-
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
-        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "0")
-
-        _patch._patch_visible_devices_env()
-
-        assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
-        assert os.environ["MUSA_VISIBLE_DEVICES"] == "0"
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
 
     def test_visible_devices_env_absent_noop(self, monkeypatch):
         """Test no visible device envs are added when both are absent."""
@@ -1130,8 +1129,8 @@ class TestVisibleDevicesEnv:
 
         _patch._patch_visible_devices_env()
 
-        assert "CUDA_VISIBLE_DEVICES" not in os.environ
         assert "MUSA_VISIBLE_DEVICES" not in os.environ
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
 class TestInductorTemplateHeuristics:
