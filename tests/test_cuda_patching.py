@@ -1136,6 +1136,25 @@ class TestVisibleDevicesEnv:
 class TestInductorTemplateHeuristics:
     """Test CUDA-compatible Triton heuristic registration for MUSA."""
 
+    def test_post2_uses_native_inductor_registration(self, monkeypatch):
+        import torch
+
+        from torch._inductor.template_heuristics import registry
+
+        from torchada import _patch
+
+        heuristic_registry = {("triton::mm", "cuda", None): object()}
+        heuristic_cache = {("cached",): object()}
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(torch.musa, "__version__", "2.11.0.post2+musa5.2.0")
+        monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
+        monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
+
+        _patch._patch_inductor_template_heuristics()
+
+        assert ("triton::mm", "musa", None) not in heuristic_registry
+        assert ("cached",) in heuristic_cache
+
     def test_copies_only_cuda_triton_heuristics_and_clears_cache(self, monkeypatch):
         from torch._inductor.template_heuristics import registry
 
@@ -2454,16 +2473,21 @@ class TestCppOpsInfrastructure:
         assert hasattr(_cpp_ops, "get_module")
 
     def test_cpp_ops_loaded_on_musa(self):
-        """Test that C++ ops are automatically loaded on MUSA platform."""
+        """Test that legacy C++ overrides load only before torch_musa post2."""
+        import torch
+
         import torchada
 
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
         from torchada._cpp_ops import is_loaded
+        from torchada._patch import _musa_accelerator_overrides_required
 
-        # C++ ops should be automatically loaded on MUSA platform
-        assert is_loaded(), "C++ ops should be loaded automatically on MUSA"
+        if _musa_accelerator_overrides_required(getattr(torch.musa, "__version__", None)):
+            assert is_loaded(), "Legacy C++ ops should load before torch_musa post2"
+        else:
+            assert not is_loaded(), "TorchAda C++ overrides must stay disabled on torch_musa post2+"
 
     def test_cpp_ops_source_files_exist(self):
         """Test that the C++ source files are packaged correctly."""

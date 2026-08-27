@@ -123,6 +123,10 @@ def _patch_inductor_template_heuristics():
     if not is_musa_platform():
         return
 
+    musa_module = getattr(torch, "musa", None)
+    if not _musa_accelerator_overrides_required(getattr(musa_module, "__version__", None)):
+        return
+
     import torch._inductor.template_heuristics.registry as registry
 
     heuristic_registry = getattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", None)
@@ -1768,7 +1772,7 @@ _TORCH_MUSA_ACCELERATOR_FIX_VERSION = "2.11.0.post2"
 def _musa_accelerator_overrides_required(version) -> bool:
     """Return whether torch.accelerator still needs MUSA memory overrides.
 
-    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs.  Older
+    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs. Older
     releases still need torchada to force those calls through torch.musa.
     Ignore the local version suffix (for example ``+musa5.2.0``), because it
     identifies the MUSA stack build rather than the torch_musa fix level.
@@ -1786,7 +1790,7 @@ def _musa_accelerator_overrides_required(version) -> bool:
         from torch._vendor.packaging.version import InvalidVersion, Version
     except ImportError:
         # If the parser is unavailable, keep the workaround enabled: disabling
-        # it could re-expose the allocator failure this gate fixes.
+        # it could re-expose the failure this gate fixes.
         logger.warning(
             "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
             version,
@@ -1796,7 +1800,7 @@ def _musa_accelerator_overrides_required(version) -> bool:
         return Version(public_version) < Version(_TORCH_MUSA_ACCELERATOR_FIX_VERSION)
     except InvalidVersion:
         # An unknown or malformed version must keep the workaround enabled:
-        # disabling it could re-expose the allocator failure this gate fixes.
+        # disabling it could re-expose the failure this gate fixes.
         logger.warning(
             "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
             version,
