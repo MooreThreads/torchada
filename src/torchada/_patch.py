@@ -775,6 +775,10 @@ class _CudaModuleWrapper(ModuleType):
     _SPECIAL_ATTRS = {
         "StreamContext": "core.stream.StreamContext",
         "streams": "core.stream",
+        # torch._dynamo models ``torch.cuda.device`` through this private CUDA
+        # helper.  torch_musa exposes the equivalent helper below ``core``
+        # instead of at the module top level.
+        "_get_device_index": "core._utils._get_musa_device_index",
     }
 
     # Attribute name remappings (CUDA name -> MUSA name)
