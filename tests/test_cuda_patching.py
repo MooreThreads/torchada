@@ -4,6 +4,8 @@ Tests for torch.cuda patching functionality.
 These tests verify that torch.cuda.* APIs work transparently on MUSA.
 """
 
+import os
+
 import pytest
 
 
@@ -1091,6 +1093,149 @@ class TestTensorIsCuda:
                 if "MUSA" in str(e) or "invalid device function" in str(e):
                     pytest.skip(f"MUSA driver issue: {e}")
                 raise
+
+
+class TestVisibleDevicesEnv:
+    """Test CUDA_VISIBLE_DEVICES and MUSA_VISIBLE_DEVICES fallback."""
+
+    def test_musa_visible_devices_syncs_to_cuda_visible_devices(self, monkeypatch):
+        """Test CUDA_VISIBLE_DEVICES mirrors MUSA_VISIBLE_DEVICES."""
+        from torchada import _patch
+
+        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "1,3")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1,3"
+
+    def test_cuda_visible_devices_is_cleared_when_musa_is_absent(self, monkeypatch):
+        """Test CUDA_VISIBLE_DEVICES is removed when MUSA is not configured."""
+        from torchada import _patch
+
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
+        monkeypatch.delenv("MUSA_VISIBLE_DEVICES", raising=False)
+
+        _patch._patch_visible_devices_env()
+
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+    def test_empty_musa_visible_devices_clears_cuda_value(self, monkeypatch):
+        """Test an explicitly empty MUSA value is mirrored exactly."""
+        from torchada import _patch
+
+        monkeypatch.setenv("MUSA_VISIBLE_DEVICES", "")
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+
+    def test_visible_devices_env_absent_noop(self, monkeypatch):
+        """Test no visible device envs are added when both are absent."""
+        from torchada import _patch
+
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("MUSA_VISIBLE_DEVICES", raising=False)
+
+        _patch._patch_visible_devices_env()
+
+        assert "MUSA_VISIBLE_DEVICES" not in os.environ
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+class TestInductorTemplateHeuristics:
+    """Test CUDA-compatible Triton heuristic registration for MUSA."""
+
+    def test_post2_uses_native_inductor_registration(self, monkeypatch):
+        import torch
+        from torch._inductor.template_heuristics import registry
+
+        from torchada import _patch
+
+        heuristic_registry = {("triton::mm", "cuda", None): object()}
+        heuristic_cache = {("cached",): object()}
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(torch.musa, "__version__", "2.11.0.post2+musa5.2.0")
+        monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
+        monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
+
+        _patch._patch_inductor_template_heuristics()
+
+        assert ("triton::mm", "musa", None) not in heuristic_registry
+        assert ("cached",) in heuristic_cache
+
+    def test_copies_only_cuda_triton_heuristics_and_clears_cache(self, monkeypatch):
+        from torch._inductor.codegen import common
+        from torch._inductor.template_heuristics import registry
+
+        from torchada import _patch
+
+        cuda_heuristic = object()
+        existing_musa_heuristic = object()
+        heuristic_registry = {
+            ("triton::bmm", "cuda", None): cuda_heuristic,
+            ("triton::mm", "cuda", "addmm"): cuda_heuristic,
+            ("triton::mm", "musa", "addmm"): existing_musa_heuristic,
+            ("aten::mm", "cuda", None): object(),
+            ("triton::mm", "cpu", None): object(),
+            ("malformed", "cuda"): object(),
+            1: object(),
+        }
+        heuristic_cache = {("cached",): object()}
+        lazy_cuda_heuristic = object()
+
+        def register_lazy_heuristic():
+            heuristic_registry[("triton::lazy_mm", "cuda", None)] = lazy_cuda_heuristic
+
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(common, "init_backend_registration", register_lazy_heuristic)
+        monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
+        monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
+
+        _patch._patch_inductor_template_heuristics()
+
+        assert heuristic_registry[("triton::bmm", "musa", None)] is cuda_heuristic
+        assert heuristic_registry[("triton::lazy_mm", "musa", None)] is lazy_cuda_heuristic
+        assert heuristic_registry[("triton::mm", "musa", "addmm")] is existing_musa_heuristic
+        assert ("aten::mm", "musa", None) not in heuristic_registry
+        assert ("triton::mm", "cpu", None) in heuristic_registry
+        assert heuristic_cache == {}
+
+    def test_is_idempotent_and_preserves_cache_without_changes(self, monkeypatch):
+        from torch._inductor.template_heuristics import registry
+
+        from torchada import _patch
+
+        heuristic = object()
+        heuristic_registry = {("triton::mm", "cuda", None): heuristic}
+        heuristic_cache = {}
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
+        monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
+
+        _patch._patch_inductor_template_heuristics()
+        heuristic_cache[("after-first-patch",)] = object()
+        _patch._patch_inductor_template_heuristics()
+
+        assert heuristic_registry[("triton::mm", "musa", None)] is heuristic
+        assert ("after-first-patch",) in heuristic_cache
+
+    def test_non_musa_platform_is_noop(self, monkeypatch):
+        from torch._inductor.template_heuristics import registry
+
+        from torchada import _patch
+
+        heuristic_registry = {("triton::mm", "cuda", None): object()}
+        heuristic_cache = {("cached",): object()}
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: False)
+        monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
+        monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
+
+        _patch._patch_inductor_template_heuristics()
+
+        assert ("triton::mm", "musa", None) not in heuristic_registry
+        assert ("cached",) in heuristic_cache
 
 
 class TestAutotuneProcess:
@@ -2346,7 +2491,7 @@ class TestCppOpsInfrastructure:
         assert hasattr(_cpp_ops, "get_module")
 
     def test_cpp_ops_loaded_on_musa(self):
-        """Test that C++ ops are automatically loaded on MUSA platform."""
+        """C++ custom-op extension remains available on all supported versions."""
         import torchada
 
         if not torchada.is_musa_platform():
@@ -2354,8 +2499,7 @@ class TestCppOpsInfrastructure:
 
         from torchada._cpp_ops import is_loaded
 
-        # C++ ops should be automatically loaded on MUSA platform
-        assert is_loaded(), "C++ ops should be loaded automatically on MUSA"
+        assert is_loaded(), "TorchAda C++ custom-op extension should be loaded"
 
     def test_cpp_ops_source_files_exist(self):
         """Test that the C++ source files are packaged correctly."""
@@ -2917,10 +3061,10 @@ class TestAcceleratorModuleWrapper:
             (None, True),
         ),
     )
-    def test_musa_accelerator_override_version_boundary(self, musa_version, expected):
-        from torchada._patch import _musa_accelerator_overrides_required
+    def test_torch_musa_version_boundary(self, musa_version, expected):
+        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
 
-        assert _musa_accelerator_overrides_required(musa_version) is expected
+        assert _is_pre_torch_musa_2_11_0_post2(musa_version) is expected
 
     def _make_wrapper(
         self,
@@ -3163,11 +3307,11 @@ class TestTorchAcceleratorPatching:
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
-        from torchada._patch import _musa_accelerator_overrides_required
+        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
 
         # Must not raise on either side of the torch_musa post2 boundary.
         torch.accelerator.empty_cache()
-        if _musa_accelerator_overrides_required(getattr(torch.musa, "__version__", None)):
+        if _is_pre_torch_musa_2_11_0_post2(getattr(torch.musa, "__version__", None)):
             assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
         else:
             assert torch.accelerator.empty_cache is torch.accelerator._original_accel.empty_cache

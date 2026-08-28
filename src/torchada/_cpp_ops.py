@@ -93,6 +93,15 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
     if not is_musa_platform():
         return None
 
+    import torch
+
+    from ._patch import _is_pre_torch_musa_2_11_0_post2
+
+    musa_module = getattr(torch, "musa", None)
+    if not _is_pre_torch_musa_2_11_0_post2(getattr(musa_module, "__version__", None)):
+        for op_name in ("multinomial", "log", "log_"):
+            os.environ[f"TORCHADA_DISABLE_OP_OVERRIDE_{op_name}"] = "1"
+
     try:
         import os.path as osp
 
