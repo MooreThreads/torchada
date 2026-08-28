@@ -729,6 +729,17 @@ class TestStreamAndEvent:
             assert sys.modules["torch.cuda.streams"] is torch_musa.core.stream
             assert torch.cuda.streams.Stream is torch_musa.core.stream.Stream
 
+    def test_get_device_index_helper(self):
+        """Test the private CUDA device helper used by PyTorch Dynamo."""
+        import torch
+
+        import torchada
+
+        if torchada.is_musa_platform():
+            from torch_musa.core._utils import _get_musa_device_index
+
+            assert torch.cuda._get_device_index is _get_musa_device_index
+
     def test_stream_cuda_stream_property(self):
         """Test stream.cuda_stream returns same value as stream.musa_stream on MUSA."""
         import torch

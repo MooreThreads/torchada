@@ -827,6 +827,7 @@ class _CudaModuleWrapper(ModuleType):
     _SPECIAL_ATTRS = {
         "StreamContext": "core.stream.StreamContext",
         "streams": "core.stream",
+        "_get_device_index": "core._utils._get_musa_device_index",
     }
 
     # Attribute name remappings (CUDA name -> MUSA name)
