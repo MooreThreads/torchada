@@ -1156,6 +1156,7 @@ class TestInductorTemplateHeuristics:
         assert ("cached",) in heuristic_cache
 
     def test_copies_only_cuda_triton_heuristics_and_clears_cache(self, monkeypatch):
+        from torch._inductor.codegen import common
         from torch._inductor.template_heuristics import registry
 
         from torchada import _patch
@@ -1172,13 +1173,20 @@ class TestInductorTemplateHeuristics:
             1: object(),
         }
         heuristic_cache = {("cached",): object()}
+        lazy_cuda_heuristic = object()
+
+        def register_lazy_heuristic():
+            heuristic_registry[("triton::lazy_mm", "cuda", None)] = lazy_cuda_heuristic
+
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(common, "init_backend_registration", register_lazy_heuristic)
         monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
         monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
 
         _patch._patch_inductor_template_heuristics()
 
         assert heuristic_registry[("triton::bmm", "musa", None)] is cuda_heuristic
+        assert heuristic_registry[("triton::lazy_mm", "musa", None)] is lazy_cuda_heuristic
         assert heuristic_registry[("triton::mm", "musa", "addmm")] is existing_musa_heuristic
         assert ("aten::mm", "musa", None) not in heuristic_registry
         assert ("triton::mm", "cpu", None) in heuristic_registry

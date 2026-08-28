@@ -127,6 +127,13 @@ def _patch_inductor_template_heuristics():
     if not _musa_accelerator_overrides_required(getattr(musa_module, "__version__", None)):
         return
 
+    from torch._inductor.codegen.common import init_backend_registration
+
+    # torch_musa registers its native MUSA heuristics lazily from this entry
+    # point. Run it before inspecting the registry so TorchAda only fills keys
+    # that remain absent after native backend registration.
+    init_backend_registration()
+
     import torch._inductor.template_heuristics.registry as registry
 
     heuristic_registry = getattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", None)
