@@ -65,6 +65,14 @@ def patch_function(func: Callable[[], None]) -> Callable[[], None]:
     return func
 
 
+@patch_function
+def _patch_visible_devices_env():
+    if "MUSA_VISIBLE_DEVICES" in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["MUSA_VISIBLE_DEVICES"]
+    else:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
+
 def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
     """
     Decorator to guard a patch function with import checks.
@@ -106,6 +114,50 @@ def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
         return wrapper
 
     return decorator
+
+
+@patch_function
+@requires_import("torch._inductor.template_heuristics.registry")
+def _patch_inductor_template_heuristics():
+    """Reuse CUDA Inductor template heuristics for CUDA-compatible MUSA templates."""
+    if not is_musa_platform():
+        return
+
+    musa_module = getattr(torch, "musa", None)
+    if not _is_pre_torch_musa_2_11_0_post2(getattr(musa_module, "__version__", None)):
+        return
+
+    from torch._inductor.codegen.common import init_backend_registration
+
+    # torch_musa registers its native MUSA heuristics lazily from this entry
+    # point. Run it before inspecting the registry so TorchAda only fills keys
+    # that remain absent after native backend registration.
+    init_backend_registration()
+
+    import torch._inductor.template_heuristics.registry as registry
+
+    heuristic_registry = getattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", None)
+    if not isinstance(heuristic_registry, dict):
+        return
+
+    changed = False
+    for key, heuristic_class in list(heuristic_registry.items()):
+        if not isinstance(key, tuple) or len(key) != 3:
+            continue
+        template_name, device_type, op_name = key
+        if device_type != "cuda":
+            continue
+        if not isinstance(template_name, str) or not template_name.startswith("triton::"):
+            continue
+        musa_key = (template_name, "musa", op_name)
+        if musa_key not in heuristic_registry:
+            heuristic_registry[musa_key] = heuristic_class
+            changed = True
+
+    if changed:
+        heuristic_cache = getattr(registry, "_HEURISTIC_CACHE", None)
+        if isinstance(heuristic_cache, dict):
+            heuristic_cache.clear()
 
 
 # Cache for translated device strings - avoids repeated string operations
@@ -1721,13 +1773,13 @@ class _CDLLWrapper:
 _original_ctypes_CDLL = None
 
 
-_TORCH_MUSA_ACCELERATOR_FIX_VERSION = "2.11.0.post2"
+_TORCH_MUSA_POST2_VERSION = "2.11.0.post2"
 
 
-def _musa_accelerator_overrides_required(version) -> bool:
-    """Return whether torch.accelerator still needs MUSA memory overrides.
+def _is_pre_torch_musa_2_11_0_post2(version) -> bool:
+    """Return whether the torch_musa version predates 2.11.0.post2.
 
-    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs.  Older
+    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs. Older
     releases still need torchada to force those calls through torch.musa.
     Ignore the local version suffix (for example ``+musa5.2.0``), because it
     identifies the MUSA stack build rather than the torch_musa fix level.
@@ -1745,19 +1797,19 @@ def _musa_accelerator_overrides_required(version) -> bool:
         from torch._vendor.packaging.version import InvalidVersion, Version
     except ImportError:
         # If the parser is unavailable, keep the workaround enabled: disabling
-        # it could re-expose the allocator failure this gate fixes.
+        # it could re-expose the failure this gate fixes.
         logger.warning(
-            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            "Unable to parse torch_musa version %r; retaining compatibility patches",
             version,
         )
         return True
     try:
-        return Version(public_version) < Version(_TORCH_MUSA_ACCELERATOR_FIX_VERSION)
+        return Version(public_version) < Version(_TORCH_MUSA_POST2_VERSION)
     except InvalidVersion:
         # An unknown or malformed version must keep the workaround enabled:
-        # disabling it could re-expose the allocator failure this gate fixes.
+        # disabling it could re-expose the failure this gate fixes.
         logger.warning(
-            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            "Unable to parse torch_musa version %r; retaining compatibility patches",
             version,
         )
         return True
@@ -1843,7 +1895,7 @@ class _AcceleratorModuleWrapper(ModuleType):
         # torch._C._accelerator_* without dispatching to the MUSA allocator.
         # Newer versions provide working unified accelerator implementations,
         # so preserve those instead of forcing the torch.musa compatibility path.
-        if _musa_accelerator_overrides_required(getattr(musa_module, "__version__", None)):
+        if _is_pre_torch_musa_2_11_0_post2(getattr(musa_module, "__version__", None)):
             for name in self._MUSA_OVERRIDES:
                 musa_name = self._REMAP_ATTRS.get(name, name)
                 if hasattr(original_accel, name) and hasattr(musa_module, musa_name):
@@ -2122,6 +2174,7 @@ def apply_patches():
     - torch.cuda.nccl -> torch.musa.mccl
     - torch.amp.autocast(device_type='cuda') -> 'musa'
     - torch.utils.cpp_extension (CUDAExtension, BuildExtension) -> MUSA versions
+    - CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES environment fallback
     - torch._inductor.autotune_process.CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES
     - torch.accelerator.synchronize() -> torch.musa.synchronize()
     - torch.accelerator context managers (device_index, stream) for forward compatibility
