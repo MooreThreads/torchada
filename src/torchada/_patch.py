@@ -124,7 +124,7 @@ def _patch_inductor_template_heuristics():
         return
 
     musa_module = getattr(torch, "musa", None)
-    if not _musa_accelerator_overrides_required(getattr(musa_module, "__version__", None)):
+    if not _is_pre_torch_musa_2_11_0_post2(getattr(musa_module, "__version__", None)):
         return
 
     from torch._inductor.codegen.common import init_backend_registration
@@ -1773,11 +1773,11 @@ class _CDLLWrapper:
 _original_ctypes_CDLL = None
 
 
-_TORCH_MUSA_ACCELERATOR_FIX_VERSION = "2.11.0.post2"
+_TORCH_MUSA_POST2_VERSION = "2.11.0.post2"
 
 
-def _musa_accelerator_overrides_required(version) -> bool:
-    """Return whether torch.accelerator still needs MUSA memory overrides.
+def _is_pre_torch_musa_2_11_0_post2(version) -> bool:
+    """Return whether the torch_musa version predates 2.11.0.post2.
 
     torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs. Older
     releases still need torchada to force those calls through torch.musa.
@@ -1799,17 +1799,17 @@ def _musa_accelerator_overrides_required(version) -> bool:
         # If the parser is unavailable, keep the workaround enabled: disabling
         # it could re-expose the failure this gate fixes.
         logger.warning(
-            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            "Unable to parse torch_musa version %r; retaining compatibility patches",
             version,
         )
         return True
     try:
-        return Version(public_version) < Version(_TORCH_MUSA_ACCELERATOR_FIX_VERSION)
+        return Version(public_version) < Version(_TORCH_MUSA_POST2_VERSION)
     except InvalidVersion:
         # An unknown or malformed version must keep the workaround enabled:
         # disabling it could re-expose the failure this gate fixes.
         logger.warning(
-            "Unable to parse torch_musa version %r; retaining accelerator memory overrides",
+            "Unable to parse torch_musa version %r; retaining compatibility patches",
             version,
         )
         return True
@@ -1895,7 +1895,7 @@ class _AcceleratorModuleWrapper(ModuleType):
         # torch._C._accelerator_* without dispatching to the MUSA allocator.
         # Newer versions provide working unified accelerator implementations,
         # so preserve those instead of forcing the torch.musa compatibility path.
-        if _musa_accelerator_overrides_required(getattr(musa_module, "__version__", None)):
+        if _is_pre_torch_musa_2_11_0_post2(getattr(musa_module, "__version__", None)):
             for name in self._MUSA_OVERRIDES:
                 musa_name = self._REMAP_ATTRS.get(name, name)
                 if hasattr(original_accel, name) and hasattr(musa_module, musa_name):

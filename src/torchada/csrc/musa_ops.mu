@@ -356,6 +356,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     }
     if (torchada::is_override_enabled("log")) {
         m.impl("log", torchada::log_musa_impl);
+    }
+    if (torchada::is_override_enabled("log_")) {
         m.impl("log_", torchada::log_inplace_musa_impl);
     }
 }

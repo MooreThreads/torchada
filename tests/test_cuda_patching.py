@@ -1138,7 +1138,6 @@ class TestInductorTemplateHeuristics:
 
     def test_post2_uses_native_inductor_registration(self, monkeypatch):
         import torch
-
         from torch._inductor.template_heuristics import registry
 
         from torchada import _patch
@@ -2481,21 +2480,15 @@ class TestCppOpsInfrastructure:
         assert hasattr(_cpp_ops, "get_module")
 
     def test_cpp_ops_loaded_on_musa(self):
-        """Test that legacy C++ overrides load only before torch_musa post2."""
-        import torch
-
+        """C++ custom-op extension remains available on all supported versions."""
         import torchada
 
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
         from torchada._cpp_ops import is_loaded
-        from torchada._patch import _musa_accelerator_overrides_required
 
-        if _musa_accelerator_overrides_required(getattr(torch.musa, "__version__", None)):
-            assert is_loaded(), "Legacy C++ ops should load before torch_musa post2"
-        else:
-            assert not is_loaded(), "TorchAda C++ overrides must stay disabled on torch_musa post2+"
+        assert is_loaded(), "TorchAda C++ custom-op extension should be loaded"
 
     def test_cpp_ops_source_files_exist(self):
         """Test that the C++ source files are packaged correctly."""
@@ -3057,10 +3050,10 @@ class TestAcceleratorModuleWrapper:
             (None, True),
         ),
     )
-    def test_musa_accelerator_override_version_boundary(self, musa_version, expected):
-        from torchada._patch import _musa_accelerator_overrides_required
+    def test_torch_musa_version_boundary(self, musa_version, expected):
+        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
 
-        assert _musa_accelerator_overrides_required(musa_version) is expected
+        assert _is_pre_torch_musa_2_11_0_post2(musa_version) is expected
 
     def _make_wrapper(
         self,
@@ -3303,11 +3296,11 @@ class TestTorchAcceleratorPatching:
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
-        from torchada._patch import _musa_accelerator_overrides_required
+        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
 
         # Must not raise on either side of the torch_musa post2 boundary.
         torch.accelerator.empty_cache()
-        if _musa_accelerator_overrides_required(getattr(torch.musa, "__version__", None)):
+        if _is_pre_torch_musa_2_11_0_post2(getattr(torch.musa, "__version__", None)):
             assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
         else:
             assert torch.accelerator.empty_cache is torch.accelerator._original_accel.empty_cache
