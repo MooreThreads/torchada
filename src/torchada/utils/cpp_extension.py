@@ -294,9 +294,7 @@ def _is_configured_exclude_dir(path: str) -> bool:
 
 def _path_overlaps_any(path: str, roots: List[str]) -> bool:
     """Return whether ``path`` contains or is contained by a protected root."""
-    return any(
-        _path_is_within(path, root) or _path_is_within(root, path) for root in roots
-    )
+    return any(_path_is_within(path, root) or _path_is_within(root, path) for root in roots)
 
 
 def _validate_portable_symlinks(source_dir: str) -> None:
@@ -366,9 +364,9 @@ def _narrow_cuda_header_mapping(mapping_rule):
     narrowed = [(key, value) for key, value in mapping_rule if key != "cuda.h"]
     narrowed.extend(
         [
-            ('#include <cuda.h>', '#include <musa.h>'),
+            ("#include <cuda.h>", "#include <musa.h>"),
             ('#include "cuda.h"', '#include "musa.h"'),
-            ('#include <torch/cuda.h>', '#include <torch/musa.h>'),
+            ("#include <torch/cuda.h>", "#include <torch/musa.h>"),
             ('#include "torch/cuda.h"', '#include "torch/musa.h"'),
         ]
     )
@@ -405,11 +403,7 @@ def _replace_porting_line(line, mapping_rule):
                 header = line[start:end]
                 if key == "nvjpeg" and header == "nvjpeg.h":
                     header = f"{value}.h"
-                line = (
-                    line[:start].replace(key, value)
-                    + header
-                    + line[end:].replace(key, value)
-                )
+                line = line[:start].replace(key, value) + header + line[end:].replace(key, value)
                 continue
         line = line.replace(key, value)
     return line
@@ -833,79 +827,88 @@ def _port_cuda_source(source_code: str, mapping_rules: Optional[Dict[str, str]] 
     # Sort rules by length (longest first) to avoid partial replacements
     sorted_rules = sorted(mapping_rules.items(), key=lambda x: len(x[0]), reverse=True)
     return "".join(
-        _replace_porting_line(line, sorted_rules)
-        for line in source_code.splitlines(keepends=True)
+        _replace_porting_line(line, sorted_rules) for line in source_code.splitlines(keepends=True)
     )
 
 
-def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None) -> List[str]:
-    """
-    Get include paths for compiling extensions.
-
-    Supports both PyTorch < 2.6 (cuda=True) and PyTorch 2.6+ (device_type="cuda")
-    signatures for compatibility.
-
-    Args:
-        cuda: (PyTorch < 2.6) Whether to include CUDA/MUSA paths. Deprecated in 2.6+.
-        device_type: (PyTorch 2.6+) Device type string, e.g. "cuda", "cpu", "musa".
-
-    Returns:
-        List of include paths
-    """
-    # Handle both old (cuda=bool) and new (device_type=str) signatures
+def _path_device_type(device_type, cuda: Optional[bool]) -> str:
+    """Normalize both positional device names and legacy CUDA booleans."""
+    if isinstance(device_type, bool):
+        return "cuda" if device_type else "cpu"
     if device_type is not None:
-        # PyTorch 2.6+ style: device_type="cuda" or "cpu"
-        # Translate "cuda" to MUSA include paths on MUSA platform
-        include_device = device_type.lower() in ("cuda", "musa")
-    elif cuda is not None:
-        include_device = cuda
-    else:
-        # Default: include device paths
-        include_device = True
+        return device_type.lower()
+    return "cuda" if cuda is None or cuda else "cpu"
 
-    platform = detect_platform()
 
-    if platform == Platform.MUSA:
-        paths: List[str] = []
-        try:
-            import torch_musa.utils.musa_extension as musa_ext
+def _path_query_options(device_type, torch_include_dirs, cuda):
+    # The former torchada signature also allowed (cuda_bool, device_name).
+    if isinstance(torch_include_dirs, str) and (
+        device_type is None or isinstance(device_type, bool)
+    ):
+        return torch_include_dirs.lower(), None
+    return _path_device_type(device_type, cuda), torch_include_dirs
 
-            if hasattr(musa_ext, "include_paths"):
-                # musa_ext uses musa=bool parameter, not cuda= or device_type=
-                paths = list(musa_ext.include_paths(musa=include_device))
-        except ImportError:
-            pass
 
-        if not paths:
-            # Fallback: construct paths manually
-            musa_home = _get_cuda_home()
-            if musa_home:
-                paths.append(os.path.join(musa_home, "include"))
+def _forward_path_query(path_fn, device_type, torch_include_dirs, cross_target_platform=None):
+    """Forward supported options to the installed, non-MUSA Torch version."""
+    import inspect
 
-        # Auto-append torchada's libtorch-stable ABI compat headers so
-        # libtorch-stable kernels (vLLM, SGLang, ...) resolve
-        # <torch/headeronly/core/Dispatch.h> on MUSA. Appended LAST so a future
-        # torch_musa shipping the real header wins.
-        if include_device:
-            paths.append(stable_compat_include_dir())
-        return paths
+    parameters = inspect.signature(path_fn).parameters
+    device_key = "device_type" if "device_type" in parameters else "cuda"
+    device_value = device_type if device_key == "device_type" else device_type in ("cuda", "musa")
+    kwargs = {device_key: device_value}
+    if torch_include_dirs is not None and "torch_include_dirs" in parameters:
+        kwargs["torch_include_dirs"] = torch_include_dirs
+    if cross_target_platform is not None:
+        if "cross_target_platform" not in parameters:
+            raise NotImplementedError("Installed Torch does not support cross-target library paths")
+        kwargs["cross_target_platform"] = cross_target_platform
+    paths = path_fn(**kwargs)
+    if torch_include_dirs is False and "torch_include_dirs" not in parameters:
+        base = set(path_fn(**{device_key: "cpu" if device_key == "device_type" else False}))
+        paths = [path for path in paths if path not in base]
+    return paths
 
-    else:
-        # Check which signature the torch version supports
-        import inspect
 
-        from torch.utils.cpp_extension import include_paths as torch_include_paths
+def include_paths(
+    device_type=None,
+    torch_include_dirs: Optional[bool] = None,
+    *,
+    cuda: Optional[bool] = None,
+) -> List[str]:
+    """Get extension headers across old CUDA and modern device-type APIs.
 
-        sig = inspect.signature(torch_include_paths)
-        if "device_type" in sig.parameters:
-            # PyTorch 2.6+
-            if device_type is not None:
-                return torch_include_paths(device_type=device_type)
-            else:
-                return torch_include_paths(device_type="cuda" if include_device else "cpu")
-        else:
-            # PyTorch < 2.6
-            return torch_include_paths(cuda=include_device)
+    Supports both legacy `cuda=bool` / positional booleans and PyTorch 2.11's
+    `include_paths(device_type, torch_include_dirs)`. An explicit device name
+    takes precedence over the legacy CUDA keyword.
+    """
+    normalized_device, torch_include_dirs = _path_query_options(
+        device_type, torch_include_dirs, cuda
+    )
+    include_device = normalized_device in ("cuda", "musa")
+    if detect_platform() != Platform.MUSA:
+        from torch.utils.cpp_extension import include_paths as native_include_paths
+
+        return _forward_path_query(native_include_paths, normalized_device, torch_include_dirs)
+
+    paths: List[str] = []
+    try:
+        import torch_musa.utils.musa_extension as musa_ext
+
+        if hasattr(musa_ext, "include_paths"):
+            paths = list(musa_ext.include_paths(musa=include_device))
+            if torch_include_dirs is False:
+                base = set(musa_ext.include_paths(musa=False))
+                paths = [path for path in paths if path not in base]
+    except ImportError:
+        pass
+    if include_device and not paths:
+        musa_home = _get_cuda_home()
+        if musa_home:
+            paths.append(os.path.join(musa_home, "include"))
+    if include_device:
+        paths.append(stable_compat_include_dir())
+    return paths
 
 
 def stable_compat_include_dir() -> str:
@@ -933,70 +936,51 @@ def stable_compat_box_header() -> str:
     return os.path.join(stable_compat_include_dir(), "torchada_stable_box.h")
 
 
-def library_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None) -> List[str]:
+def library_paths(
+    device_type=None,
+    torch_include_dirs: Optional[bool] = None,
+    cross_target_platform=None,
+    *,
+    cuda: Optional[bool] = None,
+) -> List[str]:
+    """Get extension libraries, including the PyTorch 2.11 path options.
+
+    None preserves torchada's legacy CPU result. Explicit torch_include_dirs=True
+    includes Torch libraries on CPU, as requested by modern Inductor.
     """
-    Get library paths for compiling extensions.
+    normalized_device, torch_include_dirs = _path_query_options(
+        device_type, torch_include_dirs, cuda
+    )
+    include_device = normalized_device in ("cuda", "musa")
+    if not include_device and torch_include_dirs is None:
+        return []
+    if detect_platform() != Platform.MUSA:
+        from torch.utils.cpp_extension import library_paths as native_library_paths
 
-    Supports both PyTorch < 2.6 (cuda=True) and PyTorch 2.6+ (device_type="cuda")
-    signatures for compatibility.
+        return _forward_path_query(
+            native_library_paths, normalized_device, torch_include_dirs, cross_target_platform
+        )
 
-    Args:
-        cuda: (PyTorch < 2.6) Whether to include CUDA/MUSA library paths. Deprecated in 2.6+.
-        device_type: (PyTorch 2.6+) Device type string, e.g. "cuda", "cpu", "musa".
+    if cross_target_platform is not None:
+        raise NotImplementedError("MUSA cross-target library path discovery is not supported")
+    if not include_device and torch_include_dirs is not True:
+        return []
+    try:
+        import torch_musa.utils.musa_extension as musa_ext
 
-    Returns:
-        List of library paths
-    """
-    # Handle both old (cuda=bool) and new (device_type=str) signatures
-    if device_type is not None:
-        # PyTorch 2.6+ style: device_type="cuda" or "cpu"
-        # Translate "cuda" to MUSA library paths on MUSA platform
-        include_device = device_type.lower() in ("cuda", "musa")
-    elif cuda is not None:
-        include_device = cuda
-    else:
-        # Default: include device paths
-        include_device = True
-
-    platform = detect_platform()
-
-    if platform == Platform.MUSA:
-        if not include_device:
-            return []
-
-        try:
-            import torch_musa.utils.musa_extension as musa_ext
-
-            if hasattr(musa_ext, "library_paths"):
-                # musa_ext uses musa=bool parameter, not cuda= or device_type=
-                return musa_ext.library_paths(musa=include_device)
-        except ImportError:
-            pass
-
-        # Fallback: construct paths manually
-        paths = []
-        musa_home = _get_cuda_home()
-        if musa_home:
-            paths.append(os.path.join(musa_home, "lib"))
-            paths.append(os.path.join(musa_home, "lib64"))
-        return [p for p in paths if os.path.exists(p)]
-
-    else:
-        # Check which signature the torch version supports
-        import inspect
-
-        from torch.utils.cpp_extension import library_paths as torch_library_paths
-
-        sig = inspect.signature(torch_library_paths)
-        if "device_type" in sig.parameters:
-            # PyTorch 2.6+
-            if device_type is not None:
-                return torch_library_paths(device_type=device_type)
-            else:
-                return torch_library_paths(device_type="cuda" if include_device else "cpu")
-        else:
-            # PyTorch < 2.6
-            return torch_library_paths(cuda=include_device)
+        if hasattr(musa_ext, "library_paths"):
+            paths = list(musa_ext.library_paths(musa=include_device))
+            if torch_include_dirs is False:
+                base = set(musa_ext.library_paths(musa=False))
+                paths = [path for path in paths if path not in base]
+            return paths
+    except ImportError:
+        pass
+    paths = []
+    musa_home = _get_cuda_home()
+    if include_device and musa_home:
+        paths.extend([os.path.join(musa_home, "lib"), os.path.join(musa_home, "lib64")])
+    return [path for path in paths if os.path.exists(path)]
 
 
 def _stable_header_backport_required() -> bool:
@@ -1102,8 +1086,7 @@ def _translate_link_args(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
     if kwargs.get("libraries") is not None:
         new_kwargs["libraries"] = [
-            "mtjpeg" if library == "nvjpeg" else library
-            for library in kwargs["libraries"]
+            "mtjpeg" if library == "nvjpeg" else library for library in kwargs["libraries"]
         ]
 
     if kwargs.get("define_macros") is not None:
