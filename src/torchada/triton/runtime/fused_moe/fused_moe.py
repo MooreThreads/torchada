@@ -93,10 +93,34 @@ def moe_align_block_size(
         )
         return sorted_ids, expert_ids, num_tokens_post_pad
 
-    except ImportError:
-        raise ImportError(
-            "No implementation of moe_align_block_size found. " "Please install sgl_kernel or vllm"
-        )
+    except (ImportError, AttributeError):
+        # Standalone torchada tuning images may contain vLLM Python sources
+        # without the optional _moe_C extension. Keep the reference path
+        # usable for correctness/tuning; production vLLM uses the native op.
+        flat_ids = topk_ids.reshape(-1)
+        routes = []
+        block_experts = []
+        for expert in range(num_experts):
+            positions = torch.nonzero(flat_ids == expert, as_tuple=False).flatten()
+            if positions.numel() == 0:
+                continue
+            pad = (-positions.numel()) % block_size
+            if pad:
+                positions = torch.cat(
+                    [positions, torch.full_like(positions[:1], flat_ids.numel()).expand(pad)]
+                )
+            routes.append(positions)
+            block_experts.extend([expert] * (positions.numel() // block_size))
+        if routes:
+            sorted_routes = torch.cat(routes)
+            blocks = torch.tensor(block_experts, dtype=torch.int32, device=topk_ids.device)
+        else:
+            sorted_routes = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+            blocks = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+        sorted_ids[: sorted_routes.numel()].copy_(sorted_routes)
+        expert_ids[: blocks.numel()].copy_(blocks)
+        num_tokens_post_pad[0] = sorted_routes.numel()
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 def _prepare_fused_moe_run(
