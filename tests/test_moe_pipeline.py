@@ -15,7 +15,9 @@ from torchada.triton.runtime.fused_moe import fused_moe as moe
 def _fake_gemm(a, w, bias, out, *args, **kwargs):
     """Reference implementation of invoke_fused_moe_kernel for CPU tests."""
     ids, sorted_ids, expert_ids = args[4], args[5], args[6]
-    topk = int(args[9])
+    # The down projection launch passes top_k=1 because inputs are already
+    # expanded; routing metadata still carries the original top-k width.
+    topk = ids.shape[1]
     call_index = getattr(_fake_gemm, "calls", 0)
     _fake_gemm.calls = call_index + 1
     # The first launch receives [tokens, hidden], the second receives routed
@@ -27,9 +29,10 @@ def _fake_gemm(a, w, bias, out, *args, **kwargs):
         out_rows[row].copy_(value)
 
     if call_index == 0:
-        expert = ids[:, 0]
-        for row, e in enumerate(expert.tolist()):
-            write(row, a[row].to(out.dtype) @ w[e].to(out.dtype).T)
+        for row in range(nrows):
+            token = row // topk
+            e = int(ids[token, row % topk])
+            write(row, a[token].to(out.dtype) @ w[e].to(out.dtype).T)
             if bias is not None:
                 out_rows[row].add_(bias[e].to(out.dtype))
     else:
@@ -42,7 +45,7 @@ def _fake_gemm(a, w, bias, out, *args, **kwargs):
 
 
 def _args(*, activation="relu2_no_mul", is_gated=False, no_combine=False, inplace=False):
-    tokens, hidden, inter, experts, topk = 2, 3, 4, 2, 1
+    tokens, hidden, inter, experts, topk = 2, 3, 4, 2, 2
     x = torch.tensor([[1.0, -2.0, 0.5], [-0.5, 2.0, 1.0]])
     w1 = (
         torch.arange(experts * inter * hidden, dtype=torch.float32).reshape(experts, inter, hidden)
@@ -55,9 +58,9 @@ def _args(*, activation="relu2_no_mul", is_gated=False, no_combine=False, inplac
         )
         / 10
     )
-    weights = torch.ones(tokens, topk)
-    ids = torch.tensor([[0], [1]], dtype=torch.long)
-    ident = torch.arange(tokens, dtype=torch.int32)
+    weights = torch.tensor([[0.25, 0.75], [0.4, 0.6]])
+    ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    ident = torch.arange(tokens * topk, dtype=torch.int32)
     config = {"BLOCK_SIZE_M": 1}
     return dict(
         hidden_states=x,
@@ -108,11 +111,31 @@ def test_fused_moe_pipeline_activation_and_output_modes(
     original = kwargs["hidden_states"].clone()
     result = moe._fused_moe_kernel_sequence(**kwargs)
     assert isinstance(result, torch.Tensor)
-    assert result.shape == ((2, 1, 3) if no_combine else (2, 3))
+    assert result.shape == ((2, 2, 3) if no_combine else (2, 3))
     if inplace:
         assert result.data_ptr() == kwargs["hidden_states"].data_ptr()
     # Ensure both activation branches actually contribute finite values.
     assert torch.isfinite(result).all()
+    # Check the complete GEMM1 -> activation -> GEMM2 pipeline against a
+    # compact PyTorch reference (the fake launcher only replaces the kernels).
+    expected_rows = []
+    for token in range(kwargs["hidden_states"].shape[0]):
+        token_outputs = []
+        for choice, expert in enumerate(kwargs["topk_ids"][token].tolist()):
+            gate_up = original[token] @ kwargs["w1"][expert].T
+            if is_gated:
+                width = gate_up.shape[-1] // 2
+                activated = torch.nn.functional.silu(gate_up[:width]) * gate_up[width:]
+            else:
+                activated = torch.relu(gate_up).square()
+            token_outputs.append(activated @ kwargs["w2"][expert].T)
+        expected_rows.append(torch.stack(token_outputs))
+    expected = torch.stack(expected_rows)
+    if no_combine:
+        assert torch.allclose(result, expected, atol=1e-5, rtol=1e-5)
+    else:
+        weighted = (expected * kwargs["topk_weights"].unsqueeze(-1)).sum(dim=1)
+        assert torch.allclose(result, weighted, atol=1e-5, rtol=1e-5)
     if inplace:
         assert not torch.equal(result, original)
 
