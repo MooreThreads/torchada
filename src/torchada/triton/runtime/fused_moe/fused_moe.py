@@ -336,6 +336,19 @@ def _fused_moe_kernel_sequence(
         router_topk=topk,
     )
 
+    if no_combine:
+        return intermediate_cache3
+
+    if _use_intermediate:
+        combined = intermediate_cache3
+        if apply_router_weight_on_input:
+            combined = combined * topk_weights.to(combined.dtype).unsqueeze(-1)
+        combined = combined.float().sum(dim=1).to(out_hidden_states.dtype)
+        out_hidden_states.copy_(combined)
+    if routed_scaling_factor is not None:
+        out_hidden_states.mul_(routed_scaling_factor)
+    return out_hidden_states
+
 
 def fused_experts_impl(
     hidden_states: torch.Tensor,
@@ -506,32 +519,33 @@ def fused_moe(
         moe_runner_config.num_experts is None
         or moe_runner_config.num_experts != moe_runner_config.num_local_experts
     )
-    fused_experts_impl(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        b1,
-        b2,
-        True,
-        moe_runner_config.activation,
-        moe_runner_config.is_gated,
-        moe_runner_config.apply_router_weight_on_input,
-        use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
-        use_int4_w4a16,
-        per_channel_quant,
-        w1_scale,
-        w2_scale,
-        w1_zp,
-        w2_zp,
-        a1_scale,
-        a2_scale,
-        block_shape,
-        moe_runner_config.routed_scaling_factor,
-        moe_runner_config.gemm1_alpha,
-        moe_runner_config.gemm1_clamp_limit,
-        filter_expert,
+    return fused_experts_impl(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        b1=b1,
+        b2=b2,
+        inplace=True,
+        activation=moe_runner_config.activation,
+        is_gated=moe_runner_config.is_gated,
+        apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        per_channel_quant=per_channel_quant,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zp=w1_zp,
+        w2_zp=w2_zp,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape,
+        no_combine=False,
+        routed_scaling_factor=moe_runner_config.routed_scaling_factor,
+        gemm1_alpha=moe_runner_config.gemm1_alpha,
+        gemm1_limit=moe_runner_config.gemm1_clamp_limit,
+        filter_expert=filter_expert,
     )
