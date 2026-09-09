@@ -11,8 +11,6 @@ from torchada.triton.runtime.fused_moe.config import (
     try_get_optimal_moe_config,
 )
 
-_ALIGNMENT_CACHE: dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-
 try:
     _support_tensor_descriptor = True
 except:
@@ -21,6 +19,24 @@ except:
 
 def support_tensor_descriptor():
     return _support_tensor_descriptor
+
+
+def _is_current_stream_capturing() -> bool:
+    """Return whether the active accelerator stream is graph-capturing.
+
+    The CUDA compatibility namespace can exist on CPU-only test hosts while
+    the underlying capture query is unavailable.  Treat that case as an
+    ordinary eager call; on an actual capture stream the backend query is
+    expected to return a boolean.
+    """
+
+    query = getattr(torch.cuda, "is_current_stream_capturing", None)
+    if query is None:
+        return False
+    try:
+        return bool(query())
+    except (AttributeError, RuntimeError):
+        return False
 
 
 @functools.lru_cache()
@@ -49,11 +65,6 @@ def moe_align_block_size(
         ensuring divisibility by block_size.
     """
 
-    cache_key = id(topk_ids)
-    is_capturing = bool(getattr(torch.cuda, "is_current_stream_capturing", lambda: False)())
-    if is_capturing and cache_key in _ALIGNMENT_CACHE:
-        return _ALIGNMENT_CACHE[cache_key]
-
     if topk_ids.numel() < num_experts + 1:
         max_num_tokens_padded = topk_ids.numel() * block_size
     else:
@@ -80,11 +91,9 @@ def moe_align_block_size(
             cumsum_buffer,
             True,
         )
-        result = sorted_ids, expert_ids, num_tokens_post_pad
-        _ALIGNMENT_CACHE[cache_key] = result
-        return result
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
-    except ImportError:
+    except (ImportError, AttributeError):
         pass
 
     # Try to import from vllm._custom_ops
@@ -100,11 +109,14 @@ def moe_align_block_size(
             num_tokens_post_pad,
             None,
         )
-        result = sorted_ids, expert_ids, num_tokens_post_pad
-        _ALIGNMENT_CACHE[cache_key] = result
-        return result
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
     except (ImportError, AttributeError):
+        if _is_current_stream_capturing():
+            raise RuntimeError(
+                "MoE graph capture requires the native moe_align_block_size "
+                "operator; the Python fallback is not graph-safe"
+            ) from None
         # Standalone torchada tuning images may contain vLLM Python sources
         # without the optional _moe_C extension. Keep the reference path
         # usable for correctness/tuning; production vLLM uses the native op.
@@ -131,9 +143,7 @@ def moe_align_block_size(
         sorted_ids[: sorted_routes.numel()].copy_(sorted_routes)
         expert_ids[: blocks.numel()].copy_(blocks)
         num_tokens_post_pad[0] = sorted_routes.numel()
-        result = sorted_ids, expert_ids, num_tokens_post_pad
-        _ALIGNMENT_CACHE[cache_key] = result
-        return result
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 def _prepare_fused_moe_run(
