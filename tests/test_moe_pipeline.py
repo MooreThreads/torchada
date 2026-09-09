@@ -22,8 +22,8 @@ def _fake_gemm(a, w, bias, out, *args, **kwargs):
     _fake_gemm.calls = call_index + 1
     # The first launch receives [tokens, hidden], the second receives routed
     # [tokens * topk, intermediate].  sorted_ids is identity in this test.
-    nrows = a.shape[0]
     out_rows = out.reshape(-1, out.shape[-1])
+    nrows = out_rows.shape[0]
 
     def write(row, value):
         out_rows[row].copy_(value)
