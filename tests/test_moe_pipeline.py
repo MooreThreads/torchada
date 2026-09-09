@@ -38,10 +38,15 @@ def _fake_gemm(a, w, bias, out, *args, **kwargs):
     else:
         for row in range(nrows):
             token = row // topk
-            e = int(ids[token, row % topk])
+            choice = row % topk
+            e = int(ids[token, choice])
             write(row, a[row].to(out.dtype) @ w[e].to(out.dtype).T)
             if bias is not None:
                 out_rows[row].add_(bias[e].to(out.dtype))
+            # The down launch receives MUL_ROUTED_WEIGHT=True when the
+            # caller asks the kernel to apply routing weights on output.
+            if args[8]:
+                out_rows[row].mul_(args[3][token, choice])
 
 
 def _args(*, activation="relu2_no_mul", is_gated=False, no_combine=False, inplace=False):
