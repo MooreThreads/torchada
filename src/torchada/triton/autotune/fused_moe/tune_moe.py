@@ -378,7 +378,7 @@ def benchmark_config(
         w2 = torch.randn(
             num_experts,
             hidden_size,
-            shard_intermediate_size // 2,
+            shard_intermediate_size // 2 if is_gated else shard_intermediate_size,
             dtype=init_dtype,
             device=device,
         )
