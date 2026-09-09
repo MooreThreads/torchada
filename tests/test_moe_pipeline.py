@@ -4,12 +4,40 @@ The Triton launch is replaced with a tiny reference GEMM.  These tests cover
 the Python pipeline and argument plumbing without requiring a CUDA/MUSA device.
 """
 
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from torchada.triton.runtime.fused_moe import fused_moe as moe
+
+
+def _force_python_alignment(monkeypatch):
+    """Make alignment tests independent of optional native extensions."""
+    monkeypatch.setitem(sys.modules, "sgl_kernel", None)
+    monkeypatch.setitem(sys.modules, "vllm._custom_ops", None)
+
+
+def test_moe_alignment_recomputes_mutated_routes(monkeypatch):
+    _force_python_alignment(monkeypatch)
+    monkeypatch.setattr(moe.torch.cuda, "is_current_stream_capturing", lambda: False)
+    topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+
+    first = moe.moe_align_block_size(topk_ids, block_size=2, num_experts=2)
+    topk_ids.copy_(torch.tensor([[1, 1], [1, 1]], dtype=torch.long))
+    second = moe.moe_align_block_size(topk_ids, block_size=2, num_experts=2)
+
+    assert not torch.equal(first[0], second[0])
+    assert second[2].item() == 4
+    assert second[1][:2].tolist() == [1, 1]
+
+
+def test_moe_alignment_rejects_python_fallback_during_capture(monkeypatch):
+    _force_python_alignment(monkeypatch)
+    monkeypatch.setattr(moe.torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="native moe_align_block_size"):
+        moe.moe_align_block_size(torch.tensor([[0]], dtype=torch.long), 1, 1)
 
 
 def _fake_gemm(a, w, bias, out, *args, **kwargs):

@@ -331,6 +331,11 @@ def benchmark_config(
     num_routed_experts = num_experts - num_fused_shared_experts
     assert num_routed_experts > 0
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    # The production runner commonly uses ``inplace=True``.  Keep that mode
+    # for representative timings, but restore the same input before every
+    # timed iteration so one benchmark run cannot feed its output back as the
+    # next iteration's input.
+    x_initial = x.clone()
 
     # Create random weights based on quantization type
     if use_int8_w8a16 or use_int8_w8a8:
@@ -363,7 +368,11 @@ def benchmark_config(
         w2 = torch.randint(
             0,
             255,
-            (num_experts, hidden_size, shard_intermediate_size // 4),
+            (
+                num_experts,
+                hidden_size,
+                (shard_intermediate_size // 2 if is_gated else shard_intermediate_size) // 2,
+            ),
             dtype=torch.uint8,
             device=device,
         )
@@ -406,7 +415,8 @@ def benchmark_config(
         n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
         n_tiles_w2 = (hidden_size + block_n - 1) // block_n
         k_tiles_w1 = (hidden_size + block_k - 1) // block_k
-        k_tiles_w2 = (shard_intermediate_size // 2 + block_k - 1) // block_k
+        w2_k = shard_intermediate_size // 2 if is_gated else shard_intermediate_size
+        k_tiles_w2 = (w2_k + block_k - 1) // block_k
         w1_scale = torch.randn(
             (num_experts, n_tiles_w1, k_tiles_w1),
             dtype=torch.bfloat16,
@@ -433,7 +443,8 @@ def benchmark_config(
             n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
             n_tiles_w2 = (hidden_size + block_n - 1) // block_n
             k_tiles_w1 = (hidden_size + block_k - 1) // block_k
-            k_tiles_w2 = (shard_intermediate_size // 2 + block_k - 1) // block_k
+            w2_k = shard_intermediate_size // 2 if is_gated else shard_intermediate_size
+            k_tiles_w2 = (w2_k + block_k - 1) // block_k
             w1_scale = torch.rand(
                 (num_experts, n_tiles_w1, k_tiles_w1),
                 dtype=torch.float32,
@@ -458,6 +469,7 @@ def benchmark_config(
     topk_output = select_experts(x, input_gating, topk_config)
 
     def prepare(i: int):
+        x.copy_(x_initial)
         new_topk_output = select_experts(x, gating_output[i], topk_config)
         topk_output.topk_weights.copy_(new_topk_output.topk_weights)
         topk_output.topk_ids.copy_(new_topk_output.topk_ids)
