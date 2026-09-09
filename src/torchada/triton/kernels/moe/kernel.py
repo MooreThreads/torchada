@@ -668,6 +668,10 @@ def invoke_fused_moe_kernel(
     fuse_add_to_output: bool = False,
     add_output_mask: Optional[torch.Tensor] = None,
 ) -> None:
+    config = dict(config)
+    split_k = config.pop("SPLIT_K", 1)
+    if split_k != 1:
+        raise ValueError("The torchada fused MoE kernel only supports SPLIT_K=1")
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
