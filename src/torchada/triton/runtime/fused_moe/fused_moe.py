@@ -206,6 +206,10 @@ def _fused_moe_kernel_sequence(
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
+    if (is_gated and activation != "silu") or (not is_gated and activation != "relu2_no_mul"):
+        raise ValueError(
+            f"Unsupported MoE activation/layout: activation={activation!r}, " f"is_gated={is_gated}"
+        )
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
     padded_tokens = (
@@ -309,7 +313,11 @@ def _fused_moe_kernel_sequence(
         (
             out_slice
             if use_fused_moe_sum_all_reduce
-            else (intermediate_cache3 if _use_intermediate else out_hidden_states.unsqueeze(0))
+            else (
+                intermediate_cache3
+                if no_combine or _use_intermediate
+                else out_hidden_states.unsqueeze(0)
+            )
         ),
         a2_scale,
         w2_scale,
@@ -380,6 +388,10 @@ def fused_experts_impl(
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
 ):
+    if (is_gated and activation != "silu") or (not is_gated and activation != "relu2_no_mul"):
+        raise ValueError(
+            f"Unsupported MoE activation/layout: activation={activation!r}, " f"is_gated={is_gated}"
+        )
     padded_size = 128
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None:
         padded_size = 0
@@ -527,7 +539,7 @@ def fused_moe(
         topk_ids=topk_ids,
         b1=b1,
         b2=b2,
-        inplace=True,
+        inplace=getattr(moe_runner_config, "inplace", False),
         activation=moe_runner_config.activation,
         is_gated=moe_runner_config.is_gated,
         apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
@@ -543,7 +555,7 @@ def fused_moe(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
         block_shape=block_shape,
-        no_combine=False,
+        no_combine=getattr(moe_runner_config, "no_combine", False),
         routed_scaling_factor=moe_runner_config.routed_scaling_factor,
         gemm1_alpha=moe_runner_config.gemm1_alpha,
         gemm1_limit=moe_runner_config.gemm1_clamp_limit,
