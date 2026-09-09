@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, List, TypedDict
+from typing import Dict, List, Tuple, TypedDict
 
 import torch
 from transformers import AutoConfig
@@ -24,12 +24,35 @@ class BenchmarkConfig(TypedDict):
 
 
 def calculate_shard_intermediate_size(
-    intermediate_size: int, tp_size: int, ep_size: int = 1
+    intermediate_size: int, tp_size: int, ep_size: int = 1, is_gated: bool = True
 ) -> int:
     assert tp_size % ep_size == 0
     moe_tp_size = tp_size // ep_size
     assert intermediate_size % moe_tp_size == 0
-    return 2 * intermediate_size // moe_tp_size
+    # Gated activations (e.g. SwiGLU) store gate and up projections side by
+    # side, while non-gated activations (e.g. NemotronH relu2_no_mul) have a
+    # single projection. Keep the returned size equal to the checkpoint w1
+    # dimension so callers can construct valid benchmark shapes.
+    multiplier = 2 if is_gated else 1
+    return multiplier * intermediate_size // moe_tp_size
+
+
+def infer_moe_activation(config) -> Tuple[str, bool]:
+    """Return the activation spelling and projection layout for a HF config.
+
+    NemotronH passes ``activation_without_mul(config.mlp_hidden_act)`` to its
+    FusedMoE layer. Its config says ``relu2`` but the expert checkpoint stores a
+    single (non-gated) projection, so represent that semantic explicitly here.
+    Other model families retain the historical gated-SiLU default.
+    """
+    raw = getattr(config, "mlp_hidden_act", None)
+    if raw is None:
+        raw = getattr(config, "hidden_act", "silu")
+    activation = str(raw).replace("torch.", "").lower()
+    architecture = str((getattr(config, "architectures", None) or [""])[0])
+    if architecture == "NemotronHForCausalLM" and not activation.endswith("_no_mul"):
+        activation = f"{activation}_no_mul"
+    return activation, not activation.endswith("_no_mul")
 
 
 def get_num_shared_experts(config, disable_shared_experts_fusion: bool) -> int:
@@ -146,6 +169,7 @@ def get_model_config(
     config = _load_model_config(model_name)
 
     architecture = config.architectures[0]
+    activation, is_gated = infer_moe_activation(config)
     quant_dtype_str = infer_quant_dtype_str(config)
     block_shape = None
     if hasattr(config, "quantization_config") and "weight_block_size" in config.quantization_config:
@@ -247,7 +271,9 @@ def get_model_config(
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
 
-    shard_intermediate_size = calculate_shard_intermediate_size(intermediate_size, tp_size, ep_size)
+    shard_intermediate_size = calculate_shard_intermediate_size(
+        intermediate_size, tp_size, ep_size, is_gated=is_gated
+    )
 
     return {
         "num_experts": E,
@@ -259,6 +285,8 @@ def get_model_config(
         "architecture": architecture,
         "num_fused_shared_experts": num_fused_shared_experts,
         "quant_dtype_str": quant_dtype_str,
+        "activation": activation,
+        "is_gated": is_gated,
     }
 
 
@@ -333,6 +361,7 @@ def get_config_filename(
     use_int4_w4a16: bool,
     per_channel_quant: bool,
     block_shape: List[int],
+    is_gated: bool = True,
 ) -> str:
     dtype_str = get_config_dtype_str(
         dtype,
@@ -344,7 +373,7 @@ def get_config_filename(
 
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
-    N = shard_intermediate_size // 2
+    N = shard_intermediate_size // 2 if is_gated else shard_intermediate_size
     if use_int4_w4a16:
         N = N // 2
 
