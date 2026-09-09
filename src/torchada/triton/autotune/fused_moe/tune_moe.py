@@ -468,6 +468,23 @@ def benchmark_config(
     )
     topk_output = select_experts(x, input_gating, topk_config)
 
+    def reference_first_token() -> torch.Tensor:
+        """Compute one BF16 non-gated token with ordinary torch matmuls.
+
+        This is intentionally a small semantic gate for the Nemotron path;
+        timing still uses the Triton kernel for the complete batch.
+        """
+
+        token = x_initial[0].float()
+        result = torch.zeros(hidden_size, dtype=torch.float32, device=device)
+        for choice in range(topk):
+            expert = topk_output.topk_ids[0, choice]
+            gate_up = torch.matmul(token, w1[expert].float().transpose(0, 1))
+            activated = torch.relu(gate_up).square()
+            down = torch.matmul(activated, w2[expert].float().transpose(0, 1))
+            result.add_(down, alpha=float(topk_output.topk_weights[0, choice]))
+        return result
+
     def prepare(i: int):
         x.copy_(x_initial)
         new_topk_output = select_experts(x, gating_output[i], topk_config)
@@ -483,7 +500,10 @@ def benchmark_config(
             intermediate_size_per_partition=shard_intermediate_size,
             top_k=topk,
             num_fused_shared_experts=num_fused_shared_experts,
-            inplace=True,
+            # Keep the input immutable.  In-place output turns repeated
+            # warmups and graph capture into a feedback loop where each run
+            # consumes the previous run's result.
+            inplace=False,
             activation=activation,
             is_gated=is_gated,
         )
@@ -507,22 +527,65 @@ def benchmark_config(
             )
 
     # Warmup & JIT
-    run()
+    output = run()
     torch.cuda.synchronize()
+
+    if dtype == torch.bfloat16 and not is_gated:
+        if not torch.isfinite(output).all():
+            raise RuntimeError("BF16 non-gated MoE produced non-finite output")
+        reference = reference_first_token()
+        ref_scale = reference.abs().amax()
+        if not torch.isfinite(reference).all() or ref_scale <= 1e-12:
+            raise RuntimeError("BF16 non-gated reference output is degenerate")
+        out_token = output[0].float()
+        torch.testing.assert_close(out_token, reference, rtol=5e-2, atol=1e-6)
+        if out_token.abs().amax() <= ref_scale * 1e-2:
+            raise RuntimeError("BF16 non-gated MoE output is unexpectedly near zero")
 
     use_graph = _env_flag("TORCHADA_TUNE_USE_GRAPH") and hasattr(torch.cuda, "CUDAGraph")
     if use_graph:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            for _ in range(10):
-                run()
+            graph_output = run()
         torch.cuda.synchronize()
-        for _ in range(5):
-            graph.replay()
+        # Verify that replay observes a changed routing tensor.  A cached
+        # alignment result can silently make every replay execute the first
+        # route; this gate catches that before timing is reported.
+        prepare(0)
+        graph.replay()
         torch.cuda.synchronize()
+        first_ids = topk_output.topk_ids.clone()
+        first_output = graph_output.detach().clone()
+        route_index = next(
+            (
+                i
+                for i in range(1, num_iters)
+                if not torch.equal(
+                    first_ids,
+                    select_experts(x_initial, gating_output[i], topk_config).topk_ids,
+                )
+            ),
+            None,
+        )
+        if route_index is None:
+            raise RuntimeError("graph route replay gate needs two distinct routing inputs")
+        prepare(route_index)
+        graph.replay()
+        torch.cuda.synchronize()
+        if torch.equal(first_ids, topk_output.topk_ids):
+            raise RuntimeError("graph route replay gate did not mutate top-k expert ids")
+        second_output = graph_output.detach().clone()
+        output_scale = max(
+            float(first_output.float().abs().amax()),
+            float(second_output.float().abs().amax()),
+            1e-12,
+        )
+        if not torch.isfinite(second_output).all():
+            raise RuntimeError("graph replay produced non-finite MoE output")
+        if (first_output.float() - second_output.float()).abs().amax() <= output_scale * 1e-4:
+            raise RuntimeError("graph route replay output did not change with routing inputs")
     else:
-        for _ in range(5):
-            run()
+        output = run()
         torch.cuda.synchronize()
 
     # Flush L2 cache
@@ -535,11 +598,15 @@ def benchmark_config(
 
     for i in range(num_iters):
         prepare(i)
+        # Flush immediately before each timed sample so cache state from the
+        # previous sample cannot bias the comparison between configurations.
+        cache_flush.zero_()
+        torch.cuda.synchronize()
         start_events[i].record()
         if use_graph:
             graph.replay()
         else:
-            run()
+            output = run()
         end_events[i].record()
     torch.cuda.synchronize()
 
