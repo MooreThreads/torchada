@@ -324,17 +324,7 @@ def benchmark_config(
     is_gated: bool = True,
     num_iters: int = 100,
 ) -> float:
-    """Run the fused MoE kernel and return latency in microseconds.
-
-    The current torchada Triton sequence only implements the gated activation
-    layout. Keep non-gated model entries visible in metadata, but fail closed
-    instead of tuning a shape with an incorrect projection width.
-    """
-    if not is_gated:
-        raise NotImplementedError(
-            f"MoE activation {activation!r} is non-gated; relu2_no_mul benchmark "
-            "requires an activation-capable Triton sequence"
-        )
+    """Run the fused MoE kernel and return latency in microseconds."""
     device = "cuda"
     torch.set_default_device(device)
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
@@ -1010,7 +1000,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        choices=["auto", "fp8_w8a8", "int8_w8a16", "int8_w8a8", "int4_w4a16"],
+        choices=[
+            "auto",
+            "bf16",
+            "bfloat16",
+            "fp16",
+            "fp8_w8a8",
+            "int8_w8a16",
+            "int8_w8a8",
+            "int4_w4a16",
+        ],
         default="auto",
         help="Quantization dtype.",
     )
