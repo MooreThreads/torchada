@@ -272,11 +272,20 @@ def _fused_moe_kernel_sequence(
             topk_ids,
         )
 
-    intermediate_cache2 = torch.empty(
-        (total_tokens, N // 2),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
+    if is_gated:
+        intermediate_cache2 = torch.empty(
+            (total_tokens, N // 2),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        gate, up = intermediate_cache1.chunk(2, dim=-1)
+        intermediate_cache2.copy_(torch.nn.functional.silu(gate) * up)
+    else:
+        intermediate_cache2 = torch.empty_like(intermediate_cache1)
+        # Nemotron-H's relu2 path is non-gated: relu(x)^2, with no second
+        # projection half to multiply. Keep this explicit so the tuner cannot
+        # benchmark an uninitialized intermediate buffer.
+        intermediate_cache2.copy_(torch.relu(intermediate_cache1).square())
 
     intermediate_cache3 = torch.empty(
         (num_tokens, topk, w2.shape[1]),
