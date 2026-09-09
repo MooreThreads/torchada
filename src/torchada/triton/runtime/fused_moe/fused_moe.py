@@ -11,6 +11,8 @@ from torchada.triton.runtime.fused_moe.config import (
     try_get_optimal_moe_config,
 )
 
+_ALIGNMENT_CACHE: dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
 try:
     _support_tensor_descriptor = True
 except:
@@ -47,6 +49,11 @@ def moe_align_block_size(
         ensuring divisibility by block_size.
     """
 
+    cache_key = id(topk_ids)
+    is_capturing = bool(getattr(torch.cuda, "is_current_stream_capturing", lambda: False)())
+    if is_capturing and cache_key in _ALIGNMENT_CACHE:
+        return _ALIGNMENT_CACHE[cache_key]
+
     if topk_ids.numel() < num_experts + 1:
         max_num_tokens_padded = topk_ids.numel() * block_size
     else:
@@ -73,7 +80,9 @@ def moe_align_block_size(
             cumsum_buffer,
             True,
         )
-        return sorted_ids, expert_ids, num_tokens_post_pad
+        result = sorted_ids, expert_ids, num_tokens_post_pad
+        _ALIGNMENT_CACHE[cache_key] = result
+        return result
 
     except ImportError:
         pass
@@ -91,7 +100,9 @@ def moe_align_block_size(
             num_tokens_post_pad,
             None,
         )
-        return sorted_ids, expert_ids, num_tokens_post_pad
+        result = sorted_ids, expert_ids, num_tokens_post_pad
+        _ALIGNMENT_CACHE[cache_key] = result
+        return result
 
     except (ImportError, AttributeError):
         # Standalone torchada tuning images may contain vLLM Python sources
@@ -120,7 +131,9 @@ def moe_align_block_size(
         sorted_ids[: sorted_routes.numel()].copy_(sorted_routes)
         expert_ids[: blocks.numel()].copy_(blocks)
         num_tokens_post_pad[0] = sorted_routes.numel()
-        return sorted_ids, expert_ids, num_tokens_post_pad
+        result = sorted_ids, expert_ids, num_tokens_post_pad
+        _ALIGNMENT_CACHE[cache_key] = result
+        return result
 
 
 def _prepare_fused_moe_run(
