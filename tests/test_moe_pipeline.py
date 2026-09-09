@@ -97,7 +97,8 @@ def _args(*, activation="relu2_no_mul", is_gated=False, no_combine=False, inplac
         is_gated=is_gated,
         no_combine=no_combine,
         inplace=inplace,
-        apply_router_weight_on_input=False,
+        # Exercise Python-side routing-weight application for combined output.
+        apply_router_weight_on_input=True,
         routed_scaling_factor=None,
         gemm1_alpha=None,
         gemm1_limit=None,
