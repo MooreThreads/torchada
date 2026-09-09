@@ -140,6 +140,8 @@ class ModelEntry:
     shard_intermediate_size: int = 0
     topk: int = 0
     num_fused_shared_experts: int = 0
+    activation: str = "silu"
+    is_gated: bool = True
     dtype: torch.dtype = torch.float16
     block_shape: Optional[Tuple[int, int]] = None
 
@@ -167,6 +169,8 @@ class ModelEntry:
             self.shard_intermediate_size,
             self.topk,
             self.num_fused_shared_experts,
+            self.activation,
+            self.is_gated,
             str(self.dtype),
             self.use_fp8,
             self.use_int8,
@@ -316,9 +320,21 @@ def benchmark_config(
     per_channel_quant: bool,
     block_shape: List[int] = None,
     num_fused_shared_experts: int = 0,
+    activation: str = "silu",
+    is_gated: bool = True,
     num_iters: int = 100,
 ) -> float:
-    """Run the fused MoE kernel and return latency in microseconds."""
+    """Run the fused MoE kernel and return latency in microseconds.
+
+    The current torchada Triton sequence only implements the gated activation
+    layout. Keep non-gated model entries visible in metadata, but fail closed
+    instead of tuning a shape with an incorrect projection width.
+    """
+    if not is_gated:
+        raise NotImplementedError(
+            f"MoE activation {activation!r} is non-gated; relu2_no_mul benchmark "
+            "requires an activation-capable Triton sequence"
+        )
     device = "cuda"
     torch.set_default_device(device)
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
@@ -338,7 +354,11 @@ def benchmark_config(
         w2 = torch.randint(
             -127,
             127,
-            (num_experts, hidden_size, shard_intermediate_size // 2),
+            (
+                num_experts,
+                hidden_size,
+                shard_intermediate_size // 2 if is_gated else shard_intermediate_size,
+            ),
             dtype=torch.int8,
             device=device,
         )
@@ -462,6 +482,8 @@ def benchmark_config(
             top_k=topk,
             num_fused_shared_experts=num_fused_shared_experts,
             inplace=True,
+            activation=activation,
+            is_gated=is_gated,
         )
         with override_config(config):
             fused_moe(
@@ -548,6 +570,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
             entry.shard_intermediate_size = params["shard_intermediate_size"]
             entry.topk = params["topk"]
             entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
+            entry.activation = params.get("activation", "silu")
+            entry.is_gated = params.get("is_gated", True)
             entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
             entry.dtype = _resolve_torch_dtype(entry.dtype_str, params)
             entry.block_shape = tuple(params["block_shape"]) if params["block_shape"] else None
@@ -603,6 +627,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
                     entry.shard_intermediate_size = params["shard_intermediate_size"]
                     entry.topk = params["topk"]
                     entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
+                    entry.activation = params.get("activation", "silu")
+                    entry.is_gated = params.get("is_gated", True)
                     entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
                     entry.dtype = _resolve_torch_dtype(entry.dtype_str, params)
                     entry.block_shape = (
@@ -657,6 +683,8 @@ def _tune_worker(
                     entry.per_channel_quant,
                     list(entry.block_shape) if entry.block_shape else None,
                     entry.num_fused_shared_experts,
+                    activation=entry.activation,
+                    is_gated=entry.is_gated,
                     num_iters=10,
                 )
             except (triton.runtime.autotuner.OutOfResources, RuntimeError, AssertionError):
@@ -767,6 +795,7 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
             entry.use_int4,
             entry.per_channel_quant,
             entry.block_shape,
+            is_gated=entry.is_gated,
         )
         sorted_batches = sorted(bs_to_config.keys())
         best_configs = {bs: sort_config(bs_to_config[bs]) for bs in sorted_batches}
@@ -808,7 +837,11 @@ def _benchmark_worker(
             )
             block_n = entry.block_shape[0] if entry.block_shape else 0
             block_k = entry.block_shape[1] if entry.block_shape else 0
-            N = entry.shard_intermediate_size // 2
+            N = (
+                entry.shard_intermediate_size // 2
+                if entry.is_gated
+                else entry.shard_intermediate_size
+            )
             if entry.use_int4:
                 N = N // 2
             op_config = get_moe_configs(
@@ -852,6 +885,8 @@ def _benchmark_worker(
                 entry.per_channel_quant,
                 list(entry.block_shape) if entry.block_shape else None,
                 entry.num_fused_shared_experts,
+                activation=entry.activation,
+                is_gated=entry.is_gated,
             )
             result_queue.put((entry, batch_size, kernel_time, None))
         except Exception as e:
