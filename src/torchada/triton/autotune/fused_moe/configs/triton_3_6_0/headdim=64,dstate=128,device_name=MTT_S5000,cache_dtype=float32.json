@@ -1,0 +1,11 @@
+{
+    "triton_version": "3.6.0",
+    "64": {
+        "BLOCK_SIZE_M": 8,
+        "num_warps": 8
+    },
+    "512": {
+        "BLOCK_SIZE_M": 8,
+        "num_warps": 4
+    }
+}
