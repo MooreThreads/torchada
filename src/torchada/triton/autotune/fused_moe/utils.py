@@ -24,32 +24,36 @@ class BenchmarkConfig(TypedDict):
 
 
 def calculate_shard_intermediate_size(
-    intermediate_size: int, tp_size: int, ep_size: int = 1, is_gated: bool = True
+    intermediate_size: int,
+    tp_size: int,
+    ep_size: int = 1,
+    is_gated: bool = True,
 ) -> int:
     assert tp_size % ep_size == 0
     moe_tp_size = tp_size // ep_size
     assert intermediate_size % moe_tp_size == 0
-    # Gated activations (e.g. SwiGLU) store gate and up projections side by
-    # side, while non-gated activations (e.g. NemotronH relu2_no_mul) have a
-    # single projection. Keep the returned size equal to the checkpoint w1
-    # dimension so callers can construct valid benchmark shapes.
+    # Gated projections (for example SwiGLU) store gate and up next to each
+    # other in w1.  Non-gated projections such as Nemotron-H's relu2 use one
+    # projection, so the w1 output width is the model's intermediate size.
     multiplier = 2 if is_gated else 1
     return multiplier * intermediate_size // moe_tp_size
 
 
 def infer_moe_activation(config) -> Tuple[str, bool]:
-    """Return the activation spelling and projection layout for a HF config.
+    """Infer the activation name and projection layout from a HF config.
 
-    NemotronH passes ``activation_without_mul(config.mlp_hidden_act)`` to its
-    FusedMoE layer. Its config says ``relu2`` but the expert checkpoint stores a
-    single (non-gated) projection, so represent that semantic explicitly here.
-    Other model families retain the historical gated-SiLU default.
+    ``NemotronHForCausalLM`` passes ``activation_without_mul`` to its fused
+    MoE layer.  The HF config advertises ``relu2`` while the checkpoint has a
+    single projection (``relu2_no_mul``).  Keep all other architectures on
+    the historical gated-SiLU default unless their activation already carries
+    the explicit ``_no_mul`` suffix.
     """
     raw = getattr(config, "mlp_hidden_act", None)
     if raw is None:
         raw = getattr(config, "hidden_act", "silu")
     activation = str(raw).replace("torch.", "").lower()
-    architecture = str((getattr(config, "architectures", None) or [""])[0])
+    architectures = getattr(config, "architectures", None) or []
+    architecture = str(architectures[0]) if architectures else type(config).__name__
     if architecture == "NemotronHForCausalLM" and not activation.endswith("_no_mul"):
         activation = f"{activation}_no_mul"
     return activation, not activation.endswith("_no_mul")
