@@ -21,6 +21,24 @@ def support_tensor_descriptor():
     return _support_tensor_descriptor
 
 
+def _is_current_stream_capturing() -> bool:
+    """Return whether the active accelerator stream is graph-capturing.
+
+    The CUDA compatibility namespace can exist on CPU-only test hosts while
+    the underlying capture query is unavailable.  Treat that case as an
+    ordinary eager call; on an actual capture stream the backend query is
+    expected to return a boolean.
+    """
+
+    query = getattr(torch.cuda, "is_current_stream_capturing", None)
+    if query is None:
+        return False
+    try:
+        return bool(query())
+    except (AttributeError, RuntimeError):
+        return False
+
+
 @functools.lru_cache()
 def _down_moe_use_tma():
     return support_tensor_descriptor()
@@ -75,7 +93,7 @@ def moe_align_block_size(
         )
         return sorted_ids, expert_ids, num_tokens_post_pad
 
-    except ImportError:
+    except (ImportError, AttributeError):
         pass
 
     # Try to import from vllm._custom_ops
@@ -93,10 +111,39 @@ def moe_align_block_size(
         )
         return sorted_ids, expert_ids, num_tokens_post_pad
 
-    except ImportError:
-        raise ImportError(
-            "No implementation of moe_align_block_size found. " "Please install sgl_kernel or vllm"
-        )
+    except (ImportError, AttributeError):
+        if _is_current_stream_capturing():
+            raise RuntimeError(
+                "MoE graph capture requires the native moe_align_block_size "
+                "operator; the Python fallback is not graph-safe"
+            ) from None
+        # Standalone torchada tuning images may contain vLLM Python sources
+        # without the optional _moe_C extension. Keep the reference path
+        # usable for correctness/tuning; production vLLM uses the native op.
+        flat_ids = topk_ids.reshape(-1)
+        routes = []
+        block_experts = []
+        for expert in range(num_experts):
+            positions = torch.nonzero(flat_ids == expert, as_tuple=False).flatten()
+            if positions.numel() == 0:
+                continue
+            pad = (-positions.numel()) % block_size
+            if pad:
+                positions = torch.cat(
+                    [positions, torch.full_like(positions[:1], flat_ids.numel()).expand(pad)]
+                )
+            routes.append(positions)
+            block_experts.extend([expert] * (positions.numel() // block_size))
+        if routes:
+            sorted_routes = torch.cat(routes)
+            blocks = torch.tensor(block_experts, dtype=torch.int32, device=topk_ids.device)
+        else:
+            sorted_routes = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+            blocks = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+        sorted_ids[: sorted_routes.numel()].copy_(sorted_routes)
+        expert_ids[: blocks.numel()].copy_(blocks)
+        num_tokens_post_pad[0] = sorted_routes.numel()
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 def _prepare_fused_moe_run(
@@ -206,6 +253,10 @@ def _fused_moe_kernel_sequence(
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
+    if (is_gated and activation != "silu") or (not is_gated and activation != "relu2_no_mul"):
+        raise ValueError(
+            f"Unsupported MoE activation/layout: activation={activation!r}, " f"is_gated={is_gated}"
+        )
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
     padded_tokens = (
@@ -272,11 +323,20 @@ def _fused_moe_kernel_sequence(
             topk_ids,
         )
 
-    intermediate_cache2 = torch.empty(
-        (total_tokens, N // 2),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
+    if is_gated:
+        intermediate_cache2 = torch.empty(
+            (total_tokens, N // 2),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        gate, up = intermediate_cache1.chunk(2, dim=-1)
+        intermediate_cache2.copy_(torch.nn.functional.silu(gate) * up)
+    else:
+        intermediate_cache2 = torch.empty_like(intermediate_cache1)
+        # Nemotron-H's relu2 path is non-gated: relu(x)^2, with no second
+        # projection half to multiply. Keep this explicit so the tuner cannot
+        # benchmark an uninitialized intermediate buffer.
+        intermediate_cache2.copy_(torch.relu(intermediate_cache1).square())
 
     intermediate_cache3 = torch.empty(
         (num_tokens, topk, w2.shape[1]),
@@ -300,7 +360,11 @@ def _fused_moe_kernel_sequence(
         (
             out_slice
             if use_fused_moe_sum_all_reduce
-            else (intermediate_cache3 if _use_intermediate else out_hidden_states.unsqueeze(0))
+            else (
+                intermediate_cache3
+                if no_combine or _use_intermediate
+                else out_hidden_states.unsqueeze(0)
+            )
         ),
         a2_scale,
         w2_scale,
@@ -326,6 +390,19 @@ def _fused_moe_kernel_sequence(
         fuse_sum_all_reduce=use_fused_moe_sum_all_reduce,
         router_topk=topk,
     )
+
+    if no_combine:
+        return intermediate_cache3
+
+    if _use_intermediate:
+        combined = intermediate_cache3
+        if apply_router_weight_on_input:
+            combined = combined * topk_weights.to(combined.dtype).unsqueeze(-1)
+        combined = combined.float().sum(dim=1).to(out_hidden_states.dtype)
+        out_hidden_states.copy_(combined)
+    if routed_scaling_factor is not None:
+        out_hidden_states.mul_(routed_scaling_factor)
+    return out_hidden_states
 
 
 def fused_experts_impl(
@@ -358,6 +435,10 @@ def fused_experts_impl(
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
 ):
+    if (is_gated and activation != "silu") or (not is_gated and activation != "relu2_no_mul"):
+        raise ValueError(
+            f"Unsupported MoE activation/layout: activation={activation!r}, " f"is_gated={is_gated}"
+        )
     padded_size = 128
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None:
         padded_size = 0
@@ -497,32 +578,33 @@ def fused_moe(
         moe_runner_config.num_experts is None
         or moe_runner_config.num_experts != moe_runner_config.num_local_experts
     )
-    fused_experts_impl(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        b1,
-        b2,
-        True,
-        moe_runner_config.activation,
-        moe_runner_config.is_gated,
-        moe_runner_config.apply_router_weight_on_input,
-        use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
-        use_int4_w4a16,
-        per_channel_quant,
-        w1_scale,
-        w2_scale,
-        w1_zp,
-        w2_zp,
-        a1_scale,
-        a2_scale,
-        block_shape,
-        moe_runner_config.routed_scaling_factor,
-        moe_runner_config.gemm1_alpha,
-        moe_runner_config.gemm1_clamp_limit,
-        filter_expert,
+    return fused_experts_impl(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        b1=b1,
+        b2=b2,
+        inplace=getattr(moe_runner_config, "inplace", False),
+        activation=moe_runner_config.activation,
+        is_gated=moe_runner_config.is_gated,
+        apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        per_channel_quant=per_channel_quant,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zp=w1_zp,
+        w2_zp=w2_zp,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape,
+        no_combine=getattr(moe_runner_config, "no_combine", False),
+        routed_scaling_factor=moe_runner_config.routed_scaling_factor,
+        gemm1_alpha=moe_runner_config.gemm1_alpha,
+        gemm1_limit=moe_runner_config.gemm1_clamp_limit,
+        filter_expert=filter_expert,
     )

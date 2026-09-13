@@ -55,6 +55,14 @@ def test_exact_triton_version_dir_wins(tmp_path, monkeypatch):
     assert resolved == str(tmp_path / "configs" / "triton_3_1_0")
 
 
+def test_triton36_exact_version_dir_wins(tmp_path, monkeypatch):
+    for ver in ("triton_3_2_0", "triton_3_6_0"):
+        (tmp_path / "configs" / ver).mkdir(parents=True)
+    monkeypatch.setattr(fused_moe, "_installed_triton_version", lambda: "3.6.0")
+    resolved = fused_moe._vllm_tuned_config_dir(str(tmp_path))
+    assert resolved == str(tmp_path / "configs" / "triton_3_6_0")
+
+
 @pytest.mark.parametrize(
     "raw",
     ["3.2.0", "3.2.0.post1", "3.2.0rc1", "3.2.0+git9d8d5e91", "3.2.0.dev20260601"],
