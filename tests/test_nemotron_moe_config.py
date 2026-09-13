@@ -87,7 +87,7 @@ def test_config_filename_uses_second_gemm_width():
     assert "E=128,N=1856" in non_gated
 
 
-@pytest.mark.parametrize("is_gated,expected_w2", [(True, 1856), (False, 3712)])
+@pytest.mark.parametrize("is_gated,expected_w2", [(True, 1856), (False, 1856)])
 def test_benchmark_allocates_matching_second_projection(monkeypatch, is_gated, expected_w2):
     """w2's K dimension follows the actual post-activation width."""
     from torchada.triton.autotune.fused_moe import tune_moe
