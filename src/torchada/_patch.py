@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _patched = False
 _original_init_process_group = None
+_original_tensor_log_ = None
 
 # Registry for patch functions
 _patch_registry: List[Callable[[], None]] = []
@@ -158,6 +159,28 @@ def _patch_inductor_template_heuristics():
         heuristic_cache = getattr(registry, "_HEURISTIC_CACHE", None)
         if isinstance(heuristic_cache, dict):
             heuristic_cache.clear()
+
+
+@patch_function
+@requires_import("torch_musa")
+def _patch_tensor_log_():
+    """Run MUSA float64 ``Tensor.log_`` through the supported out-of-place op."""
+    global _original_tensor_log_
+
+    if not is_musa_platform() or _original_tensor_log_ is not None:
+        return
+
+    _original_tensor_log_ = torch.Tensor.log_
+
+    @functools.wraps(_original_tensor_log_)
+    def patched_log_(self):
+        if self.device.type == "musa" and self.dtype == torch.float64:
+            # Preserve the in-place contract while avoiding unsupported MUSA
+            # float64 LOG in the validated torch_musa runtime.
+            return self.copy_(torch.log(self))
+        return _original_tensor_log_(self)
+
+    torch.Tensor.log_ = patched_log_
 
 
 # Cache for translated device strings - avoids repeated string operations
