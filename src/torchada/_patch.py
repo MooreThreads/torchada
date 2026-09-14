@@ -164,10 +164,17 @@ def _patch_inductor_template_heuristics():
 @patch_function
 @requires_import("torch_musa")
 def _patch_tensor_log_():
-    """Run MUSA float64 ``Tensor.log_`` through the supported out-of-place op."""
+    """Backport MUSA float64 ``Tensor.log_`` for torch_musa < 2.11.0.post2."""
     global _original_tensor_log_
 
-    if not is_musa_platform() or _original_tensor_log_ is not None:
+    musa_module = getattr(torch, "musa", None)
+    if (
+        not is_musa_platform()
+        or not _is_pre_torch_musa_2_11_0_post2(
+            getattr(musa_module, "__version__", None)
+        )
+        or _original_tensor_log_ is not None
+    ):
         return
 
     _original_tensor_log_ = torch.Tensor.log_
