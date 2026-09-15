@@ -3066,6 +3066,34 @@ class TestAcceleratorModuleWrapper:
 
         assert _is_pre_torch_musa_2_11_0_post2(musa_version) is expected
 
+    def test_float64_log_patch_respects_torch_musa_version(self, monkeypatch):
+        import sys
+        from types import ModuleType, SimpleNamespace
+
+        import torch
+
+        from torchada import _patch
+
+        original_log = torch.Tensor.log_
+        monkeypatch.setitem(sys.modules, "torch_musa", ModuleType("torch_musa"))
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(_patch, "_original_tensor_log_", None)
+        monkeypatch.setattr(
+            torch,
+            "musa",
+            SimpleNamespace(__version__="2.11.0.post2"),
+            raising=False,
+        )
+
+        _patch._patch_tensor_log_()
+        assert torch.Tensor.log_ is original_log
+
+        torch.musa.__version__ = "2.11.0.post1+musa5.2.0"
+        _patch._patch_tensor_log_()
+        assert torch.Tensor.log_ is not original_log
+
+        monkeypatch.setattr(torch.Tensor, "log_", original_log)
+
     def _make_wrapper(
         self,
         accel_attrs=None,
