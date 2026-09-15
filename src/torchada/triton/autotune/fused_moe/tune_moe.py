@@ -140,6 +140,8 @@ class ModelEntry:
     shard_intermediate_size: int = 0
     topk: int = 0
     num_fused_shared_experts: int = 0
+    activation: str = "silu"
+    is_gated: bool = True
     dtype: torch.dtype = torch.float16
     block_shape: Optional[Tuple[int, int]] = None
 
@@ -167,6 +169,8 @@ class ModelEntry:
             self.shard_intermediate_size,
             self.topk,
             self.num_fused_shared_experts,
+            self.activation,
+            self.is_gated,
             str(self.dtype),
             self.use_fp8,
             self.use_int8,
@@ -188,7 +192,7 @@ def validate_and_log_entries(entries: List[ModelEntry]) -> None:
     for i, e in enumerate(entries):
         logger.info(
             "[%d] model=%s tp=%d ep=%d experts=%d hidden=%d "
-            "intermediate=%d topk=%d shared=%d dtype=%s block=%s",
+            "intermediate=%d topk=%d shared=%d activation=%s gated=%s dtype=%s block=%s",
             i,
             e.path,
             e.tp_size,
@@ -198,6 +202,8 @@ def validate_and_log_entries(entries: List[ModelEntry]) -> None:
             e.shard_intermediate_size,
             e.topk,
             e.num_fused_shared_experts,
+            e.activation,
+            e.is_gated,
             e.dtype_str,
             e.block_shape,
         )
@@ -316,6 +322,8 @@ def benchmark_config(
     per_channel_quant: bool,
     block_shape: List[int] = None,
     num_fused_shared_experts: int = 0,
+    activation: str = "silu",
+    is_gated: bool = True,
     num_iters: int = 100,
 ) -> float:
     """Run the fused MoE kernel and return latency in microseconds."""
@@ -324,6 +332,10 @@ def benchmark_config(
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     num_routed_experts = num_experts - num_fused_shared_experts
     assert num_routed_experts > 0
+    # ``shard_intermediate_size`` is the first GEMM output width (w1.shape[1]).
+    # Gated models use half of it as the second GEMM input width because w1
+    # contains gate and up projections; non-gated models use the full width.
+    w2_input_size = shard_intermediate_size // 2 if is_gated else shard_intermediate_size
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
     # Create random weights based on quantization type
@@ -338,7 +350,7 @@ def benchmark_config(
         w2 = torch.randint(
             -127,
             127,
-            (num_experts, hidden_size, shard_intermediate_size // 2),
+            (num_experts, hidden_size, w2_input_size),
             dtype=torch.int8,
             device=device,
         )
@@ -353,7 +365,7 @@ def benchmark_config(
         w2 = torch.randint(
             0,
             255,
-            (num_experts, hidden_size, shard_intermediate_size // 4),
+            (num_experts, hidden_size, w2_input_size // 2),
             dtype=torch.uint8,
             device=device,
         )
@@ -368,7 +380,7 @@ def benchmark_config(
         w2 = torch.randn(
             num_experts,
             hidden_size,
-            shard_intermediate_size // 2,
+            w2_input_size,
             dtype=init_dtype,
             device=device,
         )
@@ -385,7 +397,7 @@ def benchmark_config(
     w1_scale = w2_scale = a1_scale = a2_scale = None
     if use_int8_w8a16:
         w1_scale = torch.randn(
-            (num_experts, 2 * shard_intermediate_size),
+            (num_experts, shard_intermediate_size),
             dtype=torch.float32,
             device=device,
         )
@@ -396,7 +408,7 @@ def benchmark_config(
         n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
         n_tiles_w2 = (hidden_size + block_n - 1) // block_n
         k_tiles_w1 = (hidden_size + block_k - 1) // block_k
-        k_tiles_w2 = (shard_intermediate_size // 2 + block_k - 1) // block_k
+        k_tiles_w2 = (w2_input_size + block_k - 1) // block_k
         w1_scale = torch.randn(
             (num_experts, n_tiles_w1, k_tiles_w1),
             dtype=torch.bfloat16,
@@ -423,7 +435,7 @@ def benchmark_config(
             n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
             n_tiles_w2 = (hidden_size + block_n - 1) // block_n
             k_tiles_w1 = (hidden_size + block_k - 1) // block_k
-            k_tiles_w2 = (shard_intermediate_size // 2 + block_k - 1) // block_k
+            k_tiles_w2 = (w2_input_size + block_k - 1) // block_k
             w1_scale = torch.rand(
                 (num_experts, n_tiles_w1, k_tiles_w1),
                 dtype=torch.float32,
@@ -462,6 +474,8 @@ def benchmark_config(
             top_k=topk,
             num_fused_shared_experts=num_fused_shared_experts,
             inplace=True,
+            activation=activation,
+            is_gated=is_gated,
         )
         with override_config(config):
             fused_moe(
@@ -548,6 +562,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
             entry.shard_intermediate_size = params["shard_intermediate_size"]
             entry.topk = params["topk"]
             entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
+            entry.activation = params.get("activation", "silu")
+            entry.is_gated = params.get("is_gated", True)
             entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
             entry.dtype = _resolve_torch_dtype(entry.dtype_str, params)
             entry.block_shape = tuple(params["block_shape"]) if params["block_shape"] else None
@@ -603,6 +619,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
                     entry.shard_intermediate_size = params["shard_intermediate_size"]
                     entry.topk = params["topk"]
                     entry.num_fused_shared_experts = params.get("num_fused_shared_experts", 0)
+                    entry.activation = params.get("activation", "silu")
+                    entry.is_gated = params.get("is_gated", True)
                     entry.dtype_str = _resolve_dtype_str(entry.dtype_str, params)
                     entry.dtype = _resolve_torch_dtype(entry.dtype_str, params)
                     entry.block_shape = (
@@ -657,6 +675,8 @@ def _tune_worker(
                     entry.per_channel_quant,
                     list(entry.block_shape) if entry.block_shape else None,
                     entry.num_fused_shared_experts,
+                    activation=entry.activation,
+                    is_gated=entry.is_gated,
                     num_iters=10,
                 )
             except (triton.runtime.autotuner.OutOfResources, RuntimeError, AssertionError):
@@ -767,6 +787,7 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
             entry.use_int4,
             entry.per_channel_quant,
             entry.block_shape,
+            is_gated=entry.is_gated,
         )
         sorted_batches = sorted(bs_to_config.keys())
         best_configs = {bs: sort_config(bs_to_config[bs]) for bs in sorted_batches}
@@ -808,7 +829,11 @@ def _benchmark_worker(
             )
             block_n = entry.block_shape[0] if entry.block_shape else 0
             block_k = entry.block_shape[1] if entry.block_shape else 0
-            N = entry.shard_intermediate_size // 2
+            N = (
+                entry.shard_intermediate_size // 2
+                if entry.is_gated
+                else entry.shard_intermediate_size
+            )
             if entry.use_int4:
                 N = N // 2
             op_config = get_moe_configs(
@@ -852,6 +877,8 @@ def _benchmark_worker(
                 entry.per_channel_quant,
                 list(entry.block_shape) if entry.block_shape else None,
                 entry.num_fused_shared_experts,
+                activation=entry.activation,
+                is_gated=entry.is_gated,
             )
             result_queue.put((entry, batch_size, kernel_time, None))
         except Exception as e:
@@ -975,7 +1002,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        choices=["auto", "fp8_w8a8", "int8_w8a16", "int8_w8a8", "int4_w4a16"],
+        choices=[
+            "auto",
+            "bf16",
+            "bfloat16",
+            "fp16",
+            "float16",
+            "fp8_w8a8",
+            "int8_w8a16",
+            "int8_w8a8",
+            "int4_w4a16",
+        ],
         default="auto",
         help="Quantization dtype.",
     )
