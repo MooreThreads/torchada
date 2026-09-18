@@ -136,7 +136,7 @@ def test_benchmark_allocates_matching_second_projection(monkeypatch, is_gated, e
     assert seen[2] == (128, 2688, expected_w2)
 
 
-def test_s5000_nemotron_config_keeps_non_mtp_buckets_on_default_tile():
+def test_s5000_nemotron_config_adds_decode_mtp_bucket():
     path = (
         Path(__file__).parents[1]
         / "src/torchada/triton/autotune/fused_moe/configs/triton_3_2_0"
@@ -144,8 +144,17 @@ def test_s5000_nemotron_config_keeps_non_mtp_buckets_on_default_tile():
     )
     config = json.loads(path.read_text())
 
-    assert set(config) == {"1", "4", "6", "8"}
+    assert set(config) == {"1", "4", "6", "8", "16"}
     assert config["1"] == config["4"] == config["6"]
     assert config["8"]["BLOCK_SIZE_M"] == 64
     assert config["8"]["BLOCK_SIZE_N"] == 128
     assert config["8"]["BLOCK_SIZE_K"] == 32
+    assert config["16"] == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 16,
+        "SPLIT_K": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
