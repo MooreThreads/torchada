@@ -167,14 +167,9 @@ def _patch_tensor_log_():
     """Backport MUSA float64 ``Tensor.log_`` for torch_musa < 2.11.0.post2."""
     global _original_tensor_log_
 
-    musa_module = getattr(torch, "musa", None)
-    if (
-        not is_musa_platform()
-        or not _is_pre_torch_musa_2_11_0_post2(
-            getattr(musa_module, "__version__", None)
-        )
-        or _original_tensor_log_ is not None
-    ):
+    if not is_musa_platform() or _original_tensor_log_ is not None:
+        return
+    if not _is_pre_torch_musa_2_11_0_post2(torch.musa.__version__):
         return
 
     _original_tensor_log_ = torch.Tensor.log_
