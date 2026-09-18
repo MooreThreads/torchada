@@ -144,7 +144,7 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
     )
     config = json.loads(path.read_text())
 
-    assert set(config) == {"1", "4", "6", "8", "16"}
+    assert set(config) == {"1", "4", "6", "8", "16", "32", "64", "128", "256", "512"}
     assert config["1"] == config["4"] == config["6"]
     assert config["8"]["BLOCK_SIZE_M"] == 64
     assert config["8"]["BLOCK_SIZE_N"] == 128
@@ -158,6 +158,8 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
         "num_warps": 8,
         "num_stages": 2,
     }
+    for key in ("32", "64", "128", "256", "512"):
+        assert config[key] == config["16"]
 
 
 def test_config_map_falls_back_for_unmeasured_large_m(monkeypatch):
