@@ -3034,37 +3034,8 @@ class TestFlashAttnPatching:
             flash_attn._flash_attn_forward("q", "k", "v")
 
 
-class TestAcceleratorModuleWrapper:
-    """Test the _AcceleratorModuleWrapper priority / fallback logic in isolation.
-
-    These tests use mock modules instead of the real torch.accelerator so the
-    priority rules can be verified deterministically across PyTorch versions
-    (including the forward-compat behavior expected when torch 2.9+ lands
-    official implementations of APIs that currently fall back to torch.musa).
-    """
-
-    @pytest.mark.parametrize(
-        ("musa_version", "expected"),
-        (
-            ("2.10.0", True),
-            ("2.11.0", True),
-            ("2.11.0.post1+musa5.2.0", True),
-            ("2.11.0.post1+musa5.3.0", True),
-            ("2.11.0.post2", False),
-            ("2.11.0.post2+musa5.2.0", False),
-            ("2.11.0.post2+musa5.3.0", False),
-            ("2.11.0.post2+future/musa/build", False),
-            ("2.11.0.post10+musa5.2.0", False),
-            ("2.12.0+musa6.0.0", False),
-            ("not-a-version+musa5.2.0", True),
-            ("", True),
-            (None, True),
-        ),
-    )
-    def test_torch_musa_version_boundary(self, musa_version, expected):
-        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
-
-        assert _is_pre_torch_musa_2_11_0_post2(musa_version) is expected
+class TestTensorLogPatch:
+    """CPU coverage for the MUSA float64 Tensor.log_ compatibility patch."""
 
     def test_float64_log_patch_respects_torch_musa_version(self, monkeypatch):
         import sys
@@ -3157,6 +3128,39 @@ class TestAcceleratorModuleWrapper:
         assert patched_log(musa_f32) is musa_f32
         assert musa_f32.copied is None
         assert original_calls == [cpu_f64, musa_f32]
+
+
+class TestAcceleratorModuleWrapper:
+    """Test the _AcceleratorModuleWrapper priority / fallback logic in isolation.
+
+    These tests use mock modules instead of the real torch.accelerator so the
+    priority rules can be verified deterministically across PyTorch versions
+    (including the forward-compat behavior expected when torch 2.9+ lands
+    official implementations of APIs that currently fall back to torch.musa).
+    """
+
+    @pytest.mark.parametrize(
+        ("musa_version", "expected"),
+        (
+            ("2.10.0", True),
+            ("2.11.0", True),
+            ("2.11.0.post1+musa5.2.0", True),
+            ("2.11.0.post1+musa5.3.0", True),
+            ("2.11.0.post2", False),
+            ("2.11.0.post2+musa5.2.0", False),
+            ("2.11.0.post2+musa5.3.0", False),
+            ("2.11.0.post2+future/musa/build", False),
+            ("2.11.0.post10+musa5.2.0", False),
+            ("2.12.0+musa6.0.0", False),
+            ("not-a-version+musa5.2.0", True),
+            ("", True),
+            (None, True),
+        ),
+    )
+    def test_torch_musa_version_boundary(self, musa_version, expected):
+        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
+
+        assert _is_pre_torch_musa_2_11_0_post2(musa_version) is expected
 
     def _make_wrapper(
         self,

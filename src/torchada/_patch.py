@@ -177,8 +177,8 @@ def _patch_tensor_log_():
     @functools.wraps(_original_tensor_log_)
     def patched_log_(self):
         if self.device.type == "musa" and self.dtype == torch.float64:
-            # Old torch_musa rejects float64 log_, but out-of-place log plus
-            # copy_ keeps the in-place return contract.
+            # note (yingzhou): old torch_musa rejects float64 log_, but
+            # out-of-place log plus copy_ keeps the in-place return contract.
             return self.copy_(torch.log(self))
         return _original_tensor_log_(self)
 
