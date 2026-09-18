@@ -44,6 +44,21 @@ def _down_moe_use_tma():
     return support_tensor_descriptor()
 
 
+def _apply_moe_activation(x: torch.Tensor, activation: str) -> torch.Tensor:
+    """Apply common vLLM MoE activations without narrowing callers."""
+    if activation == "relu2_no_mul":
+        return torch.relu(x).square()
+    if activation in ("silu", "swiglu"):
+        return torch.nn.functional.silu(x)
+    if activation in ("gelu", "gelu_fast", "gelu_new"):
+        return torch.nn.functional.gelu(x, approximate="none")
+    if activation in ("gelu_pytorch_tanh", "gelu_tanh"):
+        return torch.nn.functional.gelu(x, approximate="tanh")
+    if activation == "relu":
+        return torch.relu(x)
+    raise ValueError(f"Unsupported MoE activation: {activation!r}")
+
+
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -253,10 +268,6 @@ def _fused_moe_kernel_sequence(
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
-    if (is_gated and activation != "silu") or (not is_gated and activation != "relu2_no_mul"):
-        raise ValueError(
-            f"Unsupported MoE activation/layout: activation={activation!r}, " f"is_gated={is_gated}"
-        )
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
     padded_tokens = (
@@ -330,13 +341,13 @@ def _fused_moe_kernel_sequence(
             dtype=hidden_states.dtype,
         )
         gate, up = intermediate_cache1.chunk(2, dim=-1)
-        intermediate_cache2.copy_(torch.nn.functional.silu(gate) * up)
+        intermediate_cache2.copy_(_apply_moe_activation(gate, activation) * up)
     else:
         intermediate_cache2 = torch.empty_like(intermediate_cache1)
         # Nemotron-H's relu2 path is non-gated: relu(x)^2, with no second
         # projection half to multiply. Keep this explicit so the tuner cannot
         # benchmark an uninitialized intermediate buffer.
-        intermediate_cache2.copy_(torch.relu(intermediate_cache1).square())
+        intermediate_cache2.copy_(_apply_moe_activation(intermediate_cache1, activation))
 
     intermediate_cache3 = torch.empty(
         (num_tokens, topk, w2.shape[1]),
@@ -435,10 +446,6 @@ def fused_experts_impl(
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
 ):
-    if (is_gated and activation != "silu") or (not is_gated and activation != "relu2_no_mul"):
-        raise ValueError(
-            f"Unsupported MoE activation/layout: activation={activation!r}, " f"is_gated={is_gated}"
-        )
     padded_size = 128
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None:
         padded_size = 0

@@ -134,7 +134,10 @@ def _args(*, activation="relu2_no_mul", is_gated=False, no_combine=False, inplac
     )
 
 
-@pytest.mark.parametrize("activation,is_gated", [("relu2_no_mul", False), ("silu", True)])
+@pytest.mark.parametrize(
+    "activation,is_gated",
+    [("relu2_no_mul", False), ("silu", True), ("gelu", False), ("gelu", True)],
+)
 @pytest.mark.parametrize("no_combine,inplace", [(False, False), (False, True), (True, False)])
 def test_fused_moe_pipeline_activation_and_output_modes(
     monkeypatch, activation, is_gated, no_combine, inplace
@@ -159,9 +162,19 @@ def test_fused_moe_pipeline_activation_and_output_modes(
             gate_up = original[token] @ kwargs["w1"][expert].T
             if is_gated:
                 width = gate_up.shape[-1] // 2
-                activated = torch.nn.functional.silu(gate_up[:width]) * gate_up[width:]
+                gate = gate_up[:width]
+                gate = (
+                    torch.nn.functional.gelu(gate)
+                    if activation == "gelu"
+                    else torch.nn.functional.silu(gate)
+                )
+                activated = gate * gate_up[width:]
             else:
-                activated = torch.relu(gate_up).square()
+                activated = (
+                    torch.nn.functional.gelu(gate_up)
+                    if activation == "gelu"
+                    else torch.relu(gate_up).square()
+                )
             token_outputs.append(activated @ kwargs["w2"][expert].T)
         expected_rows.append(torch.stack(token_outputs))
     expected = torch.stack(expected_rows)
@@ -174,11 +187,11 @@ def test_fused_moe_pipeline_activation_and_output_modes(
         assert not torch.equal(result, original)
 
 
-def test_fused_moe_rejects_unknown_activation(monkeypatch):
+def test_fused_moe_supports_gelu_activation(monkeypatch):
     monkeypatch.setattr(moe, "invoke_fused_moe_kernel", _fake_gemm)
     _fake_gemm.calls = 0
-    with pytest.raises(ValueError, match="activation"):
-        moe._fused_moe_kernel_sequence(**_args(activation="gelu", is_gated=False))
+    result = moe._fused_moe_kernel_sequence(**_args(activation="gelu", is_gated=False))
+    assert torch.isfinite(result).all()
 
 
 def test_fused_moe_wrapper_forwards_runner_options_by_keyword(monkeypatch):

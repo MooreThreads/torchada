@@ -158,3 +158,37 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
         "num_warps": 8,
         "num_stages": 2,
     }
+
+
+def test_config_map_falls_back_for_unmeasured_large_m(monkeypatch):
+    from torchada.triton.runtime.fused_moe import config as moe_config
+
+    measured = {
+        1: {"BLOCK_SIZE_M": 16},
+        16: {"BLOCK_SIZE_M": 32},
+    }
+    fallback = {"BLOCK_SIZE_M": 999}
+    monkeypatch.setattr(moe_config, "get_config", lambda: None)
+    monkeypatch.setattr(moe_config, "get_moe_configs", lambda *args, **kwargs: measured)
+    monkeypatch.setattr(moe_config, "get_default_config", lambda *args, **kwargs: fallback)
+
+    assert (
+        moe_config.try_get_optimal_moe_config(
+            (128, 1856, 2688),
+            (128, 1856, 2688),
+            6,
+            "bf16",
+            16,
+        )
+        == measured[16]
+    )
+    assert (
+        moe_config.try_get_optimal_moe_config(
+            (128, 1856, 2688),
+            (128, 1856, 2688),
+            6,
+            "bf16",
+            4096,
+        )
+        == fallback
+    )
