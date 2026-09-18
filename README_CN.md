@@ -66,6 +66,7 @@ torch.cuda.synchronize()
 | C++ nvJPEG 移植 | nvJPEG 源码及构建配置 → MTJPEG |
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
 | 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`Stream`、`Event` 等 |
+| MUSA float64 原地对数 | `torch_musa < 2.11.0.post2` 时，`Tensor.log_()` 复用受支持的非原地操作，同时保持原地操作契约 |
 | Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
 | Triton 融合 MoE | 面向 vLLM 和 SGLang 的 Triton 3.2.0 MTT S5000 调优配置 |
 
@@ -376,7 +377,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.86
+torchada>=0.1.87
 ```
 
 ### 步骤 2：条件导入

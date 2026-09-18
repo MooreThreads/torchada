@@ -3034,6 +3034,102 @@ class TestFlashAttnPatching:
             flash_attn._flash_attn_forward("q", "k", "v")
 
 
+class TestTensorLogPatch:
+    """CPU coverage for the MUSA float64 Tensor.log_ compatibility patch."""
+
+    def test_float64_log_patch_respects_torch_musa_version(self, monkeypatch):
+        import sys
+        from types import ModuleType, SimpleNamespace
+
+        import torch
+
+        from torchada import _patch
+
+        original_log = torch.Tensor.log_
+        monkeypatch.setattr(torch.Tensor, "log_", original_log)
+        monkeypatch.setitem(sys.modules, "torch_musa", ModuleType("torch_musa"))
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(_patch, "_original_tensor_log_", None)
+        monkeypatch.setattr(
+            torch,
+            "musa",
+            SimpleNamespace(__version__="2.11.0.post2"),
+            raising=False,
+        )
+
+        _patch._patch_tensor_log_()
+        assert torch.Tensor.log_ is original_log
+
+        torch.musa.__version__ = "2.11.0.post1+musa5.2.0"
+        _patch._patch_tensor_log_()
+        assert torch.Tensor.log_ is not original_log
+
+    def test_float64_log_patch_uses_out_of_place_copy_on_musa(self, monkeypatch):
+        import sys
+        from types import ModuleType, SimpleNamespace
+
+        import torch
+
+        from torchada import _patch
+
+        original_log = torch.Tensor.log_
+        monkeypatch.setattr(torch.Tensor, "log_", original_log)
+        monkeypatch.setitem(sys.modules, "torch_musa", ModuleType("torch_musa"))
+        monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(_patch, "_original_tensor_log_", None)
+        monkeypatch.setattr(
+            torch,
+            "musa",
+            SimpleNamespace(__version__="2.11.0.post1+musa5.2.0"),
+            raising=False,
+        )
+
+        _patch._patch_tensor_log_()
+        patched_log = torch.Tensor.log_
+
+        log_args = []
+        logged = object()
+
+        def fake_torch_log(tensor):
+            log_args.append(tensor)
+            return logged
+
+        original_calls = []
+
+        def fake_original_log_(tensor):
+            original_calls.append(tensor)
+            return tensor
+
+        monkeypatch.setattr(torch, "log", fake_torch_log)
+        monkeypatch.setattr(_patch, "_original_tensor_log_", fake_original_log_)
+
+        class FakeTensor:
+            def __init__(self, device_type, dtype):
+                self.device = SimpleNamespace(type=device_type)
+                self.dtype = dtype
+                self.copied = None
+
+            def copy_(self, other):
+                self.copied = other
+                return self
+
+        musa_f64 = FakeTensor("musa", torch.float64)
+        result = patched_log(musa_f64)
+        assert result is musa_f64
+        assert musa_f64.copied is logged
+        assert log_args == [musa_f64]
+        assert original_calls == []
+
+        cpu_f64 = FakeTensor("cpu", torch.float64)
+        assert patched_log(cpu_f64) is cpu_f64
+        assert cpu_f64.copied is None
+
+        musa_f32 = FakeTensor("musa", torch.float32)
+        assert patched_log(musa_f32) is musa_f32
+        assert musa_f32.copied is None
+        assert original_calls == [cpu_f64, musa_f32]
+
+
 class TestAcceleratorModuleWrapper:
     """Test the _AcceleratorModuleWrapper priority / fallback logic in isolation.
 
