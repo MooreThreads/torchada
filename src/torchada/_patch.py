@@ -177,8 +177,8 @@ def _patch_tensor_log_():
     @functools.wraps(_original_tensor_log_)
     def patched_log_(self):
         if self.device.type == "musa" and self.dtype == torch.float64:
-            # Preserve the in-place contract while avoiding unsupported MUSA
-            # float64 LOG in the validated torch_musa runtime.
+            # Old torch_musa rejects float64 log_, but out-of-place log plus
+            # copy_ keeps the in-place return contract.
             return self.copy_(torch.log(self))
         return _original_tensor_log_(self)
 
@@ -1805,8 +1805,9 @@ _TORCH_MUSA_POST2_VERSION = "2.11.0.post2"
 def _is_pre_torch_musa_2_11_0_post2(version) -> bool:
     """Return whether the torch_musa version predates 2.11.0.post2.
 
-    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs. Older
-    releases still need torchada to force those calls through torch.musa.
+    torch_musa 2.11.0.post2 fixes the unified accelerator memory APIs and the
+    float64 in-place ``Tensor.log_``. Older releases still need torchada to
+    force those memory calls through torch.musa and to backport the log path.
     Ignore the local version suffix (for example ``+musa5.2.0``), because it
     identifies the MUSA stack build rather than the torch_musa fix level.
 
