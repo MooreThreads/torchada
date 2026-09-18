@@ -153,13 +153,13 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
     assert config["8"]["BLOCK_SIZE_N"] == 128
     assert config["8"]["BLOCK_SIZE_K"] == 32
     assert config["512"] == {
-        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_M": 64,
         "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 64,
+        "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 16,
         "SPLIT_K": 1,
         "num_warps": 8,
-        "num_stages": 2,
+        "num_stages": 1,
     }
 
 
