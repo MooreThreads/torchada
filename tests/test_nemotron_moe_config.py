@@ -144,11 +144,25 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
     )
     config = json.loads(path.read_text())
 
-    assert set(config) == {"1", "4", "6", "8", "16", "32", "64", "128", "256", "512"}
-    assert config["1"] == config["4"] == config["6"]
-    assert config["8"]["BLOCK_SIZE_M"] == 64
-    assert config["8"]["BLOCK_SIZE_N"] == 128
-    assert config["8"]["BLOCK_SIZE_K"] == 32
+    assert set(config) == {
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "16",
+        "32",
+        "64",
+        "128",
+        "256",
+        "512",
+    }
+    assert config["1"]["BLOCK_SIZE_M"] == 16
+    assert config["1"]["BLOCK_SIZE_N"] == 32
+    assert config["1"]["BLOCK_SIZE_K"] == 64
     assert config["16"] == {
         "BLOCK_SIZE_M": 32,
         "BLOCK_SIZE_N": 64,
