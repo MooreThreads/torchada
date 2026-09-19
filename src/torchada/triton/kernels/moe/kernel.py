@@ -17,8 +17,8 @@ from torchada.triton.runtime.fp8_utils import scaled_fp8_quant
 try:
     from triton.tools.tensor_descriptor import TensorDescriptor
 
-    _support_tensor_descriptor = True
-except:
+    _support_tensor_descriptor = hasattr(tl, "make_tensor_descriptor")
+except (ImportError, AttributeError):
     _support_tensor_descriptor = False
 
 
@@ -668,9 +668,11 @@ def invoke_fused_moe_kernel(
     fuse_add_to_output: bool = False,
     add_output_mask: Optional[torch.Tensor] = None,
 ) -> None:
-    config = dict(config)
-    split_k = config.pop("SPLIT_K", 1)
-    if split_k != 1:
+    # Keep the autotuner's constexpr map intact when forwarding it to Triton.
+    # In particular, removing SPLIT_K changes the generated launch variant and
+    # regresses Nemotron decode even when SPLIT_K == 1.  Validate the supported
+    # value without copying or mutating the map.
+    if config.get("SPLIT_K", 1) != 1:
         raise ValueError("The torchada fused MoE kernel only supports SPLIT_K=1")
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1

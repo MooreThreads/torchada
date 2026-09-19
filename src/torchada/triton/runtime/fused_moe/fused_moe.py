@@ -12,8 +12,14 @@ from torchada.triton.runtime.fused_moe.config import (
 )
 
 try:
-    _support_tensor_descriptor = True
-except:
+    # Triton 3.2 ships ``triton.tools.tensor_descriptor`` on MUSA, but does
+    # not expose the language-level constructor used by the TMA path.  Check
+    # the API that the generated kernel actually calls instead of treating the
+    # import itself as proof of support.
+    from triton.tools.tensor_descriptor import TensorDescriptor  # noqa: F401
+
+    _support_tensor_descriptor = hasattr(tl, "make_tensor_descriptor")
+except (ImportError, AttributeError):
     _support_tensor_descriptor = False
 
 
