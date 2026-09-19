@@ -306,7 +306,7 @@ def _call_musa_op(op: Callable, input, mat2, args, out, out_dtype, kwargs) -> An
     return op(input, mat2, *args, **kwargs)
 
 
-def _wrap_mm_out_dtype(original: Callable) -> Callable:
+def _wrap_mm_out_dtype(original: Callable, op_name: str) -> Callable:
     """Wrap ``torch.mm`` / ``torch.bmm`` so ``out_dtype`` matches CUDA.
 
     Both the keyword and the documented positional form of ``out_dtype`` are
@@ -323,7 +323,26 @@ def _wrap_mm_out_dtype(original: Callable) -> Callable:
       input-dtype values rather than a compute-in-input-dtype-then-cast;
     * any other pair stays with the vendor op, which already rejects it with
       the documented ``RuntimeError``.
+
+    ``op_name`` is the probe key (``"mm"`` or ``"bmm"``). The probe is resolved
+    on the first call that actually passes ``out_dtype`` and the verdict is
+    cached: a healthy vendor overload is delegated to forever and the wrapper
+    never comes back into play.
     """
+    checked = False
+    broken = False
+
+    def vendor_honours_out_dtype() -> bool:
+        nonlocal checked, broken
+        if not checked:
+            checked = True
+            broken = bool(_probe_out_dtype_broken_ops()[op_name])
+            if not broken:
+                logger.info(
+                    "MUSA %s honours out_dtype: vendor implementation kept",
+                    f"torch.{op_name}",
+                )
+        return not broken
 
     @functools.wraps(original)
     def wrapped(input, mat2, *args, out=None, out_dtype=None, **kwargs):
@@ -340,6 +359,7 @@ def _wrap_mm_out_dtype(original: Callable) -> Callable:
             or not isinstance(input, torch.Tensor)
             or not isinstance(mat2, torch.Tensor)
             or input.dtype != mat2.dtype
+            or vendor_honours_out_dtype()
         ):
             return _call_musa_op(original, input, mat2, args, out, out_dtype, kwargs)
 
@@ -363,7 +383,21 @@ def _wrap_mm_out_dtype(original: Callable) -> Callable:
 @patch_function
 @requires_import("torch_musa")
 def _patch_mm_out_dtype():
-    """Backport CUDA ``out_dtype=`` semantics for MUSA ``torch.mm``/``torch.bmm``."""
+    """Backport CUDA ``out_dtype=`` semantics for MUSA ``torch.mm``/``torch.bmm``.
+
+    The wrappers are armed on every qualifying MUSA stack, but the defect probe
+    itself is deferred to the first call that actually passes ``out_dtype``.
+    Probing means running ``mm``/``bmm`` on the device, and that is observable
+    from the outside: it initialises the vendor libraries before the host
+    process gets to its own warm-up, which moves the memory-profiling peak of a
+    downstream vLLM server, changes the KV cache budget it derives from it
+    (746,446 vs 731,482 tokens on the Nemotron-3.5 MTP6 config) and shifted
+    measured decode TPOT by 7-9% even though every device kernel was identical.
+    Installing a compatibility backport must not perturb a process that never
+    asks for a promoted ``out_dtype``, so nothing touches the device until the
+    first promoted call needs the verdict. Plain calls, and calls whose dtype
+    pair is invalid or mismatched, still go straight to the vendor op.
+    """
     global _original_torch_mm, _original_torch_bmm
 
     if not is_musa_platform() or _original_torch_mm is not None:
@@ -373,24 +407,17 @@ def _patch_mm_out_dtype():
         return
 
     original_mm, original_bmm = torch.mm, torch.bmm
-    broken = _probe_out_dtype_broken_ops()
-    if not broken["mm"] and not broken["bmm"]:
-        # The vendor implementation already honours ``out_dtype``: leave torch
-        # untouched so the backport cannot drift from the native behaviour.
-        return
-
     _original_torch_mm, _original_torch_bmm = original_mm, original_bmm
-    if broken["mm"]:
-        wrapped_mm = _wrap_mm_out_dtype(original_mm)
-        _register_jit_builtin_alias(original_mm, wrapped_mm)
-        torch.mm = wrapped_mm
-    if broken["bmm"]:
-        wrapped_bmm = _wrap_mm_out_dtype(original_bmm)
-        _register_jit_builtin_alias(original_bmm, wrapped_bmm)
-        torch.bmm = wrapped_bmm
+
+    wrapped_mm = _wrap_mm_out_dtype(original_mm, "mm")
+    _register_jit_builtin_alias(original_mm, wrapped_mm)
+    torch.mm = wrapped_mm
+    wrapped_bmm = _wrap_mm_out_dtype(original_bmm, "bmm")
+    _register_jit_builtin_alias(original_bmm, wrapped_bmm)
+    torch.bmm = wrapped_bmm
     logger.info(
-        "MUSA out_dtype backport installed for %s",
-        ", ".join(f"torch.{name}" for name in ("mm", "bmm") if broken[name]),
+        "MUSA out_dtype backport armed for %s (probe deferred to the first out_dtype call)",
+        ", ".join(f"torch.{name}" for name in ("mm", "bmm")),
     )
 
 

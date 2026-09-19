@@ -2,10 +2,12 @@
 
 torch_musa accepts ``out_dtype`` on both ops but its implementation never
 writes the result (all zeros for ``mm``, non-zero garbage for ``bmm``), while
-the plain overloads and the argument validation are correct.  torchada
-installs a wrapper on the affected stack only; the wrapper tests below need no
-GPU (a recording op stands in for the vendor entry point), the contract tests
-need MUSA hardware.
+the plain overloads and the argument validation are correct.  torchada arms a
+wrapper on the affected stack only, and the defect probe that decides whether
+the vendor overload is broken runs on the first call that actually passes
+``out_dtype`` - probing touches the device and was measured to perturb an
+unrelated serving process.  The wrapper tests below need no GPU (a recording op
+stands in for the vendor entry point), the contract tests need MUSA hardware.
 """
 
 import pytest
@@ -50,47 +52,89 @@ class TestMMOutDtypeGating:
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
         monkeypatch.setattr(_patch, "_original_torch_mm", None)
         monkeypatch.setattr(_patch, "_original_torch_bmm", None)
+        monkeypatch.setattr(_patch, "_mm_out_dtype_probe_cache", None)
         monkeypatch.setattr(torch, "musa", SimpleNamespace(__version__=version), raising=False)
         monkeypatch.setattr(_patch, "_probe_out_dtype_broken_ops", lambda: dict(broken))
 
-    def test_healthy_probe_leaves_torch_untouched(self, monkeypatch):
-        """A healthy vendor op must not be wrapped (no-op patch, no GPU needed)."""
-        original_mm, original_bmm = torch.mm, torch.bmm
+    def test_arming_does_not_touch_the_device(self, monkeypatch):
+        """The probe must not run while the patch is applied: it perturbs serving.
+
+        Probing means running ``mm``/``bmm`` on the device, which initialises the
+        vendor libraries ahead of the host process' own warm-up and changed the
+        KV cache budget and decode TPOT of an unrelated vLLM server.
+        """
+        probes = []
+        self._install_patch(monkeypatch, {"mm": True, "bmm": True})
+        monkeypatch.setattr(
+            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+        )
+
+        _patch._patch_mm_out_dtype()
+
+        assert probes == []
+        assert _patch._mm_out_dtype_probe_cache is None
+
+    def test_healthy_vendor_op_is_delegated_to(self, monkeypatch):
+        """A healthy vendor op must not be reimplemented (no GPU needed)."""
+        calls = []
+        vendor_mm = _recording_op(calls, result="vendor")
+        monkeypatch.setattr(torch, "mm", vendor_mm)
         self._install_patch(monkeypatch, {"mm": False, "bmm": False})
 
         _patch._patch_mm_out_dtype()
+        result = torch.mm(torch.randn(2, 3, dtype=torch.bfloat16), torch.randn(3, 2, dtype=torch.bfloat16), out_dtype=torch.float32)
 
-        assert torch.mm is original_mm
-        assert torch.bmm is original_bmm
-        assert _patch._original_torch_mm is None
-        assert _patch._original_torch_bmm is None
+        assert result == "vendor"
+        assert len(calls) == 1 and calls[0][3] == {"out_dtype": torch.float32}
 
-    def test_only_the_broken_op_is_wrapped(self, monkeypatch):
-        """Each op is decided on its own probe verdict."""
-        healthy_mm = _recording_op([])
-        healthy_bmm = _recording_op([])
-        monkeypatch.setattr(torch, "mm", healthy_mm)
-        monkeypatch.setattr(torch, "bmm", healthy_bmm)
+    def test_plain_calls_never_probe(self, monkeypatch):
+        """Only a call that asks for ``out_dtype`` may trigger the probe."""
+        probes = []
+        calls = []
+        monkeypatch.setattr(torch, "mm", _recording_op(calls, result="vendor"))
+        self._install_patch(monkeypatch, {"mm": True, "bmm": True})
+        monkeypatch.setattr(
+            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+        )
+
+        _patch._patch_mm_out_dtype()
+        a = torch.randn(2, 3, dtype=torch.bfloat16)
+        b = torch.randn(3, 2, dtype=torch.bfloat16)
+        torch.mm(a, b)
+        torch.mm(a, b, out=torch.empty(2, 2, dtype=torch.bfloat16))
+
+        assert probes == []
+        assert len(calls) == 2
+
+    def test_probe_runs_once_and_is_cached(self, monkeypatch):
+        probes = []
+        monkeypatch.setattr(torch, "mm", _recording_op([], result="vendor"))
+        self._install_patch(monkeypatch, {"mm": True, "bmm": True})
+        monkeypatch.setattr(
+            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+        )
+
+        _patch._patch_mm_out_dtype()
+        a = torch.randn(2, 3, dtype=torch.bfloat16)
+        b = torch.randn(3, 2, dtype=torch.bfloat16)
+        for _ in range(3):
+            torch.mm(a, b, out_dtype=torch.float32)
+
+        assert len(probes) == 1
+
+    def test_healthy_bmm_probe_is_resolved_on_its_own_op(self, monkeypatch):
+        """A broken ``mm`` must not make a healthy ``bmm`` take the backport."""
+        calls = []
+        monkeypatch.setattr(torch, "bmm", _recording_op(calls, result="vendor"))
         self._install_patch(monkeypatch, {"mm": True, "bmm": False})
 
         _patch._patch_mm_out_dtype()
+        a = torch.randn(1, 2, 3, dtype=torch.bfloat16)
+        b = torch.randn(1, 3, 2, dtype=torch.bfloat16)
+        result = torch.bmm(a, b, out_dtype=torch.float32)
 
-        assert torch.mm is not healthy_mm
-        assert torch.bmm is healthy_bmm
-        assert _patch._original_torch_mm is healthy_mm
-
-    def test_healthy_bmm_is_not_wrapped_when_mm_is_broken(self, monkeypatch):
-        healthy_mm = _recording_op([])
-        healthy_bmm = _recording_op([])
-        monkeypatch.setattr(torch, "mm", healthy_mm)
-        monkeypatch.setattr(torch, "bmm", healthy_bmm)
-        self._install_patch(monkeypatch, {"mm": False, "bmm": True})
-
-        _patch._patch_mm_out_dtype()
-
-        assert torch.mm is healthy_mm
-        assert torch.bmm is not healthy_bmm
-        assert _patch._original_torch_bmm is healthy_bmm
+        assert result == "vendor"
+        assert len(calls) == 1
 
     def test_unknown_torch_musa_version_keeps_the_patch_enabled(self, monkeypatch):
         """An unparsable torch_musa version must not disable the backport."""
@@ -115,9 +159,14 @@ class TestMMOutDtypeGating:
 class TestMMOutDtypeWrapper:
     """Wrapper semantics on CPU: a recording op stands in for the MUSA op."""
 
+    @pytest.fixture(autouse=True)
+    def _broken_probe(self, monkeypatch):
+        """Wrapper tests exercise the broken stack, i.e. the backport path."""
+        monkeypatch.setattr(_patch, "_mm_out_dtype_probe_cache", {"mm": True, "bmm": True})
+
     @staticmethod
-    def _wrap(calls, result=None):
-        return _patch._wrap_mm_out_dtype(_recording_op(calls, result))
+    def _wrap(calls, result=None, op_name="mm"):
+        return _patch._wrap_mm_out_dtype(_recording_op(calls, result), op_name)
 
     def test_plain_call_is_forwarded_unchanged(self):
         calls = []
@@ -370,17 +419,31 @@ class TestMMOutDtypeContract:
 
         assert torch.equal(torch.mm(a, b, out_dtype=torch.float32), torch.mm(a, b))
 
-    @pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16])
-    def test_illegal_out_dtype_still_raises(self, out_dtype):
+    @pytest.mark.parametrize(
+        "in_dtype,out_dtype",
+        [
+            (torch.bfloat16, torch.float16),
+            (torch.float32, torch.float16),
+            (torch.float32, torch.bfloat16),
+        ],
+    )
+    def test_illegal_out_dtype_still_raises(self, in_dtype, out_dtype):
         _require_musa()
-        a, b = self._pair((7, 256), torch.bfloat16)
+        a, b = self._pair((7, 256), in_dtype)
 
         with pytest.raises(RuntimeError, match="out_dtype must be the same as input dtype"):
             torch.mm(a, b, out_dtype=out_dtype)
 
+        # bmm validates one stage later than mm on MUSA (the rejection comes from
+        # the kernel rather than from the binding), so assert only that the patch
+        # keeps the vendor's own error instead of substituting one.
         a, b = a.unsqueeze(0), b.unsqueeze(0)
-        with pytest.raises(RuntimeError, match="out_dtype must be the same as input dtype"):
+        vendor_bmm = _patch._original_torch_bmm or torch.bmm
+        with pytest.raises(RuntimeError) as vendor_error:
+            vendor_bmm(a, b, out_dtype=out_dtype)
+        with pytest.raises(RuntimeError) as patched_error:
             torch.bmm(a, b, out_dtype=out_dtype)
+        assert str(patched_error.value) == str(vendor_error.value)
 
     def test_fp16_out_dtype_on_fp32_inputs_still_raises(self):
         _require_musa()
@@ -389,18 +452,25 @@ class TestMMOutDtypeContract:
         with pytest.raises(RuntimeError, match="out_dtype must be the same as input dtype"):
             torch.mm(a, b, out_dtype=torch.float16)
 
-    def test_patch_state_matches_the_probe_verdict(self):
-        """The installed wrapper and the probe verdict must agree."""
+    def test_backport_is_armed_and_the_probe_resolves_lazily(self):
+        """A qualifying stack is armed at import; the verdict comes on first use."""
         _require_musa()
-        broken = _patch._probe_out_dtype_broken_ops()
+        gated = _patch._torch_musa_may_break_mm_out_dtype(torch.musa.__version__)
 
-        assert broken.keys() == {"mm", "bmm"}
-        after_patch = getattr(torch.mm, "__wrapped__", None) is not None
-        if not _patch._torch_musa_may_break_mm_out_dtype(torch.musa.__version__):
-            assert not after_patch
+        assert (getattr(torch.mm, "__wrapped__", None) is not None) == gated
+        if not gated:
+            return
+
+        a = torch.randn(2, 3, dtype=torch.bfloat16, device="musa")
+        b = torch.randn(3, 2, dtype=torch.bfloat16, device="musa")
+        result = torch.mm(a, b, out_dtype=torch.float32)
+
+        assert set(_patch._mm_out_dtype_probe_cache) == {"mm", "bmm"}, "the first call resolves the verdict"
+        if _patch._mm_out_dtype_probe_cache["mm"]:
+            reference = a.to(torch.float32) @ b.to(torch.float32)
+            assert torch.allclose(result.cpu(), reference.cpu(), atol=ATOL, rtol=RTOL)
         else:
-            assert after_patch == broken["mm"]
-            assert (getattr(torch.bmm, "__wrapped__", None) is not None) == broken["bmm"]
+            assert result.dtype == torch.float32
 
     def test_probe_verdict_matches_a_direct_measurement(self):
         """A reported-broken op must really be broken, and vice versa."""
