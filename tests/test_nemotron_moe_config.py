@@ -144,11 +144,7 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
     )
     config = json.loads(path.read_text())
 
-    assert set(config) == {"1", "4", "6", "8", "16"}
-    assert config["1"] == config["4"] == config["6"]
-    assert config["8"]["BLOCK_SIZE_M"] == 64
-    assert config["8"]["BLOCK_SIZE_N"] == 128
-    assert config["8"]["BLOCK_SIZE_K"] == 32
+    assert set(config) == {"16", "49", "80", "113", "144", "511", "512", "513"}
     assert config["16"] == {
         "BLOCK_SIZE_M": 32,
         "BLOCK_SIZE_N": 64,
@@ -158,6 +154,59 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
         "num_warps": 8,
         "num_stages": 2,
     }
+    assert config["49"] == {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 4,
+    }
+    assert config["113"] == {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+    assert config["512"] == config["16"]
+    assert config["513"]["BLOCK_SIZE_M"] == 128
+
+
+def test_s5000_nemotron_config_routes_runtime_m_buckets(monkeypatch):
+    from torchada.triton.runtime.fused_moe import config as moe_config
+
+    measured = {
+        16: {"BLOCK_SIZE_M": 16},
+        49: {"BLOCK_SIZE_M": 49},
+        80: {"BLOCK_SIZE_M": 80},
+        113: {"BLOCK_SIZE_M": 113},
+        144: {"BLOCK_SIZE_M": 144},
+        511: {"BLOCK_SIZE_M": 511},
+        512: {"BLOCK_SIZE_M": 512},
+        513: {"BLOCK_SIZE_M": 513},
+    }
+    fallback = {"BLOCK_SIZE_M": 999}
+    monkeypatch.setattr(moe_config, "get_config", lambda: None)
+    monkeypatch.setattr(moe_config, "get_moe_configs", lambda *args, **kwargs: measured)
+    monkeypatch.setattr(moe_config, "get_default_config", lambda *args, **kwargs: fallback)
+
+    def resolve(M):
+        return moe_config.try_get_optimal_moe_config(
+            (128, 2688, 1856),
+            (128, 2688, 1856),
+            6,
+            "bf16",
+            M,
+        )
+
+    assert resolve(115) == measured[113]
+    assert resolve(120) == measured[113]
+    assert resolve(512) == measured[512]
+    assert resolve(514) == fallback
 
 
 def test_config_map_falls_back_for_unmeasured_large_m(monkeypatch):
