@@ -26,6 +26,7 @@ import inspect
 import logging
 import os
 import sys
+import threading
 import time
 import warnings
 from types import ModuleType, SimpleNamespace
@@ -41,6 +42,8 @@ logger = logging.getLogger(__name__)
 _patched = False
 _original_init_process_group = None
 _original_tensor_log_ = None
+_original_torch_mm = None
+_original_torch_bmm = None
 
 # Registry for patch functions
 _patch_registry: List[Callable[[], None]] = []
@@ -181,6 +184,241 @@ def _patch_tensor_log_():
         return _original_tensor_log_(self)
 
     torch.Tensor.log_ = patched_log_
+
+
+# ---------------------------------------------------------------------------
+# MUSA out_dtype backport for torch.mm / torch.bmm
+# ---------------------------------------------------------------------------
+#
+# torch_musa registers the ``aten::mm.dtype`` / ``aten::bmm.dtype`` overloads,
+# but their MUSA implementations do not write their result: the returned tensor
+# is correctly shaped and typed and holds all zeros (``mm``) or garbage
+# (``bmm``), while the plain overloads and the argument validation are correct.
+# The backport therefore reuses the plain overloads, which makes it free of any
+# vendor-kernel assumption, and it is only installed while the probe below
+# observes the defect, so it removes itself once the vendor fixes the ops.
+#
+# The lower bound is the first torch_musa release line whose MUSA codegen ships
+# that ``*_Dtype`` overload family. There is deliberately no upper bound: no
+# vendor release is known to fix the compute path, so the probe - not a version
+# constant - decides when the backport stops applying. Unknown or unparsable
+# versions keep the probe enabled, matching ``_is_pre_torch_musa_2_11_0_post2``.
+_TORCH_MUSA_MM_OUT_DTYPE_MIN_VERSION = "2.11.0"
+
+_MM_OUT_DTYPE_PROBE_LOCK = threading.Lock()
+_mm_out_dtype_probe_cache: Optional[dict] = None
+
+
+def _torch_musa_may_break_mm_out_dtype(version) -> bool:
+    """Return whether this torch_musa may need the ``out_dtype`` backport.
+
+    See ``_TORCH_MUSA_MM_OUT_DTYPE_MIN_VERSION``: the predicate is a lower
+    bound only, and the runtime probe is what decides whether the wrappers are
+    actually installed.
+    """
+    if version is None:
+        return True
+
+    public_version = str(version).split("+", 1)[0]
+    try:
+        # Use PyTorch's vendored PEP 440 parser so post releases compare
+        # semantically (post10 > post2) without adding a torchada dependency.
+        from torch._vendor.packaging.version import InvalidVersion, Version
+    except ImportError:
+        # If the parser is unavailable, keep the workaround enabled: disabling
+        # it could re-expose the failure this gate fixes.
+        logger.warning(
+            "Unable to parse torch_musa version %r; retaining compatibility patches",
+            version,
+        )
+        return True
+    try:
+        return Version(public_version) >= Version(_TORCH_MUSA_MM_OUT_DTYPE_MIN_VERSION)
+    except InvalidVersion:
+        # An unknown or malformed version must keep the workaround enabled.
+        logger.warning(
+            "Unable to parse torch_musa version %r; retaining compatibility patches",
+            version,
+        )
+        return True
+
+
+def _probe_op_out_dtype_broken(op: Callable, batched: bool) -> bool:
+    """Return whether ``op`` writes a wrong result for ``out_dtype=float32``.
+
+    Exact-integer operands make the expected matrix exactly representable, so a
+    conforming implementation (fp32 accumulation of the input-dtype values)
+    reproduces the plain overload bitwise whatever the summation order, and no
+    tolerance can hide a broken result. Device, kwarg or dtype support issues
+    are not defects: they report the op as healthy, i.e. as "nothing to patch".
+    """
+    try:
+        a = torch.arange(1, 33, dtype=torch.float32, device="musa").reshape(4, 8)
+        b = torch.arange(1, 41, dtype=torch.float32, device="musa").reshape(8, 5)
+        if batched:
+            a, b = a.unsqueeze(0), b.unsqueeze(0)
+        reference = op(a, b)
+        for dtype in (torch.float32, torch.bfloat16):
+            requested = op(a.to(dtype), b.to(dtype), out_dtype=torch.float32)
+            if not torch.equal(requested, reference):
+                return True
+        return False
+    except Exception as exc:
+        # A raising probe means "nothing to patch": no MUSA device, or a
+        # torch_musa build without the overload. Never a defect on its own.
+        logger.debug("MUSA out_dtype probe skipped: %s: %s", type(exc).__name__, exc)
+        return False
+
+
+def _probe_out_dtype_broken_ops() -> dict:
+    """Return ``{"mm": bool, "bmm": bool}``: which dtype overload is broken.
+
+    One-off, cached and thread-safe: the probe runs at most once per process
+    and never raises.
+    """
+    global _mm_out_dtype_probe_cache
+
+    cached = _mm_out_dtype_probe_cache
+    if cached is not None:
+        return cached
+
+    with _MM_OUT_DTYPE_PROBE_LOCK:
+        if _mm_out_dtype_probe_cache is None:
+            _mm_out_dtype_probe_cache = {
+                "mm": _probe_op_out_dtype_broken(
+                    _original_torch_mm if _original_torch_mm is not None else torch.mm,
+                    batched=False,
+                ),
+                "bmm": _probe_op_out_dtype_broken(
+                    _original_torch_bmm if _original_torch_bmm is not None else torch.bmm,
+                    batched=True,
+                ),
+            }
+        return _mm_out_dtype_probe_cache
+
+
+def _call_musa_op(op: Callable, input, mat2, args, out, out_dtype, kwargs) -> Any:
+    """Call the vendor op, forwarding only what the caller actually passed."""
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    if out is not None:
+        kwargs["out"] = out
+    return op(input, mat2, *args, **kwargs)
+
+
+def _wrap_mm_out_dtype(original: Callable, op_name: str) -> Callable:
+    """Wrap ``torch.mm`` / ``torch.bmm`` so ``out_dtype`` matches CUDA.
+
+    Both the keyword and the documented positional form of ``out_dtype`` are
+    backported. Only the two dtype pairs this API accepts are reimplemented,
+    and everything else - the plain call, over-long argument lists, non-tensor
+    operands, mismatched input dtypes and invalid dtype pairs - goes to the
+    vendor entry point so its argument validation and error messages stay
+    authoritative:
+
+    * ``out_dtype`` equal to the input dtype is the plain op, i.e. the MUSA
+      non-dtype overload, which is bitwise correct;
+    * ``out_dtype=torch.float32`` with fp16/bf16 inputs promotes the operands
+      and multiplies in fp32, so the result is an fp32 *accumulation* of the
+      input-dtype values rather than a compute-in-input-dtype-then-cast;
+    * any other pair stays with the vendor op, which already rejects it with
+      the documented ``RuntimeError``.
+
+    ``op_name`` is the probe key (``"mm"`` or ``"bmm"``). The probe is resolved
+    on the first call that actually passes ``out_dtype`` and the verdict is
+    cached: a healthy vendor overload is delegated to forever and the wrapper
+    never comes back into play.
+    """
+    checked = False
+    broken = False
+
+    def vendor_honours_out_dtype() -> bool:
+        nonlocal checked, broken
+        if not checked:
+            checked = True
+            broken = bool(_probe_out_dtype_broken_ops()[op_name])
+            if not broken:
+                logger.info(
+                    "MUSA %s honours out_dtype: vendor implementation kept",
+                    f"torch.{op_name}",
+                )
+        return not broken
+
+    @functools.wraps(original)
+    def wrapped(input, mat2, *args, out=None, out_dtype=None, **kwargs):
+        if args:
+            # ``mm(input, mat2, out_dtype, *, out=None)`` is the documented
+            # positional form of the same keyword. Anything else stays with the
+            # vendor binding, which raises its own TypeError.
+            if len(args) > 1 or out_dtype is not None:
+                return _call_musa_op(original, input, mat2, args, out, out_dtype, kwargs)
+            out_dtype, args = args[0], ()
+
+        if (
+            out_dtype is None
+            or not isinstance(input, torch.Tensor)
+            or not isinstance(mat2, torch.Tensor)
+            or input.dtype != mat2.dtype
+            or vendor_honours_out_dtype()
+        ):
+            return _call_musa_op(original, input, mat2, args, out, out_dtype, kwargs)
+
+        if out_dtype == input.dtype:
+            result = original(input, mat2)
+        elif out_dtype == torch.float32 and input.dtype in (torch.float16, torch.bfloat16):
+            result = original(input.to(torch.float32), mat2.to(torch.float32))
+        else:
+            # Invalid dtype pair: keep the vendor's own argument validation.
+            return _call_musa_op(original, input, mat2, args, out, out_dtype, kwargs)
+
+        if out is None:
+            return result
+        if out.dtype != result.dtype:
+            return _call_musa_op(original, input, mat2, args, out, out_dtype, kwargs)
+        return out.copy_(result)
+
+    return wrapped
+
+
+@patch_function
+@requires_import("torch_musa")
+def _patch_mm_out_dtype():
+    """Backport CUDA ``out_dtype=`` semantics for MUSA ``torch.mm``/``torch.bmm``.
+
+    The wrappers are armed on every qualifying MUSA stack, but the defect probe
+    itself is deferred to the first call that actually passes ``out_dtype``.
+    Probing means running ``mm``/``bmm`` on the device, and that is observable
+    from the outside: it initialises the vendor libraries before the host
+    process gets to its own warm-up, which moves the memory-profiling peak of a
+    downstream vLLM server, changes the KV cache budget it derives from it
+    (746,446 vs 731,482 tokens on the Nemotron-3.5 MTP6 config) and shifted
+    measured decode TPOT by 7-9% even though every device kernel was identical.
+    Installing a compatibility backport must not perturb a process that never
+    asks for a promoted ``out_dtype``, so nothing touches the device until the
+    first promoted call needs the verdict. Plain calls, and calls whose dtype
+    pair is invalid or mismatched, still go straight to the vendor op.
+    """
+    global _original_torch_mm, _original_torch_bmm
+
+    if not is_musa_platform() or _original_torch_mm is not None:
+        return
+    musa_module = getattr(torch, "musa", None)
+    if not _torch_musa_may_break_mm_out_dtype(getattr(musa_module, "__version__", None)):
+        return
+
+    original_mm, original_bmm = torch.mm, torch.bmm
+    _original_torch_mm, _original_torch_bmm = original_mm, original_bmm
+
+    wrapped_mm = _wrap_mm_out_dtype(original_mm, "mm")
+    _register_jit_builtin_alias(original_mm, wrapped_mm)
+    torch.mm = wrapped_mm
+    wrapped_bmm = _wrap_mm_out_dtype(original_bmm, "bmm")
+    _register_jit_builtin_alias(original_bmm, wrapped_bmm)
+    torch.bmm = wrapped_bmm
+    logger.info(
+        "MUSA out_dtype backport armed for %s (probe deferred to the first out_dtype call)",
+        ", ".join(f"torch.{name}" for name in ("mm", "bmm")),
+    )
 
 
 # Cache for translated device strings - avoids repeated string operations
@@ -2198,6 +2436,8 @@ def apply_patches():
     - optional CUDA graph debug dumps via TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH
     - torch.cuda.nccl -> torch.musa.mccl
     - torch.amp.autocast(device_type='cuda') -> 'musa'
+    - torch.mm / torch.bmm out_dtype= backport while the MUSA dtype overload
+      does not write its result
     - torch.utils.cpp_extension (CUDAExtension, BuildExtension) -> MUSA versions
     - CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES environment fallback
     - torch._inductor.autotune_process.CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES
