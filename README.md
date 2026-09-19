@@ -67,6 +67,7 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
 | Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `Stream`, `Event`, ... |
 | MUSA float64 in-place log | On `torch_musa < 2.11.0.post2`, `Tensor.log_()` reuses the supported out-of-place operation while preserving the in-place contract |
+| MUSA mm/bmm `out_dtype` | While the torch_musa dtype overload discards its result, `torch.mm`/`torch.bmm` `out_dtype=` reuses the plain overloads and accumulates in fp32 |
 | Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
 | Triton Fused MoE | Triton 3.2.0 MTT S5000 tuning configs for vLLM and SGLang |
 
@@ -393,7 +394,7 @@ See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.87
+torchada>=0.1.89
 ```
 
 ### Step 2: Conditional Import
