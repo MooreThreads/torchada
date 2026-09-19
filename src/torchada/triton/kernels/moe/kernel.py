@@ -17,8 +17,8 @@ from torchada.triton.runtime.fp8_utils import scaled_fp8_quant
 try:
     from triton.tools.tensor_descriptor import TensorDescriptor
 
-    _support_tensor_descriptor = True
-except:
+    _support_tensor_descriptor = hasattr(tl, "make_tensor_descriptor")
+except (ImportError, AttributeError):
     _support_tensor_descriptor = False
 
 
