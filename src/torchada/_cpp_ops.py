@@ -95,10 +95,14 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
 
     import torch
 
-    from ._patch import _is_pre_torch_musa_2_11_0_post2
+    from ._version import version_of
 
     musa_module = getattr(torch, "musa", None)
-    if not _is_pre_torch_musa_2_11_0_post2(getattr(musa_module, "__version__", None)):
+    # Legacy shim (compiled only below 2.11.0.post2): those releases lack the
+    # ``multinomial`` / ``log`` / ``log_`` kernels these overrides provide. From
+    # that release on the native implementations are used, so the overrides are
+    # switched off through their env flags.
+    if version_of(musa_module) >= "2.11.0.post2":
         for op_name in ("multinomial", "log", "log_"):
             os.environ[f"TORCHADA_DISABLE_OP_OVERRIDE_{op_name}"] = "1"
 

@@ -3158,9 +3158,12 @@ class TestAcceleratorModuleWrapper:
         ),
     )
     def test_torch_musa_version_boundary(self, musa_version, expected):
-        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
+        from torchada._version import version_of
 
-        assert _is_pre_torch_musa_2_11_0_post2(musa_version) is expected
+        # Same table as before the version proxy landed: the legacy shims are
+        # installed below this release, and an unknown or unparsable version
+        # ranks below the bound, so the workaround stays on.
+        assert (version_of(musa_version) < "2.11.0.post2") is expected
 
     def _make_wrapper(
         self,
@@ -3403,11 +3406,12 @@ class TestTorchAcceleratorPatching:
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
-        from torchada._patch import _is_pre_torch_musa_2_11_0_post2
+        from torchada._version import version_of
 
-        # Must not raise on either side of the torch_musa post2 boundary.
+        # Must not raise on either side of 2.11.0.post2, where the accelerator
+        # shim is installed below it and skipped from it on.
         torch.accelerator.empty_cache()
-        if _is_pre_torch_musa_2_11_0_post2(getattr(torch.musa, "__version__", None)):
+        if version_of(torch.musa) < "2.11.0.post2":
             assert torch.accelerator.empty_cache.__module__.startswith("torch_musa")
         else:
             assert torch.accelerator.empty_cache is torch.accelerator._original_accel.empty_cache
