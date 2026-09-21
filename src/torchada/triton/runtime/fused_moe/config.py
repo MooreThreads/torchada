@@ -243,9 +243,15 @@ def try_get_optimal_moe_config(
         )
 
         if configs:
-            # If an optimal configuration map has been found, look up the
-            # optimal config
-            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+            # Do not reuse a decode-sized bucket for larger prefill or
+            # high-concurrency shapes. Until those shapes have a measured
+            # entry, use the generic heuristic configuration.
+            if M > max(configs):
+                config = get_default_config(
+                    M, E, N, w1_shape[2], top_k, dtype, is_marlin, block_shape
+                )
+            else:
+                config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, is_marlin, block_shape)
@@ -259,7 +265,7 @@ def try_get_optimal_moe_config(
                 per_channel_quant=per_channel_quant,
                 down_moe=True,
             )
-            if down_configs:
+            if down_configs and M <= max(down_configs):
                 down_config = down_configs[min(down_configs.keys(), key=lambda x: abs(x - M))]
                 down_config = dict(**down_config)
                 max_block_m = max([cfg["BLOCK_SIZE_M"] for cfg in down_configs.values()])

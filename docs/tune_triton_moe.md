@@ -50,6 +50,8 @@ python src/torchada/triton/autotune/fused_moe/tune_moe.py \
 | `--config` | `str` | `models.json` | Path to JSON config file listing models (used if `--model` not given). |
 | `--model` | `str` | `None` | Single HuggingFace model path (overrides `--config`). |
 | `--tune` | flag | `False` | Run tuning mode (search for best configs). Without this flag, runs benchmarking. |
+| `--materialize` | flag | `False` | Write the recipe's `pinned_rows` into their tables and exit (no GPU work); use it for rows an end-to-end measurement decided. |
+| `--merge-configs` | flag | `False` | Merge the tuned buckets into the existing config file instead of replacing it, so a re-derived bucket keeps the other rows of a curated table. |
 | `--batch-size` | `str` | *all defaults* | Batch size(s). Can specify multiple times or comma-separated, e.g. `--batch-size 1,2,4 --batch-size 8`. If omitted, uses a full default list. |
 | `--tp-size` / `--tp` | `int` | `2` | Tensor parallelism (TP) size. |
 | `--ep-size` / `--ep` | `int` | `1` | Expert parallelism (EP) size. |
@@ -88,14 +90,45 @@ The config file is a JSON array where each entry describes a model configuration
 
 | Field | Required | Description |
 |---|---|---|
-| `model` | ✅ | HuggingFace model name/path. |
+| `model` | ✅ (or a shape) | HuggingFace model name/path. |
 | `tp_size` | ❌ (default: `--tp` arg) | TP size(s). Can be a single int or a list. |
 | `ep_size` | ❌ (default: `--ep` arg) | EP size(s). Can be a single int or a list. |
 | `dtype` | ❌ (default: `--dtype` arg) | Quantization dtype. |
 | `per_channel_quant` | ❌ | Per-channel quantization flag. |
 | `disable_shared_experts_fusion` | ❌ | Disable shared expert fusion. |
+| `batch_sizes` | ❌ (default: `--batch-size` arg) | Buckets to tune for this entry only. Pins the bucket set a shipped table was tuned with. |
+| `pinned_rows` | ❌ | `{bucket: {"config": {...}, "source": "..."}}` — rows chosen outside the grid, written verbatim by `--materialize`. `source` is required and records the measurement behind the row. |
 
 > When `tp_size` and `ep_size` are both lists, they are zipped pairwise. If one list is shorter, it is broadcast to match the longer one.
+
+**Shape entries (no model checkout):** an entry without `model` describes the kernel shape directly,
+using the numbers a model config would resolve to. This is what makes a shipped table re-derivable
+from the recipe alone — no model directory, no hub access:
+
+```json
+[
+    {
+        "name": "s5000_nemotron35_a3b_tiny_m",
+        "num_experts": 128,
+        "hidden_size": 2688,
+        "shard_intermediate_size": 1856,
+        "topk": 6,
+        "is_gated": false,
+        "activation": "relu2_no_mul",
+        "dtype": "bf16",
+        "tp_size": 1,
+        "ep_size": 1,
+        "batch_sizes": [16]
+    }
+]
+```
+
+| Shape field | Required | Description |
+|---|---|---|
+| `num_experts`, `hidden_size`, `shard_intermediate_size`, `topk` | ✅ | The kernel shape. `shard_intermediate_size` is the w1 output width: doubled for gated projections, the plain intermediate size otherwise. |
+| `is_gated` | ❌ (default: `true`) | `false` for single-projection MoEs such as Nemotron-H (`relu2`). |
+| `activation` | ❌ (default: `silu`) | Matches the model's MoE activation. |
+| `name` | ❌ | Label used in logs and benchmark output. |
 
 ---
 
@@ -274,6 +307,47 @@ python src/torchada/triton/autotune/fused_moe/tune_moe.py \
     --batch-size 1 --batch-size 8 --batch-size 32 --batch-size 64 \
     --tune
 ```
+
+### Reproducing a shipped configuration
+
+A shipped row has to be *derivable*, not typed in. `ci/shapes.json` holds the recipes for the
+tables that were re-derived this way; the checked-in example is the Nemotron-3.5-Lightning-30B-A3B
+tiny-M bucket on MTT_S5000. A recipe marks each bucket with the path that actually decided it:
+
+**Measured rows** (`pinned_rows`) — a bucket whose winner came from an end-to-end measurement,
+where the uniform-routing sweep is not representative. The recipe records the configuration *and*
+the measurement it came from, and materializes it:
+
+```bash
+# Deterministic, no GPU: writes the pinned rows and keeps the rest of the table.
+python src/torchada/triton/autotune/fused_moe/tune_moe.py \
+    --config src/torchada/triton/autotune/fused_moe/ci/shapes.json \
+    --materialize --merge-configs
+
+# The result is the shipped table, byte for byte.
+python -m pytest tests/test_tune_moe_recipe.py
+```
+
+The tool writes the indented JSON style the other tables use; this table is hand-formatted
+(one row per line), so refreshing it in place reformats the file without changing its content.
+
+**Swept rows** — a bucket the search grid can answer. Pin its bucket set in the recipe, then tune
+into a scratch directory first; `--merge-configs` keeps the rows a run did not measure:
+
+```bash
+SGLANG_MOE_CONFIG_DIR=/tmp/retune python src/torchada/triton/autotune/fused_moe/tune_moe.py \
+    --config src/torchada/triton/autotune/fused_moe/ci/shapes.json --tune
+diff /tmp/retune/configs/triton_3_2_0/E=128,N=1856,device_name=MTT_S5000.json \
+     src/torchada/triton/autotune/fused_moe/configs/triton_3_2_0/E=128,N=1856,device_name=MTT_S5000.json
+```
+
+Why the Nemotron bucket is pinned rather than swept: for `M = 16` the sweep ranks
+BM64/BN128/BK64/GSM1/w8/s1, and it does not even agree with itself between two runs of the same
+grid; the end-to-end measurement on the serving path prefers BM16/BN64/BK128/GSM1/w4/s1 — 5.5659 ms
+against 6.6207 ms TPOT over 5 repeats at 4096-in/1000-out. The bucket also has to stay the only one
+listed: the other seven rows of that table carry `num_stages` 2-4 from an earlier sweep, so a
+full-table re-run would replace measured rows with unmeasured ones. A candidate the kernel cannot
+launch is logged and skipped instead of aborting the sweep.
 
 ### FP8 Tuning
 
