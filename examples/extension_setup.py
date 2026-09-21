@@ -69,7 +69,7 @@ if __name__ == "__main__":
     if extensions:
         setup(
             name="my_cuda_extension",
-            version="0.1.0",
+            version="0.1.89",
             ext_modules=extensions,
             cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
             python_requires=">=3.8",

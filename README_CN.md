@@ -67,8 +67,17 @@ torch.cuda.synchronize()
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
 | 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`Stream`、`Event` 等 |
 | MUSA float64 原地对数 | `torch_musa < 2.11.0.post2` 时，`Tensor.log_()` 复用受支持的非原地操作，同时保持原地操作契约 |
+| MUSA mm/bmm `out_dtype` | 在 `torch_musa 2.13.0` 以下，`torch.mm`/`torch.bmm` 的 `out_dtype=` 复用普通重载并以 fp32 累加，同时运行期探针报告该重载损坏。实测损坏于 `2.11.0.post1+musa5.2.0`（`mm` 全零、`bmm` 错值）；**torch_musa 承诺在 `2.13.0` 修复，我们尚未验证** —— 包装层在该版本以下武装、自该版本起不安装，正确性由探针按进程裁决 |
 | Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
 | Triton 融合 MoE | 面向 vLLM 和 SGLang 的 Triton 3.2.0 MTT S5000 调优配置 |
+
+**未覆盖**：binding 本身不含 `*_Dtype` 重载的构建，`out_dtype=` 仍会报错。那是 binding 的契约、不是 torchada 要修的缺陷，
+为该情形做 CUDA 等价支持不在范围内。
+
+`out_dtype` 兼容层在 **`torch_musa 2.13.0` 以下**武装（该版本是 torch_musa 承诺修复重载的发布）。那是 vendor 的发布承诺、不是我们的实测，
+信任它就是已接受的风险：若 `2.13.0` 实际没修好，`>= 2.13.0` 的栈不安装包装层，静默全零会重新出现。门控只决定是否在 `torch.mm`/`torch.bmm`
+前加一层 Python 包装；正确性由运行期探针按进程裁决（健康则直接转发、损坏才仿真），因此若修复被 backport 到 `2.12.x` 会自动生效。
+`__version__` 无法解析时 rank 最低 ⇒ 仍然武装。待 `2.13.0` 发布并在此**验证修好**后删除该 shim；若承诺延期，则把上界抬到新的承诺版本。
 
 ## 示例
 
@@ -377,7 +386,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.88
+torchada>=0.1.89
 ```
 
 ### 步骤 2：条件导入

@@ -67,8 +67,22 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
 | Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `Stream`, `Event`, ... |
 | MUSA float64 in-place log | On `torch_musa < 2.11.0.post2`, `Tensor.log_()` reuses the supported out-of-place operation while preserving the in-place contract |
+| MUSA mm/bmm `out_dtype` | Below `torch_musa 2.13.0`, `torch.mm`/`torch.bmm` `out_dtype=` reuses the plain overloads and accumulates in fp32 while a runtime probe reports the overload broken. Measured broken on `2.11.0.post1+musa5.2.0` (`mm` writes zeros, `bmm` writes wrong values); **torch_musa committed to fix this in `2.13.0`, which we have not verified** — the wrappers are armed below that release, nothing is installed from it on, and the probe decides correctness per process |
 | Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
 | Triton Fused MoE | Triton 3.2.0 MTT S5000 tuning configs for vLLM and SGLang |
+
+**Not covered:** builds whose binding has no `*_Dtype` overload keep raising on `out_dtype=`. That is
+the binding's contract, not a defect torchada repairs, so CUDA parity for that case is out of scope.
+
+The `out_dtype` backport is armed **below `torch_musa 2.13.0`**, the release torch_musa committed to
+fix the overloads in. That is a vendor release commitment, not a measurement of ours, and trusting it
+is the accepted risk: if `2.13.0` does not actually fix them, a `>= 2.13.0` stack installs no wrapper
+and the silent all-zero result can come back. The gate only decides whether a Python wrapper sits in
+front of `torch.mm`/`torch.bmm`; correctness is decided per process by the runtime probe, which
+forwards to a healthy overload and emulates a broken one - so a fix backported into `2.12.x` is picked
+up automatically. An unknown or unparsable `__version__` ranks lowest and therefore stays armed. Once
+`2.13.0` is released and verified fixed here, the shim is deleted; if the fix slips, the bound moves to
+the newly committed release.
 
 ## Examples
 
@@ -393,7 +407,7 @@ See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.88
+torchada>=0.1.89
 ```
 
 ### Step 2: Conditional Import
