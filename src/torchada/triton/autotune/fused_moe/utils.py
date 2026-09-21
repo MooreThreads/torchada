@@ -353,6 +353,25 @@ def save_configs(
         f.write("\n")
 
 
+def merge_configs(
+    configs: Dict[int, BenchmarkConfig],
+    filename: str,
+) -> Dict[int, BenchmarkConfig]:
+    """Overlay freshly tuned buckets on the rows already stored in ``filename``.
+
+    A tuning run only measures the batch sizes it was asked for, while a table is a curated
+    map: replacing the file outright drops every other bucket back to the generic default.
+    Returns the merged map for the caller to save; an absent file merges into nothing.
+    """
+    if not os.path.exists(filename):
+        return {bs: configs[bs] for bs in sorted(configs)}
+    with open(filename) as f:
+        existing = json.load(f)
+    merged: Dict[int, BenchmarkConfig] = {int(k): v for k, v in existing.items()}
+    merged.update(configs)
+    return {bs: merged[bs] for bs in sorted(merged)}
+
+
 def get_config_filename(
     num_experts: int,
     shard_intermediate_size: int,

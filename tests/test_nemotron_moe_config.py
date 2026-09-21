@@ -145,14 +145,19 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
     config = json.loads(path.read_text())
 
     assert set(config) == {"16", "49", "80", "113", "144", "511", "512", "513"}
+    # The tiny-M bucket is the MTP6 verify batch (M = 1/7/14/21/28 land here) and is
+    # latency-bound: one 16-row tile per touched expert, so the smallest tile and a single
+    # pipeline stage win. This row is the one bucket the tuning campaign did not re-derive
+    # (it was carried over from the previous five-key map), and the shipped stage grid
+    # (num_stages = 1 only) does contain it.
     assert config["16"] == {
-        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 64,
-        "GROUP_SIZE_M": 16,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
-        "num_warps": 8,
-        "num_stages": 2,
+        "num_warps": 4,
+        "num_stages": 1,
     }
     assert config["49"] == {
         "BLOCK_SIZE_M": 16,
@@ -172,7 +177,17 @@ def test_s5000_nemotron_config_adds_decode_mtp_bucket():
         "num_warps": 4,
         "num_stages": 3,
     }
-    assert config["512"] == config["16"]
+    # Key 512 is the prefill bucket. It used to share the tiny-M row; it keeps the measured
+    # large-M config, so the two buckets are now independent.
+    assert config["512"] == {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 16,
+        "SPLIT_K": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
     assert config["513"]["BLOCK_SIZE_M"] == 128
 
 
@@ -203,6 +218,9 @@ def test_s5000_nemotron_config_routes_runtime_m_buckets(monkeypatch):
             M,
         )
 
+    # The MTP6 verify decode shapes must land on the tiny-M bucket, not on key 49.
+    for decode_m in (1, 7, 14, 21, 28):
+        assert resolve(decode_m) == measured[16]
     assert resolve(115) == measured[113]
     assert resolve(120) == measured[113]
     assert resolve(512) == measured[512]

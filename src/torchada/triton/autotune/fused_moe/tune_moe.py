@@ -5,6 +5,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import queue
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import IntEnum
@@ -21,6 +22,7 @@ from torchada.triton.autotune.fused_moe.utils import (
     get_configs_compute_bound,
     get_default_batch_sizes,
     get_model_config,
+    merge_configs,
     save_configs,
     sort_config,
 )
@@ -125,6 +127,14 @@ class MoeRunnerConfig:
 
 
 @dataclass
+class PinnedRow:
+    """A configuration that was chosen outside the search grid, and where it came from."""
+
+    config: BenchmarkConfig
+    source: str
+
+
+@dataclass
 class ModelEntry:
     """Holds all information about a model configuration to be tuned/benchmarked."""
 
@@ -144,6 +154,14 @@ class ModelEntry:
     is_gated: bool = True
     dtype: torch.dtype = torch.float16
     block_shape: Optional[Tuple[int, int]] = None
+    # Batch sizes to tune/benchmark for this entry.  ``None`` falls back to the global list
+    # (``--batch-size``, or the default sweep), which is what a model entry normally wants;
+    # a recipe entry sets it to pin the exact bucket set a shipped table was tuned with.
+    batch_sizes: Optional[List[int]] = None
+    # Rows chosen outside the search grid (an end-to-end measurement, typically).  They are
+    # written as-is by ``--materialize`` and never tuned, so a table row that was not picked
+    # by the microbenchmark still comes from the recipe rather than from a text editor.
+    pinned_rows: Optional[Dict[int, "PinnedRow"]] = None
 
     @property
     def use_fp8(self) -> bool:
@@ -540,6 +558,111 @@ def benchmark_config(
     return avg_us
 
 
+def _recipe_batch_sizes(raw: Dict) -> Optional[List[int]]:
+    """Read the optional ``batch_sizes`` field of a recipe entry."""
+    value = raw.get("batch_sizes")
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"batch_sizes must be an int or a list of ints, got {value!r}")
+    sizes: List[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            raise ValueError(f"batch_sizes must be positive ints, got {item!r}")
+        sizes.append(int(item))
+    return sorted(set(sizes))
+
+
+# Fields a shape-only recipe entry has to state (everything else has a default).
+_SHAPE_KEYS = ("num_experts", "hidden_size", "shard_intermediate_size", "topk")
+
+# Keys every launch configuration carries, pinned or tuned.
+_CONFIG_KEYS = (
+    "BLOCK_SIZE_M",
+    "BLOCK_SIZE_N",
+    "BLOCK_SIZE_K",
+    "GROUP_SIZE_M",
+    "num_warps",
+    "num_stages",
+)
+
+
+def _recipe_pinned_rows(raw: Dict) -> Optional[Dict[int, PinnedRow]]:
+    """Read the optional ``pinned_rows`` field of a recipe entry.
+
+    A pinned row records a configuration that the search grid cannot produce - in practice one
+    that won an end-to-end measurement - together with the measurement it came from, so the
+    row is retraceable instead of being a hand-typed number in a table.
+    """
+    value = raw.get("pinned_rows")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"pinned_rows must be an object keyed by batch size, got {value!r}")
+
+    rows: Dict[int, PinnedRow] = {}
+    for bucket, spec in value.items():
+        label = f"pinned_rows[{bucket!r}]"
+        if not isinstance(spec, dict):
+            raise ValueError(f"{label} must be an object with 'config' and 'source'")
+        source = spec.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(f"{label} must record a non-empty 'source' for the chosen row")
+        config = spec.get("config")
+        if not isinstance(config, dict):
+            raise ValueError(f"{label}['config'] must be an object")
+        missing = [key for key in _CONFIG_KEYS if key not in config]
+        if missing:
+            raise ValueError(f"{label}['config'] is missing {missing}")
+        bad = [key for key in config if not isinstance(config[key], int)]
+        if bad:
+            raise ValueError(f"{label}['config'] must hold ints, got {bad}")
+        rows[int(bucket)] = PinnedRow(config=dict(config), source=source.strip())
+    return rows or None
+
+
+
+
+def _entry_from_shape(
+    raw: Dict, args: argparse.Namespace, batch_sizes: Optional[List[int]]
+) -> ModelEntry:
+    """Build an entry from explicit shape fields, without loading a model config.
+
+    A recipe entry may describe the kernel shape directly, using the same numbers a model
+    config resolves to, so a shipped table can be re-derived from the recipe alone - no model
+    checkout and no hub access.  ``shard_intermediate_size`` is the w1 output width: doubled
+    for gated projections, the plain intermediate size otherwise.
+    """
+    missing = [key for key in _SHAPE_KEYS if key not in raw]
+    if missing:
+        raise ValueError(
+            f"recipe entry {raw.get('name', '<unnamed>')!r} must either name a 'model' or "
+            f"describe a shape; missing {missing}"
+        )
+    entry = ModelEntry(
+        path=raw.get("name", "shape"),
+        tp_size=int(raw.get("tp_size", args.tp_size)),
+        ep_size=int(raw.get("ep_size", args.ep_size)),
+        disable_shared_fusion=bool(raw.get("disable_shared_experts_fusion", False)),
+        dtype_str=raw.get("dtype", args.dtype),
+        per_channel_quant=bool(raw.get("per_channel_quant", args.per_channel_quant)),
+        batch_sizes=batch_sizes,
+        pinned_rows=_recipe_pinned_rows(raw),
+    )
+    entry.num_experts = int(raw["num_experts"])
+    entry.hidden_size = int(raw["hidden_size"])
+    entry.shard_intermediate_size = int(raw["shard_intermediate_size"])
+    entry.topk = int(raw["topk"])
+    entry.num_fused_shared_experts = int(raw.get("num_fused_shared_experts", 0))
+    entry.activation = raw.get("activation", "silu")
+    entry.is_gated = bool(raw.get("is_gated", True))
+    entry.dtype_str = _resolve_dtype_str(entry.dtype_str, {})
+    entry.dtype = _resolve_torch_dtype(entry.dtype_str, {})
+    return entry
+
+
 # Build model entries from command line arguments (with error skipping)
 def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
     entries: List[ModelEntry] = []
@@ -577,6 +700,11 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
             raw_entries = json.load(f)
 
         for raw in raw_entries:
+            batch_sizes = _recipe_batch_sizes(raw)
+            pinned_rows = _recipe_pinned_rows(raw)
+            if "model" not in raw:
+                entries.append(_entry_from_shape(raw, args, batch_sizes))
+                continue
             model_path = raw["model"]
             disable_fusion = raw.get(
                 "disable_shared_experts_fusion", args.disable_shared_experts_fusion
@@ -609,6 +737,8 @@ def build_model_entries(args: argparse.Namespace) -> List[ModelEntry]:
                     disable_shared_fusion=disable_fusion,
                     dtype_str=dtype_str,
                     per_channel_quant=per_channel,
+                    batch_sizes=batch_sizes,
+                    pinned_rows=pinned_rows,
                 )
                 try:
                     params = get_model_config(
@@ -682,6 +812,18 @@ def _tune_worker(
             except (triton.runtime.autotuner.OutOfResources, RuntimeError, AssertionError):
                 # Silently skip invalid or unsupported configs
                 continue
+            except Exception as exc:
+                # A candidate that raises anything else (a JIT signature mismatch, say) must not
+                # take the worker down with it: the parent would then wait forever for a result
+                # that never arrives.  Skip it and say which one it was.
+                logger.warning(
+                    "Skipping unsupported config %s for %s (batch size %d): %s",
+                    config,
+                    key,
+                    batch_size,
+                    exc,
+                )
+                continue
 
             if kernel_time < best_time:
                 best_time = kernel_time
@@ -695,10 +837,77 @@ def _tune_worker(
     result_queue.put(None)
 
 
+def config_dir() -> str:
+    """Directory a run writes its tables to (honours ``SGLANG_MOE_CONFIG_DIR``)."""
+    default_config_dir = os.path.dirname(os.path.realpath(__file__))
+    base_dir = os.environ.get("SGLANG_MOE_CONFIG_DIR", default_config_dir)
+    version_dir = f"triton_{triton.__version__.replace('.', '_')}"
+    return os.path.join(base_dir, "configs", version_dir)
+
+
+def config_filename(entry: ModelEntry) -> str:
+    """Name of the table ``entry``'s shape belongs to."""
+    dtype_str = get_config_dtype_str(
+        entry.dtype,
+        use_int8_w8a16=entry.use_int8a16,
+        use_fp8_w8a8=entry.use_fp8,
+        use_int4_w4a16=entry.use_int4,
+    )
+    return get_config_filename(
+        entry.num_experts,
+        entry.shard_intermediate_size,
+        entry.hidden_size,
+        entry.topk,
+        dtype_str,
+        entry.use_fp8,
+        entry.use_int8,
+        entry.use_int8a16,
+        entry.use_int4,
+        entry.per_channel_quant,
+        entry.block_shape,
+        is_gated=entry.is_gated,
+    )
+
+
+def materialize_pinned_rows(entries: List[ModelEntry], args: argparse.Namespace) -> int:
+    """Write the recipe's pinned rows into their tables.  No GPU work, no measurement.
+
+    A pinned bucket is one the search grid cannot produce, so the recipe - not the tuner - is
+    the source of truth for it; keeping that in the recipe is what makes such a row retraceable.
+    """
+    tables = 0
+    for entry in entries:
+        if not entry.pinned_rows:
+            continue
+        # Verbatim: a pinned row is recorded as measured, including keys the microbenchmark
+        # would not emit (the table's own schema), so the recipe reproduces the file exactly.
+        rows = {bs: dict(entry.pinned_rows[bs].config) for bs in sorted(entry.pinned_rows)}
+        path = os.path.join(config_dir(), config_filename(entry))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if getattr(args, "merge_configs", False):
+            rows = merge_configs(rows, path)
+        save_configs(rows, path)
+        for bs in sorted(entry.pinned_rows):
+            logger.info(
+                "Pinned batch size %d for %s: %s", bs, entry.path, entry.pinned_rows[bs].source
+            )
+        logger.info("Wrote %d pinned rows for %s to %s", len(entry.pinned_rows), entry.path, path)
+        tables += 1
+    return tables
+
+
 def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse.Namespace) -> None:
-    key_to_entry = {}
+    # A recipe entry may pin the bucket set its table was tuned with.  Entries that resolve to
+    # the same kernel shape share one output file, so their bucket lists are unioned.
+    key_to_entry: Dict[Tuple, ModelEntry] = {}
+    key_batch_sizes: Dict[Tuple, List[int]] = {}
     for e in entries:
+        sizes = e.batch_sizes or batch_sizes
+        if e.unique_key in key_to_entry:
+            key_batch_sizes[e.unique_key] = sorted(set(key_batch_sizes[e.unique_key]) | set(sizes))
+            continue
         key_to_entry[e.unique_key] = e
+        key_batch_sizes[e.unique_key] = list(sizes)
 
     all_configs = get_configs_compute_bound()
     first_block_shape = next((e.block_shape for e in entries if e.block_shape is not None), None)
@@ -709,9 +918,9 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
         raise RuntimeError("No CUDA devices found")
-    logger.info(
-        "Tuning mode: %d unique kernel shapes, batch sizes %s", len(key_to_entry), batch_sizes
-    )
+    logger.info("Tuning mode: %d unique kernel shapes", len(key_to_entry))
+    for key, entry in key_to_entry.items():
+        logger.info("  %s: batch sizes %s", entry.path, key_batch_sizes[key])
     logger.info("Search space size: %d configs, using %d GPUs", len(all_configs), num_gpus)
 
     # Create shared task queue and result queue
@@ -722,7 +931,7 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
     # Enqueue all (key, bs, entry, config_chunk) tasks
     chunk_size = max(1, len(all_configs) // num_gpus)  # Keep chunk size moderate
     for key, entry in key_to_entry.items():
-        for bs in batch_sizes:
+        for bs in key_batch_sizes[key]:
             # Split all_configs into chunks
             chunks = [
                 all_configs[i : i + chunk_size] for i in range(0, len(all_configs), chunk_size)
@@ -747,7 +956,22 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
     active_workers = num_gpus
     with tqdm(total=total_tasks, desc="Tuning overall", unit="chunk") as pbar:
         while active_workers > 0:
-            res = result_queue.get()
+            try:
+                res = result_queue.get(timeout=60)
+            except queue.Empty:
+                # A worker that dies without finishing its chunks (a hard crash in the kernel,
+                # say) never reports anything, and waiting for it would hang the run forever.
+                if any(w.is_alive() for w in workers):
+                    continue
+                logger.error(
+                    "All tuning workers exited after %d/%d chunks; no worker can report the "
+                    "remaining chunks. Re-run with the candidates that crashed excluded.",
+                    pbar.n,
+                    total_tasks,
+                )
+                raise RuntimeError(
+                    f"Tuning aborted: all workers died after {pbar.n}/{total_tasks} chunks"
+                ) from None
             if res is None:
                 active_workers -= 1
                 continue
@@ -769,36 +993,17 @@ def run_tuning(entries: List[ModelEntry], batch_sizes: List[int], args: argparse
     # Save configs
     for key, bs_to_config in final_configs.items():
         entry = key_to_entry[key]
-        dtype_str = get_config_dtype_str(
-            entry.dtype,
-            use_int8_w8a16=entry.use_int8a16,
-            use_fp8_w8a8=entry.use_fp8,
-            use_int4_w4a16=entry.use_int4,
-        )
-        filename = get_config_filename(
-            entry.num_experts,
-            entry.shard_intermediate_size,
-            entry.hidden_size,
-            entry.topk,
-            dtype_str,
-            entry.use_fp8,
-            entry.use_int8,
-            entry.use_int8a16,
-            entry.use_int4,
-            entry.per_channel_quant,
-            entry.block_shape,
-            is_gated=entry.is_gated,
-        )
         sorted_batches = sorted(bs_to_config.keys())
         best_configs = {bs: sort_config(bs_to_config[bs]) for bs in sorted_batches}
 
-        default_config_dir = os.path.dirname(os.path.realpath(__file__))
-        config_dir = os.environ.get("SGLANG_MOE_CONFIG_DIR", default_config_dir)
-        triton_version = triton.__version__
-        version_dir = f"triton_{triton_version.replace('.', '_')}"
-        config_dir = os.path.join(config_dir, "configs", version_dir)
-        os.makedirs(config_dir, exist_ok=True)
-        config_path = os.path.join(config_dir, filename)
+        out_dir = config_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        config_path = os.path.join(out_dir, config_filename(entry))
+        if getattr(args, "merge_configs", False):
+            # Keep the rows this run did not measure: a table is a curated map, so a bucket
+            # left out of the run (single-bucket re-derivation, failed bucket, different
+            # recipe) must not fall back to the generic default.
+            best_configs = merge_configs(best_configs, config_path)
         save_configs(best_configs, config_path)
         logger.info("Saved best configs for key %s to %s", key, config_path)
 
@@ -896,13 +1101,13 @@ def run_benchmark(
     # Build task list
     tasks = []
     for e in entries:
-        for bs in batch_sizes:
+        for bs in e.batch_sizes or batch_sizes:
             tasks.append((e, bs))
 
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
         raise RuntimeError("No CUDA devices found")
-    logger.info("Benchmark mode: %d model configs, batch sizes %s", len(entries), batch_sizes)
+    logger.info("Benchmark mode: %d model configs", len(entries))
     logger.info("Using %d GPUs", num_gpus)
 
     task_queue = mp.Queue()
@@ -970,7 +1175,10 @@ def main(args: argparse.Namespace) -> None:
             batch_sizes.extend(int(x) for x in bs_str.split(","))
         batch_sizes = sorted(set(batch_sizes))
 
-    if args.tune:
+    if getattr(args, "materialize", False):
+        if not materialize_pinned_rows(entries, args):
+            raise SystemExit("No recipe entry declares 'pinned_rows'; nothing to materialize.")
+    elif args.tune:
         run_tuning(entries, batch_sizes, args)
     else:
         run_benchmark(entries, batch_sizes, args)
@@ -982,7 +1190,10 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default="./ci/models.json",
-        help="Path to JSON config file (used if --model not given).",
+        help=(
+            "Path to JSON config file (used if --model not given).  Entries name a 'model', "
+            "or describe a kernel shape directly, and may pin 'batch_sizes'."
+        ),
     )
     parser.add_argument(
         "--model", type=str, default=None, help="Single model path (overrides --config)."
@@ -997,6 +1208,22 @@ if __name__ == "__main__":
         help="Batch size(s), e.g., --batch-size 1,2,4 or --batch-size 8 --batch-size 16",
     )
     parser.add_argument("--tune", action="store_true", help="Run tuning (search for best configs).")
+    parser.add_argument(
+        "--materialize",
+        action="store_true",
+        help=(
+            "Write the recipe's 'pinned_rows' into their tables and exit (no GPU work).  Use "
+            "this for rows that were chosen by an end-to-end measurement, not by the sweep."
+        ),
+    )
+    parser.add_argument(
+        "--merge-configs",
+        action="store_true",
+        help=(
+            "Merge the tuned buckets into the existing config file instead of replacing it, "
+            "so re-deriving one bucket keeps every other row of a curated table."
+        ),
+    )
     parser.add_argument("--tp-size", "--tp", type=int, default=2, help="Tensor parallelism size.")
     parser.add_argument("--ep-size", "--ep", type=int, default=1, help="Expert parallelism size.")
     parser.add_argument(

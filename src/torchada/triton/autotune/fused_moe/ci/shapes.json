@@ -1,0 +1,32 @@
+[
+    {
+        "name": "s5000_nemotron35_a3b_tiny_m",
+        "comment": "MTP6 verify bucket (M=1..28 resolve to key 16) of the S5000 Nemotron MoE table. Only this bucket is listed: it is the only row inside the shipped search grid, so a full-table re-run would replace measured rows with unmeasured ones (use --merge-configs).",
+        "num_experts": 128,
+        "hidden_size": 2688,
+        "shard_intermediate_size": 1856,
+        "topk": 6,
+        "is_gated": false,
+        "activation": "relu2_no_mul",
+        "dtype": "bf16",
+        "tp_size": 1,
+        "ep_size": 1,
+        "batch_sizes": [
+            16
+        ],
+        "pinned_rows": {
+            "16": {
+                "config": {
+                    "BLOCK_SIZE_M": 16,
+                    "BLOCK_SIZE_N": 64,
+                    "BLOCK_SIZE_K": 128,
+                    "GROUP_SIZE_M": 1,
+                    "SPLIT_K": 1,
+                    "num_warps": 4,
+                    "num_stages": 1
+                },
+                "source": "End-to-end measurement on one MTT_S5000 card, same container and image as the comparison arm, using the canonical Nemotron-3.5 MTP6 protocol (4096-in / 1000-out, one warmup plus five measured repeats, byte-identical output digests in every arm): 5.5659 ms/token against 6.6207 ms/token for the previously shipped row (-15.95%). The uniform-routing microbenchmark ranks a different tile for this bucket (BM64/BN128/BK64/GSM1/w8/s1) and does not reproduce that ranking between runs, so the sweep is not authoritative here."
+            }
+        }
+    }
+]
