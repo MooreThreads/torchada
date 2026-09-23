@@ -2561,6 +2561,134 @@ def _patch_ctypes_cdll():
     ctypes.CDLL = PatchedCDLL
 
 
+@patch_function
+def _patch_sglang_jit_toolchain():
+    """Compile SGLang's custom ninja JIT with mcc on MUSA.
+
+    SGLang generates its own ``build.ninja`` instead of going through
+    ``torch.utils.cpp_extension``. On CUDA that file invokes nvcc, CUDA
+    gencode, and libcudart. Map those three to mcc, ``--offload-arch``,
+    and musart so ``load_jit("fused_rope", ...)`` can compile on MUSA.
+    """
+    if not is_musa_platform():
+        return
+    if any(getattr(finder, "_torchada_sglang_jit", False) for finder in sys.meta_path):
+        return
+
+    class _SglangJitToolchainLoader:
+        def __init__(self, loader):
+            self.loader = loader
+
+        def create_module(self, spec):
+            if hasattr(self.loader, "create_module"):
+                return self.loader.create_module(spec)
+            return None
+
+        def exec_module(self, module):
+            self.loader.exec_module(module)
+            _apply_sglang_jit_toolchain(module)
+
+    class _SglangJitToolchainFinder:
+        _torchada_sglang_jit = True
+
+        def find_spec(self, fullname, path, target=None):
+            if fullname != "sglang.kernels.jit.utils.compile.toolchain":
+                return None
+            if fullname in sys.modules:
+                _apply_sglang_jit_toolchain(sys.modules[fullname])
+                return None
+            for finder in sys.meta_path:
+                if finder is self:
+                    continue
+                find_spec = getattr(finder, "find_spec", None)
+                if find_spec is None:
+                    continue
+                spec = find_spec(fullname, path, target)
+                if spec is None or spec.loader is None:
+                    continue
+                spec.loader = _SglangJitToolchainLoader(spec.loader)
+                return spec
+            return None
+
+    sys.meta_path.insert(0, _SglangJitToolchainFinder())
+    toolchain = sys.modules.get("sglang.kernels.jit.utils.compile.toolchain")
+    if toolchain is not None:
+        _apply_sglang_jit_toolchain(toolchain)
+
+
+def _apply_sglang_jit_toolchain(toolchain):
+    if getattr(toolchain, "_torchada_sglang_jit", False):
+        return
+    is_hip_runtime = getattr(toolchain, "is_hip_runtime", None)
+    if callable(is_hip_runtime) and is_hip_runtime():
+        return
+
+    from torchada._cpp_ops import _detect_musa_arch
+    from torchada.utils.cpp_extension import CUDA_HOME, _with_explicit_musa_language
+
+    original_cuda_home = toolchain.cuda_home
+    original_device_compiler_path = toolchain.device_compiler_path
+    original_base_cuda_flags = toolchain.base_cuda_flags
+    original_base_include_paths = toolchain.base_include_paths
+    original_base_link_flags = toolchain.base_link_flags
+
+    def cuda_home() -> str:
+        return CUDA_HOME or original_cuda_home()
+
+    def device_compiler_path() -> str:
+        musa_home = cuda_home()
+        if musa_home:
+            return os.path.join(musa_home, "bin", "mcc")
+        return original_device_compiler_path()
+
+    def target_flags():
+        arch = os.environ.get("MTGPU_TARGET") or _detect_musa_arch()
+        return [f"--offload-arch={arch}"]
+
+    def base_cuda_flags():
+        return _with_explicit_musa_language(original_base_cuda_flags())
+
+    def base_include_paths():
+        paths = list(original_base_include_paths())
+        musa_home = cuda_home()
+        if musa_home:
+            include_dir = os.path.join(musa_home, "include")
+            if include_dir not in paths:
+                paths.append(include_dir)
+        return paths
+
+    def base_link_flags(*, with_device: bool):
+        flags = list(original_base_link_flags(with_device=with_device))
+        if not with_device:
+            return flags
+        musa_home = cuda_home()
+        translated = []
+        replaced_runtime = False
+        for flag in flags:
+            if flag == "-lcudart":
+                translated.append("-lmusart")
+                replaced_runtime = True
+                continue
+            if musa_home and flag.startswith("-L") and flag.endswith("/lib64"):
+                translated.append(f"-L{os.path.join(musa_home, 'lib')}")
+                continue
+            translated.append(flag)
+        if not replaced_runtime:
+            if musa_home:
+                translated.extend([f"-L{os.path.join(musa_home, 'lib')}", "-lmusart"])
+            else:
+                translated.append("-lmusart")
+        return translated
+
+    toolchain.cuda_home = cuda_home
+    toolchain.device_compiler_path = device_compiler_path
+    toolchain.target_flags = target_flags
+    toolchain.base_cuda_flags = base_cuda_flags
+    toolchain.base_include_paths = base_include_paths
+    toolchain.base_link_flags = base_link_flags
+    toolchain._torchada_sglang_jit = True
+
+
 def apply_patches():
     """
     Apply all necessary patches for CUDA to MUSA translation.
@@ -2585,6 +2713,7 @@ def apply_patches():
     - torch.mm / torch.bmm out_dtype= backport while the MUSA dtype overload
       does not write its result
     - torch.utils.cpp_extension (CUDAExtension, BuildExtension) -> MUSA versions
+    - sglang.kernels.jit toolchain nvcc/gencode/libcudart -> mcc/--offload-arch/musart
     - CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES environment fallback
     - torch._inductor.autotune_process.CUDA_VISIBLE_DEVICES -> MUSA_VISIBLE_DEVICES
     - torch.accelerator.synchronize() -> torch.musa.synchronize()
