@@ -174,6 +174,10 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 ext = CUDAExtension("my_ext", sources=["kernel.cu"])
 ```
 
+SGLang 的 fused-rope JIT 会自己写 ninja 文件，而不是走
+`torch.utils.cpp_extension`。在 `import torchada` 之后，MUSA 上这条工具链会改用
+mcc、`--offload-arch` 和 musart。
+
 如果扩展使用 nvJPEG，可以保留现有 CUDA 构建配置：
 
 ```python
