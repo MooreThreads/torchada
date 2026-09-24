@@ -562,3 +562,105 @@ class TestDeviceContextManager:
                 assert torch.ones.__wrapped__ in constructors
         except ImportError:
             pytest.skip("torch.utils._device not available")
+
+    def test_like_factories_are_not_device_injected(self):
+        """The ``*_like`` family must stay out of ``_device_constructors()``.
+
+        torch never lists them there: ``*_like`` inherits its device from the
+        input tensor, so device-injecting them makes
+        ``torch.zeros_like(x)`` return a *cpu* tensor as soon as any device
+        context is active -- including the one ``torch.set_default_device(...)``
+        pushes even when the value does not change (it is not a no-op).  Those
+        host pointers then reach device kernels (illegal memory access).
+
+        Regression test: torchada used to re-add the unwrapped ``*_like``
+        factories to that registry, which silently broke device inheritance.
+        """
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required")
+
+        try:
+            from torch.utils._device import _device_constructors
+        except ImportError:
+            pytest.skip("torch.utils._device not available")
+
+        constructors = _device_constructors()
+        for name in (
+            "zeros_like",
+            "ones_like",
+            "empty_like",
+            "full_like",
+            "rand_like",
+            "randn_like",
+        ):
+            wrapped = getattr(torch, name, None)
+            if wrapped is None or not hasattr(wrapped, "__wrapped__"):
+                continue
+            assert wrapped.__wrapped__ not in constructors, (
+                f"torch.{name} (unwrapped) must not be in _device_constructors(): "
+                "torch does not device-inject the *_like family"
+            )
+
+        # torch *does* device-inject these, and they must keep working.
+        for name in ("empty", "zeros", "ones"):
+            wrapped = getattr(torch, name, None)
+            if wrapped is not None and hasattr(wrapped, "__wrapped__"):
+                assert wrapped.__wrapped__ in constructors
+
+    @pytest.mark.gpu
+    def test_like_factories_keep_input_device_in_device_context(self):
+        """Behavioural counterpart: ``with torch.device(cpu)`` must not move a
+        ``torch.zeros_like(<musa tensor>)`` onto cpu."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required")
+
+        src = torch.zeros(4, device="musa")
+        with torch.device("cpu"):
+            assert torch.zeros_like(src).device.type == "musa"
+            assert torch.ones_like(src).device.type == "musa"
+            assert torch.empty_like(src).device.type == "musa"
+            assert torch.full_like(src, 0).device.type == "musa"
+
+    @pytest.mark.gpu
+    def test_like_factories_still_translate_an_explicit_cuda_device(self):
+        """An explicit ``device="cuda"`` must still be translated to ``"musa"``.
+
+        Keeping the ``*_like`` family out of the device-*injection* registry
+        must not stop them from honouring a device the caller passed on
+        purpose: the wrapping is what makes CUDA-authored code such as
+        ``torch.ones_like(x, device="cuda")`` run on MUSA.  Guards both the
+        wrap list and the translation, inside and outside a device context.
+        """
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("MUSA platform required")
+
+        src = torch.zeros(4, device="musa")
+        calls = (
+            ("zeros_like", (src,)),
+            ("ones_like", (src,)),
+            ("empty_like", (src,)),
+            ("full_like", (src, 1)),
+            ("rand_like", (src,)),
+            ("randn_like", (src,)),
+            ("randint_like", (src, 4)),
+        )
+
+        for name, args in calls:
+            factory = getattr(torch, name)
+            assert hasattr(factory, "__wrapped__"), f"torch.{name} must stay wrapped"
+            assert factory(*args, device="cuda").device.type == "musa"
+            # A device context must not override a device the caller passed.
+            with torch.device("cpu"):
+                assert factory(*args, device="cuda").device.type == "musa"
