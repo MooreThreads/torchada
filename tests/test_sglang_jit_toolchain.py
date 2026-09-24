@@ -5,7 +5,8 @@ from __future__ import annotations
 import sys
 from importlib.machinery import ModuleSpec
 from importlib.util import module_from_spec
-from types import ModuleType
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 from torchada._patch import _apply_sglang_jit_toolchain, _patch_sglang_jit_toolchain
 
@@ -17,7 +18,11 @@ def _toolchain_module() -> ModuleType:
     module.cuda_home = lambda: "/usr/local/cuda"
     module.device_compiler_path = lambda: "/usr/local/cuda/bin/nvcc"
     module.target_flags = lambda: ["-gencode=arch=compute_90,code=sm_90"]
-    module.base_cuda_flags = lambda: ["-Xcompiler", "-fPIC"]
+    module.base_cuda_flags = lambda: [
+        "-Xcompiler",
+        "-fPIC",
+        "--expt-relaxed-constexpr",
+    ]
     module.base_include_paths = lambda: ["/opt/tvm-ffi/include"]
     module.base_link_flags = lambda *, with_device: (
         ["-shared", "-Ltvm", "-ltvm_ffi", "-L/usr/local/cuda/lib64", "-lcudart"]
@@ -29,11 +34,18 @@ def _toolchain_module() -> ModuleType:
 
 
 def _assert_mapped(toolchain, musa_home: str) -> None:
+    from torchada.utils.cpp_extension import stable_compat_include_dir
+
     assert toolchain.cuda_home() == musa_home
     assert toolchain.device_compiler_path() == f"{musa_home}/bin/mcc"
     assert toolchain.target_flags() == ["--offload-arch=mp_31"]
-    assert toolchain.base_cuda_flags()[-2:] == ["-x", "musa"]
-    assert f"{musa_home}/include" in toolchain.base_include_paths()
+    flags = toolchain.base_cuda_flags()
+    assert flags[-2:] == ["-x", "musa"]
+    assert "-Xcompiler" not in flags
+    assert "--expt-relaxed-constexpr" not in flags
+    includes = toolchain.base_include_paths()
+    assert includes[0] == stable_compat_include_dir()
+    assert f"{musa_home}/include" in includes
     assert toolchain.base_link_flags(with_device=False) == [
         "-shared",
         "-Ltvm",
@@ -114,3 +126,122 @@ def test_sglang_jit_import_hook_patches_the_first_import(monkeypatch, tmp_path):
         _assert_mapped(toolchain, str(musa_home))
     finally:
         sys.modules.pop(TOOLCHAIN_NAME, None)
+
+
+def test_translate_nvcc_flags_for_mcc_drops_nvcc_only_options():
+    from torchada._patch import _translate_nvcc_flags_for_mcc
+
+    flags = _translate_nvcc_flags_for_mcc(
+        [
+            "-Xcompiler",
+            "-fPIC",
+            "--expt-relaxed-constexpr",
+            "-gencode=arch=compute_90,code=sm_90",
+            "-O3",
+        ]
+    )
+    assert flags == ["-fPIC", "-O3"]
+
+
+def test_sglang_jit_ninja_drops_nvcc_only_cuda_cflags():
+    from torchada._patch import _apply_sglang_jit_ninja
+
+    seen = {}
+
+    def generate(spec):
+        seen["cuda_cflags"] = spec.cuda_cflags
+        return "ok"
+
+    ninja = ModuleType("sglang.kernels.jit.utils.compile.ninja")
+    ninja.generate = generate
+    _apply_sglang_jit_ninja(ninja)
+    spec = SimpleNamespace(
+        cuda_cflags=(
+            "-DSGL_CUDA_ARCH=310",
+            "-std=c++20",
+            "-O3",
+            "--expt-relaxed-constexpr",
+        ),
+        include_paths=(),
+    )
+    assert ninja.generate(spec) == "ok"
+    assert seen["cuda_cflags"] == (
+        "-DSGL_CUDA_ARCH=310",
+        "-std=c++20",
+        "-O3",
+    )
+
+
+def test_sglang_jit_ninja_rewrites_tensor_h_ice_expression(tmp_path):
+    from torchada._patch import (
+        SGLANG_JIT_TENSOR_H_ICE,
+        SGLANG_JIT_TENSOR_H_REWRITE,
+        _apply_sglang_jit_ninja,
+    )
+
+    include_dir = tmp_path / "include"
+    header = include_dir / "sgl_kernel" / "tensor.h"
+    header.parent.mkdir(parents=True)
+    header.write_text(
+        "inline constexpr auto kDeviceStringMap = [] {\n"
+        f"  {SGLANG_JIT_TENSOR_H_ICE}\n"
+        "  return max_type;\n"
+        "}();\n"
+    )
+    seen = {}
+
+    def generate(spec):
+        seen["include_paths"] = spec.include_paths
+        return "ok"
+
+    ninja = ModuleType("sglang.kernels.jit.utils.compile.ninja")
+    ninja.generate = generate
+    ninja.toolchain = SimpleNamespace(base_include_paths=lambda: [str(include_dir)])
+    _apply_sglang_jit_ninja(ninja)
+    spec = SimpleNamespace(
+        cuda_cflags=("-O3",),
+        include_paths=(),
+    )
+    assert ninja.generate(spec) == "ok"
+    overlay_root = seen["include_paths"][0]
+    overlay = Path(overlay_root) / "sgl_kernel" / "tensor.h"
+    rewritten = overlay.read_text()
+    assert SGLANG_JIT_TENSOR_H_ICE not in rewritten
+    assert SGLANG_JIT_TENSOR_H_REWRITE in rewritten
+    assert SGLANG_JIT_TENSOR_H_ICE in header.read_text()
+
+
+def test_sglang_jit_ninja_rewrites_utils_irange_and_musacc_guard(tmp_path):
+    from torchada._patch import (
+        SGLANG_JIT_UTILS_H_IRANGE,
+        SGLANG_JIT_UTILS_H_IRANGE_REWRITE,
+        _apply_sglang_jit_ninja,
+    )
+
+    include_dir = tmp_path / "include"
+    (include_dir / "sgl_kernel").mkdir(parents=True)
+    (include_dir / "sgl_kernel" / "tensor.h").write_text("#ifdef __CUDACC__\n")
+    (include_dir / "sgl_kernel" / "utils.h").write_text(
+        "#ifdef __CUDACC__\n" + SGLANG_JIT_UTILS_H_IRANGE + "\n"
+    )
+    seen = {}
+
+    def generate(spec):
+        seen["include_paths"] = spec.include_paths
+        return "ok"
+
+    ninja = ModuleType("sglang.kernels.jit.utils.compile.ninja")
+    ninja.generate = generate
+    ninja.toolchain = SimpleNamespace(base_include_paths=lambda: [str(include_dir)])
+    _apply_sglang_jit_ninja(ninja)
+    spec = SimpleNamespace(cuda_cflags=("-O3",), include_paths=())
+    assert ninja.generate(spec) == "ok"
+    overlay_root = seen["include_paths"][0]
+    tensor = (Path(overlay_root) / "sgl_kernel" / "tensor.h").read_text()
+    utils = (Path(overlay_root) / "sgl_kernel" / "utils.h").read_text()
+    assert "#if defined(__CUDACC__) || defined(__MUSACC__)" in tensor
+    assert "#ifdef __CUDACC__" not in tensor
+    assert "#if defined(__CUDACC__) || defined(__MUSACC__)" not in utils
+    assert "#ifdef __CUDACC__" in utils
+    assert SGLANG_JIT_UTILS_H_IRANGE_REWRITE in utils
+    assert "stdv::iota" not in utils

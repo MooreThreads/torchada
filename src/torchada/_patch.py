@@ -27,6 +27,7 @@ import logging
 import os
 import sys
 import threading
+import tempfile
 import time
 import warnings
 from types import ModuleType, SimpleNamespace
@@ -2575,9 +2576,10 @@ def _patch_sglang_jit_toolchain():
     if any(getattr(finder, "_torchada_sglang_jit", False) for finder in sys.meta_path):
         return
 
-    class _SglangJitToolchainLoader:
-        def __init__(self, loader):
+    class _SglangJitLoader:
+        def __init__(self, loader, apply):
             self.loader = loader
+            self.apply = apply
 
         def create_module(self, spec):
             if hasattr(self.loader, "create_module"):
@@ -2586,16 +2588,21 @@ def _patch_sglang_jit_toolchain():
 
         def exec_module(self, module):
             self.loader.exec_module(module)
-            _apply_sglang_jit_toolchain(module)
+            self.apply(module)
 
-    class _SglangJitToolchainFinder:
+    class _SglangJitFinder:
         _torchada_sglang_jit = True
+        _targets = {
+            "sglang.kernels.jit.utils.compile.toolchain": _apply_sglang_jit_toolchain,
+            "sglang.kernels.jit.utils.compile.ninja": _apply_sglang_jit_ninja,
+        }
 
         def find_spec(self, fullname, path, target=None):
-            if fullname != "sglang.kernels.jit.utils.compile.toolchain":
+            apply = self._targets.get(fullname)
+            if apply is None:
                 return None
             if fullname in sys.modules:
-                _apply_sglang_jit_toolchain(sys.modules[fullname])
+                apply(sys.modules[fullname])
                 return None
             for finder in sys.meta_path:
                 if finder is self:
@@ -2606,14 +2613,202 @@ def _patch_sglang_jit_toolchain():
                 spec = find_spec(fullname, path, target)
                 if spec is None or spec.loader is None:
                     continue
-                spec.loader = _SglangJitToolchainLoader(spec.loader)
+                spec.loader = _SglangJitLoader(spec.loader, apply)
                 return spec
             return None
 
-    sys.meta_path.insert(0, _SglangJitToolchainFinder())
+    sys.meta_path.insert(0, _SglangJitFinder())
     toolchain = sys.modules.get("sglang.kernels.jit.utils.compile.toolchain")
     if toolchain is not None:
         _apply_sglang_jit_toolchain(toolchain)
+    ninja = sys.modules.get("sglang.kernels.jit.utils.compile.ninja")
+    if ninja is not None:
+        _apply_sglang_jit_ninja(ninja)
+
+
+def _translate_nvcc_flags_for_mcc(flags):
+    """Drop nvcc-only flags that mcc rejects, keep host PIC as -fPIC."""
+    translated = []
+    skip_next = False
+    for flag in flags:
+        if skip_next:
+            if flag == "-fPIC" and "-fPIC" not in translated:
+                translated.append("-fPIC")
+            skip_next = False
+            continue
+        if flag in {"-Xcompiler", "--compiler-options"}:
+            skip_next = True
+            continue
+        if flag.startswith("-Xcompiler=") or flag.startswith("--compiler-options="):
+            value = flag.split("=", 1)[1]
+            if value == "-fPIC" and "-fPIC" not in translated:
+                translated.append("-fPIC")
+            continue
+        if flag in {"--expt-relaxed-constexpr", "-expt-relaxed-constexpr"}:
+            continue
+        if flag.startswith("-gencode"):
+            continue
+        translated.append(flag)
+    return translated
+
+
+SGLANG_JIT_TENSOR_H_ICE = "constexpr auto max_type = stdr::max(map | stdv::keys);"
+SGLANG_JIT_TENSOR_H_REWRITE = (
+    "constexpr auto max_type = std::max({"
+    "map[0].first, map[1].first, map[2].first, map[3].first, "
+    "map[4].first, map[5].first, map[6].first, map[7].first, "
+    "map[8].first, map[9].first, map[10].first, map[11].first, "
+    "map[12].first, map[13].first, map[14].first, map[15].first});"
+)
+
+
+SGLANG_JIT_UTILS_H_IRANGE = """template <std::integral T>
+inline auto irange(T end) {
+  return stdv::iota(static_cast<T>(0), end);
+}
+
+/// \brief Python-style integer range: `irange(start, end)` -> `[start, end)`.
+template <std::integral T>
+inline auto irange(T start, T end) {
+  return stdv::iota(start, end);
+}"""
+
+SGLANG_JIT_UTILS_H_IRANGE_REWRITE = """template <typename T>
+struct IntegerRange {
+  T begin_value;
+  T end_value;
+  struct iterator {
+    T value;
+    constexpr T operator*() const { return value; }
+    constexpr iterator& operator++() {
+      ++value;
+      return *this;
+    }
+    constexpr bool operator!=(const iterator& other) const { return value != other.value; }
+  };
+  constexpr iterator begin() const { return iterator{begin_value}; }
+  constexpr iterator end() const { return iterator{end_value}; }
+};
+
+template <std::integral T>
+inline auto irange(T end) {
+  return IntegerRange<T>{static_cast<T>(0), end};
+}
+
+/// \brief Python-style integer range: `irange(start, end)` -> `[start, end)`.
+template <std::integral T>
+inline auto irange(T start, T end) {
+  return IntegerRange<T>{start, end};
+}"""
+
+
+def _strip_sglang_jit_ranges(source: str) -> str:
+    source = source.replace("#include <ranges>\n", "")
+    source = source.replace("namespace stdr = std::ranges;\n", "")
+    source = source.replace("namespace stdv = stdr::views;\n", "")
+    source = source.replace(
+        "return stdr::empty(m_options) || (stdr::find(m_options, value) != stdr::end(m_options));",
+        "return m_options.empty() || (std::find(m_options.begin(), m_options.end(), value) != m_options.end());",
+    )
+    source = source.replace(
+        "return stdr::empty(m_options) || (stdr::any_of(m_options, [value](const DLDevice& opt) {",
+        "return m_options.empty() || (std::any_of(m_options.begin(), m_options.end(), [value](const DLDevice& opt) {",
+    )
+    if "stdv::iota" in source:
+        source = source.replace(
+            "return stdv::iota(static_cast<T>(0), end);",
+            "return IntegerRange<T>{static_cast<T>(0), end};",
+        )
+        source = source.replace(
+            "return stdv::iota(start, end);", "return IntegerRange<T>{start, end};"
+        )
+        if "struct IntegerRange" not in source:
+            idx = source.find("template <std::integral T>\ninline auto irange")
+            if idx == -1:
+                idx = source.find("inline auto irange")
+            if idx != -1:
+                source = (
+                    source[:idx]
+                    + SGLANG_JIT_UTILS_H_IRANGE_REWRITE.split("template <std::integral T>")[0]
+                    + source[idx:]
+                )
+    return source
+
+
+def _rewrite_sglang_jit_tensor_h(include_paths):
+    """Rewrite SGLang JIT headers that mcc 5.2 / clang-14 cannot compile.
+
+    mcc segfaults on stdr::max(map | stdv::keys), does not define __CUDACC__,
+    and rejects libstdc++ ranges in the device pass. Overlay copies keep the
+    original headers on disk unchanged.
+    """
+    overlay_root = os.path.join(tempfile.gettempdir(), "torchada-sglang-jit-tensor-h")
+    rewritten = False
+    for path in include_paths:
+        kernel_include = os.path.join(path, "sgl_kernel")
+        if not os.path.isdir(kernel_include):
+            continue
+        overlay_kernel = os.path.join(overlay_root, "sgl_kernel")
+        os.makedirs(overlay_kernel, exist_ok=True)
+        for dirpath, _, filenames in os.walk(kernel_include):
+            rel = os.path.relpath(dirpath, kernel_include)
+            dest_dir = overlay_kernel if rel == "." else os.path.join(overlay_kernel, rel)
+            os.makedirs(dest_dir, exist_ok=True)
+            for filename in filenames:
+                src = os.path.join(dirpath, filename)
+                dest = os.path.join(dest_dir, filename)
+                source = open(src, "r", encoding="utf-8", errors="replace").read()
+                updated = source
+                if filename == "tensor.h":
+                    updated = updated.replace(
+                        SGLANG_JIT_TENSOR_H_ICE, SGLANG_JIT_TENSOR_H_REWRITE, 1
+                    )
+                    updated = updated.replace(
+                        "#ifdef __CUDACC__",
+                        "#if defined(__CUDACC__) || defined(__MUSACC__)",
+                    )
+                updated = _strip_sglang_jit_ranges(updated)
+                open(dest, "w", encoding="utf-8").write(updated)
+                rewritten = True
+        if rewritten:
+            return overlay_root
+    return None
+
+
+def _apply_sglang_jit_ninja(ninja):
+    if getattr(ninja, "_torchada_sglang_jit", False):
+        return
+    original_generate = ninja.generate
+
+    def generate(spec):
+        cuda_cflags = tuple(_translate_nvcc_flags_for_mcc(spec.cuda_cflags))
+        include_paths = list(spec.include_paths)
+        search_paths = include_paths[:]
+        toolchain = getattr(ninja, "toolchain", None)
+        if toolchain is None:
+            toolchain = sys.modules.get("sglang.kernels.jit.utils.compile.toolchain")
+        base_include_paths = getattr(toolchain, "base_include_paths", None)
+        if callable(base_include_paths):
+            search_paths = list(base_include_paths()) + search_paths
+        overlay_root = _rewrite_sglang_jit_tensor_h(search_paths)
+        if overlay_root and overlay_root not in include_paths:
+            include_paths.insert(0, overlay_root)
+        if cuda_cflags != spec.cuda_cflags or tuple(include_paths) != spec.include_paths:
+            try:
+                payload = vars(spec)
+            except TypeError:
+                payload = {name: getattr(spec, name) for name in spec.__struct_fields__}
+            spec = spec.__class__(
+                **{
+                    **payload,
+                    "cuda_cflags": cuda_cflags,
+                    "include_paths": tuple(include_paths),
+                }
+            )
+        return original_generate(spec)
+
+    ninja.generate = generate
+    ninja._torchada_sglang_jit = True
 
 
 def _apply_sglang_jit_toolchain(toolchain):
@@ -2624,7 +2819,11 @@ def _apply_sglang_jit_toolchain(toolchain):
         return
 
     from torchada._cpp_ops import _detect_musa_arch
-    from torchada.utils.cpp_extension import CUDA_HOME, _with_explicit_musa_language
+    from torchada.utils.cpp_extension import (
+        CUDA_HOME,
+        _with_explicit_musa_language,
+        stable_compat_include_dir,
+    )
 
     original_cuda_home = toolchain.cuda_home
     original_device_compiler_path = toolchain.device_compiler_path
@@ -2646,10 +2845,15 @@ def _apply_sglang_jit_toolchain(toolchain):
         return [f"--offload-arch={arch}"]
 
     def base_cuda_flags():
-        return _with_explicit_musa_language(original_base_cuda_flags())
+        return _with_explicit_musa_language(
+            _translate_nvcc_flags_for_mcc(original_base_cuda_flags())
+        )
 
     def base_include_paths():
-        paths = list(original_base_include_paths())
+        paths = [stable_compat_include_dir()]
+        for path in original_base_include_paths():
+            if path not in paths:
+                paths.append(path)
         musa_home = cuda_home()
         if musa_home:
             include_dir = os.path.join(musa_home, "include")
