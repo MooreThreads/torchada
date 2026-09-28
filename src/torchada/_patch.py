@@ -30,7 +30,7 @@ import threading
 import time
 import warnings
 from types import ModuleType, SimpleNamespace
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 
@@ -1140,7 +1140,7 @@ _FALLBACK_FACTORY_FUNCTIONS = (
 _EXTRA_FACTORY_FUNCTIONS = ("from_file", "normal")
 
 
-def _discover_factory_functions() -> List[str]:
+def _discover_factory_functions() -> Tuple[List[str], List[str]]:
     """Resolve, at runtime, the torch tensor-factory names whose ``device=``
     kwarg we translate — instead of hand-maintaining a static list.
 
@@ -1155,6 +1155,14 @@ def _discover_factory_functions() -> List[str]:
     Falls back to ``_FALLBACK_FACTORY_FUNCTIONS`` if the private registry is gone.
     """
     names = set()
+    # Subset of ``names`` that torch itself device-injects into, i.e. the
+    # original members of ``_device_constructors()``.  Only those may be added
+    # back to that registry: ``*_like`` factories derive their device from the
+    # input tensor, and registering them there makes ``torch.zeros_like(x)``
+    # return a *cpu* tensor as soon as any device context is active
+    # (``torch.set_default_device`` pushes one even for ``cpu``), which then
+    # feeds host pointers into device kernels.
+    device_injectable = set()
     try:
         from torch.utils._device import _device_constructors
 
@@ -1162,16 +1170,21 @@ def _discover_factory_functions() -> List[str]:
             name = getattr(fn, "__name__", None)
             if name and getattr(torch, name, None) is fn:
                 names.add(name)
+                device_injectable.add(name)
     except Exception:
         pass
     if not names:
         names.update(_FALLBACK_FACTORY_FUNCTIONS)
+        # torch does not device-inject into the ``*_like`` family.
+        device_injectable.update(
+            n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like")
+        )
     # ``*_like`` variants accept device= but are not device-injected by torch.
     names |= {n + "_like" for n in tuple(names) if callable(getattr(torch, n + "_like", None))}
     for extra in _EXTRA_FACTORY_FUNCTIONS:
         if callable(getattr(torch, extra, None)):
             names.add(extra)
-    return sorted(names)
+    return sorted(names), sorted(device_injectable)
 
 
 # Salt mixed into the AOT-autograd cache key for the wrapped factories; bump to
@@ -2629,11 +2642,15 @@ def apply_patches():
     # keeps torch.compile AOT caching working.
     wrapped_names: List[str] = []
     original_fns = []
-    for fn_name in _discover_factory_functions():
+    device_injectable_fns = set()
+    factory_names, device_injectable_names = _discover_factory_functions()
+    for fn_name in factory_names:
         original_fn = getattr(torch, fn_name, None)
         if original_fn is None or hasattr(original_fn, "__wrapped__"):
             continue  # missing on this torch, or already wrapped
         original_fns.append(original_fn)
+        if fn_name in device_injectable_names:
+            device_injectable_fns.add(original_fn)
         wrapped_fn = _wrap_factory_function(original_fn)
         _register_jit_builtin_alias(original_fn, wrapped_fn)
         setattr(torch, fn_name, wrapped_fn)
@@ -2641,12 +2658,16 @@ def apply_patches():
 
     # PyTorch's __torch_function__ dispatch (e.g. the ``with torch.device(...):``
     # context manager) receives the original C functions, so the
-    # device-constructor set must include the unwrapped originals.
+    # device-constructor set must include the unwrapped originals -- but only the
+    # ones torch itself device-injects into.  Re-adding the ``*_like`` family
+    # silently overrode their device inheritance (see
+    # ``_discover_factory_functions``), turning device tensors into host tensors
+    # that sgl-kernel then dereferenced as device pointers.
     try:
         from torch.utils._device import _device_constructors
 
         constructors = _device_constructors()
-        for orig_fn in original_fns:
+        for orig_fn in device_injectable_fns:
             constructors.add(orig_fn)
     except (ImportError, AttributeError):
         pass
