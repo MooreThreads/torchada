@@ -2698,12 +2698,15 @@ def _replace_sglang_jit_source(
     *,
     filename: str,
     required: bool = False,
+    expected_count: int | None = None,
 ) -> str:
     count = source.count(old)
-    if required and count != 1:
+    if expected_count is None and required:
+        expected_count = 1
+    if expected_count is not None and count != expected_count:
         raise RuntimeError(
-            f"Expected exactly one {old!r} match in SGLang JIT header {filename!r}, "
-            f"found {count}"
+            f"Expected exactly {expected_count} {old!r} matches in SGLang JIT "
+            f"header {filename!r}, found {count}"
         )
     return source.replace(old, new)
 
@@ -2748,7 +2751,7 @@ def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
             "#ifdef __CUDACC__",
             "#if defined(__CUDACC__) || defined(__MUSACC__)",
             filename=filename,
-            required=True,
+            expected_count=2,
         )
     replacements = (
         (

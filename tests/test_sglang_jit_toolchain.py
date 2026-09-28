@@ -152,6 +152,9 @@ def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
         "namespace stdr = std::ranges;\n"
         "namespace stdv = stdr::views;\n"
         "#ifdef __CUDACC__\n"
+        "template <typename T>\n"
+        "struct cuda_value { T value; };\n"
+        "#ifdef __CUDACC__\n"
         f"{SGLANG_JIT_TENSOR_H_ICE}\n"
     )
     (include_dir / "sgl_kernel" / "utils.h").write_text(
@@ -194,6 +197,7 @@ def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
     tensor = (overlay_root / "sgl_kernel" / "tensor.h").read_text()
     utils = (overlay_root / "sgl_kernel" / "utils.h").read_text()
     assert "#if defined(__CUDACC__) || defined(__MUSACC__)" in tensor
+    assert tensor.count("#if defined(__CUDACC__) || defined(__MUSACC__") == 2
     assert SGLANG_JIT_TENSOR_H_ICE not in tensor
     assert "map[15].first" not in tensor
     assert "for (const auto& item : map)" in tensor
@@ -214,4 +218,20 @@ def test_sglang_jit_header_rewrite_rejects_stale_upstream_text():
             "namespace stdv = stdr::views;\n"
             "#ifdef __CUDACC__\n"
             "constexpr auto max_type = changed_expression;\n",
+        )
+
+
+def test_sglang_jit_header_rewrite_rejects_unexpected_cuda_guard_count():
+    from torchada._patch import SGLANG_JIT_TENSOR_H_ICE, _rewrite_sglang_jit_header
+
+    with pytest.raises(RuntimeError, match="exactly 2"):
+        _rewrite_sglang_jit_header(
+            "tensor.h",
+            "#include <ranges>\n"
+            "namespace stdr = std::ranges;\n"
+            "namespace stdv = stdr::views;\n"
+            "#ifdef __CUDACC__\n"
+            "#ifdef __CUDACC__\n"
+            "#ifdef __CUDACC__\n"
+            f"{SGLANG_JIT_TENSOR_H_ICE}\n",
         )
