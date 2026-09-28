@@ -21,6 +21,7 @@ Usage:
     g = torch.cuda.CUDAGraph()  # Uses MUSAGraph on MUSA
 """
 
+import atexit
 import functools
 import inspect
 import logging
@@ -32,7 +33,7 @@ import tempfile
 import time
 import warnings
 from types import ModuleType, SimpleNamespace
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -2654,9 +2655,9 @@ def _translate_nvcc_flags_for_mcc(flags):
 
 
 SGLANG_JIT_TENSOR_H_ICE = "constexpr auto max_type = stdr::max(map | stdv::keys);"
-SGLANG_JIT_TENSOR_H_REWRITE = "constexpr auto max_type = std::max({" + ", ".join(
-    f"map[{i}].first" for i in range(16)
-) + "});"
+SGLANG_JIT_TENSOR_H_REWRITE = (
+    "constexpr auto max_type = std::max({" + ", ".join(f"map[{i}].first" for i in range(16)) + "});"
+)
 
 SGLANG_JIT_INTEGER_RANGE = (
     "template <typename T> struct IntegerRange { T begin_value; T end_value; "
@@ -2667,70 +2668,163 @@ SGLANG_JIT_INTEGER_RANGE = (
     "constexpr iterator end() const { return iterator{end_value}; } };\n\n"
 )
 
+_sglang_jit_overlay_cache: Dict[Tuple[str, ...], Optional[str]] = {}
+_sglang_jit_overlay_lock = threading.Lock()
+
+
+def _cleanup_sglang_jit_overlays() -> None:
+    with _sglang_jit_overlay_lock:
+        overlay_roots = [
+            overlay_root
+            for overlay_root in _sglang_jit_overlay_cache.values()
+            if overlay_root is not None
+        ]
+        _sglang_jit_overlay_cache.clear()
+    for overlay_root in overlay_roots:
+        shutil.rmtree(overlay_root, ignore_errors=True)
+
+
+atexit.register(_cleanup_sglang_jit_overlays)
+
+
+def _replace_sglang_jit_source(
+    source: str,
+    old: str,
+    new: str,
+    *,
+    filename: str,
+    required: bool = False,
+) -> str:
+    count = source.count(old)
+    if required and count != 1:
+        raise RuntimeError(
+            f"Expected exactly one {old!r} match in SGLang JIT header {filename!r}, "
+            f"found {count}"
+        )
+    return source.replace(old, new)
+
 
 def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
-    source = source.replace("#include <ranges>\n", "")
-    source = source.replace("namespace stdr = std::ranges;\n", "")
-    source = source.replace("namespace stdv = stdr::views;\n", "")
+    if "#include <ranges>" in source:
+        source = _replace_sglang_jit_source(
+            source,
+            "#include <ranges>\n",
+            "",
+            filename=filename,
+            required=True,
+        )
+        if "#include <ranges>" in source:
+            raise RuntimeError(f"Failed to remove <ranges> from SGLang JIT header {filename!r}")
+    for alias in (
+        "namespace stdr = std::ranges;\n",
+        "namespace stdv = stdr::views;\n",
+    ):
+        if alias[:-1] in source:
+            source = _replace_sglang_jit_source(
+                source,
+                alias,
+                "",
+                filename=filename,
+                required=True,
+            )
+            if alias[:-1] in source:
+                raise RuntimeError(
+                    f"Failed to remove ranges alias from SGLang JIT header {filename!r}"
+                )
     if filename == "tensor.h":
-        source = source.replace(SGLANG_JIT_TENSOR_H_ICE, SGLANG_JIT_TENSOR_H_REWRITE, 1)
-        source = source.replace(
+        source = _replace_sglang_jit_source(
+            source,
+            SGLANG_JIT_TENSOR_H_ICE,
+            SGLANG_JIT_TENSOR_H_REWRITE,
+            filename=filename,
+            required=True,
+        )
+        source = _replace_sglang_jit_source(
+            source,
             "#ifdef __CUDACC__",
             "#if defined(__CUDACC__) || defined(__MUSACC__)",
+            filename=filename,
+            required=True,
         )
-    source = source.replace(
-        "return stdr::empty(m_options) || (stdr::find(m_options, value) != stdr::end(m_options));",
-        "return m_options.empty() || (std::find(m_options.begin(), m_options.end(), value) != m_options.end());",
+    replacements = (
+        (
+            "return stdr::empty(m_options) || (stdr::find(m_options, value) != stdr::end(m_options));",
+            "return m_options.empty() || (std::find(m_options.begin(), m_options.end(), value) != m_options.end());",
+        ),
+        (
+            "return stdr::empty(m_options) || (stdr::any_of(m_options, [value](const DLDevice& opt) {",
+            "return m_options.empty() || (std::any_of(m_options.begin(), m_options.end(), [value](const DLDevice& opt) {",
+        ),
     )
-    source = source.replace(
-        "return stdr::empty(m_options) || (stdr::any_of(m_options, [value](const DLDevice& opt) {",
-        "return m_options.empty() || (std::any_of(m_options.begin(), m_options.end(), [value](const DLDevice& opt) {",
-    )
-    if "stdv::iota" in source:
-        source = source.replace(
-            "return stdv::iota(static_cast<T>(0), end);",
-            "return IntegerRange<T>{static_cast<T>(0), end};",
-        )
-        source = source.replace(
-            "return stdv::iota(start, end);", "return IntegerRange<T>{start, end};"
-        )
+    for old, new in replacements:
+        if old.split("(", 1)[0] in source:
+            source = _replace_sglang_jit_source(source, old, new, filename=filename, required=True)
+    had_iota = "stdv::iota" in source
+    if had_iota:
+        iota_replacements = 0
+        for old, new in (
+            (
+                "return stdv::iota(static_cast<T>(0), end);",
+                "return IntegerRange<T>{static_cast<T>(0), end};",
+            ),
+            (
+                "return stdv::iota(start, end);",
+                "return IntegerRange<T>{start, end};",
+            ),
+        ):
+            count = source.count(old)
+            iota_replacements += count
+            source = source.replace(old, new)
+        if iota_replacements == 0 or "stdv::iota" in source:
+            raise RuntimeError(f"Failed to rewrite stdv::iota in SGLang JIT header {filename!r}")
         if "struct IntegerRange" not in source:
             idx = source.find("template <std::integral T>\ninline auto irange")
             if idx == -1:
                 idx = source.find("inline auto irange")
             if idx != -1:
-                source = (
-                    source[:idx]
-                    + SGLANG_JIT_INTEGER_RANGE
-                    + source[idx:]
+                source = source[:idx] + SGLANG_JIT_INTEGER_RANGE + source[idx:]
+            else:
+                raise RuntimeError(
+                    f"Failed to insert IntegerRange in SGLang JIT header {filename!r}"
                 )
+    if had_iota and "stdv::iota" in source:
+        raise RuntimeError(f"Unrewritten stdv::iota in SGLang JIT header {filename!r}")
     return source
 
 
 def _rewrite_sglang_jit_tensor_h(include_paths):
-    overlay_root = None
-    for path in include_paths:
-        kernel_include = os.path.join(path, "sgl_kernel")
-        if not os.path.isdir(kernel_include):
-            continue
-        for dirpath, _, filenames in os.walk(kernel_include):
-            rel = os.path.relpath(dirpath, kernel_include)
-            for filename in filenames:
-                src = os.path.join(dirpath, filename)
-                source = open(src, "r", encoding="utf-8", errors="replace").read()
-                updated = _rewrite_sglang_jit_header(filename, source)
-                if updated == source:
-                    continue
-                if overlay_root is None:
-                    overlay_root = tempfile.mkdtemp(prefix="torchada-sglang-jit-")
-                    overlay_kernel = os.path.join(overlay_root, "sgl_kernel")
-                    shutil.copytree(kernel_include, overlay_kernel, dirs_exist_ok=True)
-                dest_dir = overlay_kernel if rel == "." else os.path.join(overlay_kernel, rel)
-                os.makedirs(dest_dir, exist_ok=True)
-                open(os.path.join(dest_dir, filename), "w", encoding="utf-8").write(updated)
-        if overlay_root is not None:
-            return overlay_root
-    return None
+    cache_key = tuple(os.path.realpath(path) for path in include_paths)
+    with _sglang_jit_overlay_lock:
+        if cache_key in _sglang_jit_overlay_cache:
+            return _sglang_jit_overlay_cache[cache_key]
+        overlay_root = None
+        for path in cache_key:
+            kernel_include = os.path.join(path, "sgl_kernel")
+            if not os.path.isdir(kernel_include):
+                continue
+            for dirpath, _, filenames in os.walk(kernel_include):
+                rel = os.path.relpath(dirpath, kernel_include)
+                for filename in filenames:
+                    src = os.path.join(dirpath, filename)
+                    with open(src, "r", encoding="utf-8", errors="replace") as source_file:
+                        source = source_file.read()
+                    updated = _rewrite_sglang_jit_header(filename, source)
+                    if updated == source:
+                        continue
+                    if overlay_root is None:
+                        overlay_root = tempfile.mkdtemp(prefix="torchada-sglang-jit-")
+                        overlay_kernel = os.path.join(overlay_root, "sgl_kernel")
+                        shutil.copytree(kernel_include, overlay_kernel, dirs_exist_ok=True)
+                    dest_dir = overlay_kernel if rel == "." else os.path.join(overlay_kernel, rel)
+                    os.makedirs(dest_dir, exist_ok=True)
+                    with open(
+                        os.path.join(dest_dir, filename), "w", encoding="utf-8"
+                    ) as destination_file:
+                        destination_file.write(updated)
+            if overlay_root is not None:
+                break
+        _sglang_jit_overlay_cache[cache_key] = overlay_root
+        return overlay_root
 
 
 def _apply_sglang_jit_ninja(ninja):
@@ -2788,9 +2882,10 @@ def _apply_sglang_jit_toolchain(toolchain):
     original_base_cuda_flags = toolchain.base_cuda_flags
     original_base_include_paths = toolchain.base_include_paths
     original_base_link_flags = toolchain.base_link_flags
+    original_cuda_home = original_cuda_home()
 
     def cuda_home() -> str:
-        return CUDA_HOME or original_cuda_home()
+        return CUDA_HOME or original_cuda_home
 
     def device_compiler_path() -> str:
         musa_home = cuda_home()
@@ -2824,22 +2919,34 @@ def _apply_sglang_jit_toolchain(toolchain):
         if not with_device:
             return flags
         musa_home = cuda_home()
+        cuda_lib64 = (
+            os.path.normpath(os.path.join(original_cuda_home, "lib64"))
+            if original_cuda_home
+            else None
+        )
+        musa_lib = os.path.join(musa_home, "lib") if musa_home else None
         translated = []
         replaced_runtime = False
+        replaced_cuda_lib = False
         for flag in flags:
             if flag == "-lcudart":
                 translated.append("-lmusart")
                 replaced_runtime = True
                 continue
-            if musa_home and flag.startswith("-L") and flag.endswith("/lib64"):
-                translated.append(f"-L{os.path.join(musa_home, 'lib')}")
+            if (
+                musa_lib
+                and cuda_lib64
+                and flag.startswith("-L")
+                and os.path.normpath(flag[2:]) == cuda_lib64
+            ):
+                translated.append(f"-L{musa_lib}")
+                replaced_cuda_lib = True
                 continue
             translated.append(flag)
+        if musa_lib and not replaced_cuda_lib:
+            translated.append(f"-L{musa_lib}")
         if not replaced_runtime:
-            if musa_home:
-                translated.extend([f"-L{os.path.join(musa_home, 'lib')}", "-lmusart"])
-            else:
-                translated.append("-lmusart")
+            translated.append("-lmusart")
         return translated
 
     toolchain.cuda_home = cuda_home

@@ -8,6 +8,8 @@ from importlib.util import module_from_spec
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 from torchada._patch import _apply_sglang_jit_toolchain, _patch_sglang_jit_toolchain
 
 TOOLCHAIN_NAME = "sglang.kernels.jit.utils.compile.toolchain"
@@ -25,7 +27,14 @@ def _toolchain_module() -> ModuleType:
     ]
     module.base_include_paths = lambda: ["/opt/tvm-ffi/include"]
     module.base_link_flags = lambda *, with_device: (
-        ["-shared", "-Ltvm", "-ltvm_ffi", "-L/usr/local/cuda/lib64", "-lcudart"]
+        [
+            "-shared",
+            "-Ltvm",
+            "-ltvm_ffi",
+            "-L/opt/other/lib64",
+            "-L/usr/local/cuda/lib64",
+            "-lcudart",
+        ]
         if with_device
         else ["-shared", "-Ltvm", "-ltvm_ffi"]
     )
@@ -55,6 +64,7 @@ def _assert_mapped(toolchain, musa_home: str) -> None:
     assert "-lcudart" not in link_flags
     assert "-lmusart" in link_flags
     assert f"-L{musa_home}/lib" in link_flags
+    assert "-L/opt/other/lib64" in link_flags
 
 
 def test_sglang_jit_toolchain_maps_nvcc_gencode_and_cudart(monkeypatch, tmp_path):
@@ -129,7 +139,11 @@ def test_sglang_jit_import_hook_patches_the_first_import(monkeypatch, tmp_path):
 
 
 def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
-    from torchada._patch import SGLANG_JIT_TENSOR_H_ICE, _apply_sglang_jit_ninja
+    from torchada._patch import (
+        SGLANG_JIT_TENSOR_H_ICE,
+        _apply_sglang_jit_ninja,
+        _cleanup_sglang_jit_overlays,
+    )
 
     include_dir = tmp_path / "include"
     (include_dir / "sgl_kernel").mkdir(parents=True)
@@ -168,6 +182,9 @@ def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
         include_paths=(),
     )
     assert ninja.generate(spec) == "ok"
+    first_overlay_root = seen["include_paths"][0]
+    assert ninja.generate(spec) == "ok"
+    assert seen["include_paths"][0] == first_overlay_root
     assert seen["cuda_cflags"] == (
         "-DSGL_CUDA_ARCH=310",
         "-std=c++20",
@@ -180,3 +197,19 @@ def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
     assert SGLANG_JIT_TENSOR_H_ICE not in tensor
     assert "stdv::iota" not in utils
     assert (overlay_root / "sgl_kernel" / "source_location.h").exists()
+    _cleanup_sglang_jit_overlays()
+    assert not overlay_root.exists()
+
+
+def test_sglang_jit_header_rewrite_rejects_stale_upstream_text():
+    from torchada._patch import _rewrite_sglang_jit_header
+
+    with pytest.raises(RuntimeError, match="tensor.h"):
+        _rewrite_sglang_jit_header(
+            "tensor.h",
+            "#include <ranges>\n"
+            "namespace stdr = std::ranges;\n"
+            "namespace stdv = stdr::views;\n"
+            "#ifdef __CUDACC__\n"
+            "constexpr auto max_type = changed_expression;\n",
+        )
