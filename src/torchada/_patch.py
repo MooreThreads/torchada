@@ -2672,6 +2672,12 @@ SGLANG_JIT_INTEGER_RANGE = (
     "constexpr iterator end() const { return iterator{end_value}; } };\n\n"
 )
 
+SGLANG_JIT_MUSA_GRID_CONSTANT = (
+    "#if defined(__MUSACC__) && !defined(__grid_constant__)\n"
+    "#define __grid_constant__\n"
+    "#endif\n"
+)
+
 _sglang_jit_overlay_cache: Dict[Tuple[str, ...], Optional[str]] = {}
 _sglang_jit_overlay_lock = threading.Lock()
 
@@ -2712,6 +2718,14 @@ def _replace_sglang_jit_source(
 
 
 def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
+    if filename == "utils.cuh" and "#define __grid_constant__" not in source:
+        source = _replace_sglang_jit_source(
+            source,
+            "#pragma once\n",
+            "#pragma once\n" + SGLANG_JIT_MUSA_GRID_CONSTANT,
+            filename=filename,
+            required=True,
+        )
     if "#include <ranges>" in source:
         source = _replace_sglang_jit_source(
             source,
