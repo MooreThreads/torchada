@@ -2718,7 +2718,7 @@ def _replace_sglang_jit_source(
 
 
 def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
-    if filename == "utils.cuh" and "#define __grid_constant__" not in source:
+    if filename == "utils.cuh" and "#if defined(__MUSACC__) && !defined(__grid_constant__)" not in source:
         source = _replace_sglang_jit_source(
             source,
             "#pragma once\n",

@@ -258,4 +258,23 @@ def test_sglang_jit_utils_header_does_not_duplicate_grid_constant():
         "#define __grid_constant__\n"
         "#endif\n"
     )
-    assert _rewrite_sglang_jit_header("utils.cuh", source) == source
+    rewritten = _rewrite_sglang_jit_header("utils.cuh", source)
+    assert _rewrite_sglang_jit_header("utils.cuh", rewritten) == rewritten
+
+
+def test_sglang_jit_utils_header_adds_musa_guard_when_hip_guard_exists():
+    from torchada._patch import _rewrite_sglang_jit_header
+
+    source = (
+        "#pragma once\n"
+        "#ifndef USE_ROCM\n"
+        "#include <cuda_runtime.h>\n"
+        "#else\n"
+        "#ifndef __grid_constant__\n"
+        "#define __grid_constant__\n"
+        "#endif\n"
+        "#endif\n"
+    )
+    rewritten = _rewrite_sglang_jit_header("utils.cuh", source)
+    assert rewritten.count("#define __grid_constant__") == 2
+    assert "#if defined(__MUSACC__) && !defined(__grid_constant__)" in rewritten
