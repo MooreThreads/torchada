@@ -25,6 +25,7 @@ import functools
 import inspect
 import logging
 import os
+import shutil
 import sys
 import threading
 import tempfile
@@ -2653,59 +2654,30 @@ def _translate_nvcc_flags_for_mcc(flags):
 
 
 SGLANG_JIT_TENSOR_H_ICE = "constexpr auto max_type = stdr::max(map | stdv::keys);"
-SGLANG_JIT_TENSOR_H_REWRITE = (
-    "constexpr auto max_type = std::max({"
-    "map[0].first, map[1].first, map[2].first, map[3].first, "
-    "map[4].first, map[5].first, map[6].first, map[7].first, "
-    "map[8].first, map[9].first, map[10].first, map[11].first, "
-    "map[12].first, map[13].first, map[14].first, map[15].first});"
+SGLANG_JIT_TENSOR_H_REWRITE = "constexpr auto max_type = std::max({" + ", ".join(
+    f"map[{i}].first" for i in range(16)
+) + "});"
+
+SGLANG_JIT_INTEGER_RANGE = (
+    "template <typename T> struct IntegerRange { T begin_value; T end_value; "
+    "struct iterator { T value; constexpr T operator*() const { return value; } "
+    "constexpr iterator& operator++() { ++value; return *this; } "
+    "constexpr bool operator!=(const iterator& other) const { return value != other.value; } }; "
+    "constexpr iterator begin() const { return iterator{begin_value}; } "
+    "constexpr iterator end() const { return iterator{end_value}; } };\n\n"
 )
 
 
-SGLANG_JIT_UTILS_H_IRANGE = """template <std::integral T>
-inline auto irange(T end) {
-  return stdv::iota(static_cast<T>(0), end);
-}
-
-/// \brief Python-style integer range: `irange(start, end)` -> `[start, end)`.
-template <std::integral T>
-inline auto irange(T start, T end) {
-  return stdv::iota(start, end);
-}"""
-
-SGLANG_JIT_UTILS_H_IRANGE_REWRITE = """template <typename T>
-struct IntegerRange {
-  T begin_value;
-  T end_value;
-  struct iterator {
-    T value;
-    constexpr T operator*() const { return value; }
-    constexpr iterator& operator++() {
-      ++value;
-      return *this;
-    }
-    constexpr bool operator!=(const iterator& other) const { return value != other.value; }
-  };
-  constexpr iterator begin() const { return iterator{begin_value}; }
-  constexpr iterator end() const { return iterator{end_value}; }
-};
-
-template <std::integral T>
-inline auto irange(T end) {
-  return IntegerRange<T>{static_cast<T>(0), end};
-}
-
-/// \brief Python-style integer range: `irange(start, end)` -> `[start, end)`.
-template <std::integral T>
-inline auto irange(T start, T end) {
-  return IntegerRange<T>{start, end};
-}"""
-
-
-def _strip_sglang_jit_ranges(source: str) -> str:
+def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
     source = source.replace("#include <ranges>\n", "")
     source = source.replace("namespace stdr = std::ranges;\n", "")
     source = source.replace("namespace stdv = stdr::views;\n", "")
+    if filename == "tensor.h":
+        source = source.replace(SGLANG_JIT_TENSOR_H_ICE, SGLANG_JIT_TENSOR_H_REWRITE, 1)
+        source = source.replace(
+            "#ifdef __CUDACC__",
+            "#if defined(__CUDACC__) || defined(__MUSACC__)",
+        )
     source = source.replace(
         "return stdr::empty(m_options) || (stdr::find(m_options, value) != stdr::end(m_options));",
         "return m_options.empty() || (std::find(m_options.begin(), m_options.end(), value) != m_options.end());",
@@ -2729,48 +2701,34 @@ def _strip_sglang_jit_ranges(source: str) -> str:
             if idx != -1:
                 source = (
                     source[:idx]
-                    + SGLANG_JIT_UTILS_H_IRANGE_REWRITE.split("template <std::integral T>")[0]
+                    + SGLANG_JIT_INTEGER_RANGE
                     + source[idx:]
                 )
     return source
 
 
 def _rewrite_sglang_jit_tensor_h(include_paths):
-    """Rewrite SGLang JIT headers that mcc 5.2 / clang-14 cannot compile.
-
-    mcc segfaults on stdr::max(map | stdv::keys), does not define __CUDACC__,
-    and rejects libstdc++ ranges in the device pass. Overlay copies keep the
-    original headers on disk unchanged.
-    """
-    overlay_root = os.path.join(tempfile.gettempdir(), "torchada-sglang-jit-tensor-h")
-    rewritten = False
+    overlay_root = None
     for path in include_paths:
         kernel_include = os.path.join(path, "sgl_kernel")
         if not os.path.isdir(kernel_include):
             continue
-        overlay_kernel = os.path.join(overlay_root, "sgl_kernel")
-        os.makedirs(overlay_kernel, exist_ok=True)
         for dirpath, _, filenames in os.walk(kernel_include):
             rel = os.path.relpath(dirpath, kernel_include)
-            dest_dir = overlay_kernel if rel == "." else os.path.join(overlay_kernel, rel)
-            os.makedirs(dest_dir, exist_ok=True)
             for filename in filenames:
                 src = os.path.join(dirpath, filename)
-                dest = os.path.join(dest_dir, filename)
                 source = open(src, "r", encoding="utf-8", errors="replace").read()
-                updated = source
-                if filename == "tensor.h":
-                    updated = updated.replace(
-                        SGLANG_JIT_TENSOR_H_ICE, SGLANG_JIT_TENSOR_H_REWRITE, 1
-                    )
-                    updated = updated.replace(
-                        "#ifdef __CUDACC__",
-                        "#if defined(__CUDACC__) || defined(__MUSACC__)",
-                    )
-                updated = _strip_sglang_jit_ranges(updated)
-                open(dest, "w", encoding="utf-8").write(updated)
-                rewritten = True
-        if rewritten:
+                updated = _rewrite_sglang_jit_header(filename, source)
+                if updated == source:
+                    continue
+                if overlay_root is None:
+                    overlay_root = tempfile.mkdtemp(prefix="torchada-sglang-jit-")
+                    overlay_kernel = os.path.join(overlay_root, "sgl_kernel")
+                    shutil.copytree(kernel_include, overlay_kernel, dirs_exist_ok=True)
+                dest_dir = overlay_kernel if rel == "." else os.path.join(overlay_kernel, rel)
+                os.makedirs(dest_dir, exist_ok=True)
+                open(os.path.join(dest_dir, filename), "w", encoding="utf-8").write(updated)
+        if overlay_root is not None:
             return overlay_root
     return None
 

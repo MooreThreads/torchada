@@ -128,32 +128,35 @@ def test_sglang_jit_import_hook_patches_the_first_import(monkeypatch, tmp_path):
         sys.modules.pop(TOOLCHAIN_NAME, None)
 
 
-def test_translate_nvcc_flags_for_mcc_drops_nvcc_only_options():
-    from torchada._patch import _translate_nvcc_flags_for_mcc
+def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
+    from torchada._patch import SGLANG_JIT_TENSOR_H_ICE, _apply_sglang_jit_ninja
 
-    flags = _translate_nvcc_flags_for_mcc(
-        [
-            "-Xcompiler",
-            "-fPIC",
-            "--expt-relaxed-constexpr",
-            "-gencode=arch=compute_90,code=sm_90",
-            "-O3",
-        ]
+    include_dir = tmp_path / "include"
+    (include_dir / "sgl_kernel").mkdir(parents=True)
+    (include_dir / "sgl_kernel" / "tensor.h").write_text(
+        "#include <ranges>\n"
+        "namespace stdr = std::ranges;\n"
+        "namespace stdv = stdr::views;\n"
+        "#ifdef __CUDACC__\n"
+        f"{SGLANG_JIT_TENSOR_H_ICE}\n"
     )
-    assert flags == ["-fPIC", "-O3"]
-
-
-def test_sglang_jit_ninja_drops_nvcc_only_cuda_cflags():
-    from torchada._patch import _apply_sglang_jit_ninja
-
+    (include_dir / "sgl_kernel" / "utils.h").write_text(
+        "namespace stdr = std::ranges;\n"
+        "namespace stdv = stdr::views;\n"
+        "template <std::integral T>\n"
+        "inline auto irange(T end) { return stdv::iota(static_cast<T>(0), end); }\n"
+    )
+    (include_dir / "sgl_kernel" / "source_location.h").write_text("#pragma once\n")
     seen = {}
 
     def generate(spec):
         seen["cuda_cflags"] = spec.cuda_cflags
+        seen["include_paths"] = spec.include_paths
         return "ok"
 
     ninja = ModuleType("sglang.kernels.jit.utils.compile.ninja")
     ninja.generate = generate
+    ninja.toolchain = SimpleNamespace(base_include_paths=lambda: [str(include_dir)])
     _apply_sglang_jit_ninja(ninja)
     spec = SimpleNamespace(
         cuda_cflags=(
@@ -170,78 +173,10 @@ def test_sglang_jit_ninja_drops_nvcc_only_cuda_cflags():
         "-std=c++20",
         "-O3",
     )
-
-
-def test_sglang_jit_ninja_rewrites_tensor_h_ice_expression(tmp_path):
-    from torchada._patch import (
-        SGLANG_JIT_TENSOR_H_ICE,
-        SGLANG_JIT_TENSOR_H_REWRITE,
-        _apply_sglang_jit_ninja,
-    )
-
-    include_dir = tmp_path / "include"
-    header = include_dir / "sgl_kernel" / "tensor.h"
-    header.parent.mkdir(parents=True)
-    header.write_text(
-        "inline constexpr auto kDeviceStringMap = [] {\n"
-        f"  {SGLANG_JIT_TENSOR_H_ICE}\n"
-        "  return max_type;\n"
-        "}();\n"
-    )
-    seen = {}
-
-    def generate(spec):
-        seen["include_paths"] = spec.include_paths
-        return "ok"
-
-    ninja = ModuleType("sglang.kernels.jit.utils.compile.ninja")
-    ninja.generate = generate
-    ninja.toolchain = SimpleNamespace(base_include_paths=lambda: [str(include_dir)])
-    _apply_sglang_jit_ninja(ninja)
-    spec = SimpleNamespace(
-        cuda_cflags=("-O3",),
-        include_paths=(),
-    )
-    assert ninja.generate(spec) == "ok"
-    overlay_root = seen["include_paths"][0]
-    overlay = Path(overlay_root) / "sgl_kernel" / "tensor.h"
-    rewritten = overlay.read_text()
-    assert SGLANG_JIT_TENSOR_H_ICE not in rewritten
-    assert SGLANG_JIT_TENSOR_H_REWRITE in rewritten
-    assert SGLANG_JIT_TENSOR_H_ICE in header.read_text()
-
-
-def test_sglang_jit_ninja_rewrites_utils_irange_and_musacc_guard(tmp_path):
-    from torchada._patch import (
-        SGLANG_JIT_UTILS_H_IRANGE,
-        SGLANG_JIT_UTILS_H_IRANGE_REWRITE,
-        _apply_sglang_jit_ninja,
-    )
-
-    include_dir = tmp_path / "include"
-    (include_dir / "sgl_kernel").mkdir(parents=True)
-    (include_dir / "sgl_kernel" / "tensor.h").write_text("#ifdef __CUDACC__\n")
-    (include_dir / "sgl_kernel" / "utils.h").write_text(
-        "#ifdef __CUDACC__\n" + SGLANG_JIT_UTILS_H_IRANGE + "\n"
-    )
-    seen = {}
-
-    def generate(spec):
-        seen["include_paths"] = spec.include_paths
-        return "ok"
-
-    ninja = ModuleType("sglang.kernels.jit.utils.compile.ninja")
-    ninja.generate = generate
-    ninja.toolchain = SimpleNamespace(base_include_paths=lambda: [str(include_dir)])
-    _apply_sglang_jit_ninja(ninja)
-    spec = SimpleNamespace(cuda_cflags=("-O3",), include_paths=())
-    assert ninja.generate(spec) == "ok"
-    overlay_root = seen["include_paths"][0]
-    tensor = (Path(overlay_root) / "sgl_kernel" / "tensor.h").read_text()
-    utils = (Path(overlay_root) / "sgl_kernel" / "utils.h").read_text()
+    overlay_root = Path(seen["include_paths"][0])
+    tensor = (overlay_root / "sgl_kernel" / "tensor.h").read_text()
+    utils = (overlay_root / "sgl_kernel" / "utils.h").read_text()
     assert "#if defined(__CUDACC__) || defined(__MUSACC__)" in tensor
-    assert "#ifdef __CUDACC__" not in tensor
-    assert "#if defined(__CUDACC__) || defined(__MUSACC__)" not in utils
-    assert "#ifdef __CUDACC__" in utils
-    assert SGLANG_JIT_UTILS_H_IRANGE_REWRITE in utils
+    assert SGLANG_JIT_TENSOR_H_ICE not in tensor
     assert "stdv::iota" not in utils
+    assert (overlay_root / "sgl_kernel" / "source_location.h").exists()

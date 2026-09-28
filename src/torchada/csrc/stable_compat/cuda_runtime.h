@@ -36,14 +36,12 @@
 #ifndef CUDA_VERSION
 #ifdef MUSA_VERSION
 #define CUDA_VERSION MUSA_VERSION
-#else
-#define CUDA_VERSION 12000
 #endif
 #endif
 #ifndef CUDART_VERSION
 #ifdef MUSART_VERSION
 #define CUDART_VERSION MUSART_VERSION
-#else
+#elif defined(CUDA_VERSION)
 #define CUDART_VERSION CUDA_VERSION
 #endif
 #endif
