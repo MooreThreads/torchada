@@ -195,6 +195,8 @@ def test_sglang_jit_ninja_translates_flags_and_overlays_headers(tmp_path):
     utils = (overlay_root / "sgl_kernel" / "utils.h").read_text()
     assert "#if defined(__CUDACC__) || defined(__MUSACC__)" in tensor
     assert SGLANG_JIT_TENSOR_H_ICE not in tensor
+    assert "map[15].first" not in tensor
+    assert "for (const auto& item : map)" in tensor
     assert "stdv::iota" not in utils
     assert (overlay_root / "sgl_kernel" / "source_location.h").exists()
     _cleanup_sglang_jit_overlays()

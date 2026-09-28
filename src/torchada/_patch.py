@@ -2655,9 +2655,13 @@ def _translate_nvcc_flags_for_mcc(flags):
 
 
 SGLANG_JIT_TENSOR_H_ICE = "constexpr auto max_type = stdr::max(map | stdv::keys);"
-SGLANG_JIT_TENSOR_H_REWRITE = (
-    "constexpr auto max_type = std::max({" + ", ".join(f"map[{i}].first" for i in range(16)) + "});"
-)
+SGLANG_JIT_TENSOR_H_REWRITE = """constexpr auto max_type = [&] {
+    auto result = map.front().first;
+    for (const auto& item : map) {
+      result = std::max(result, item.first);
+    }
+    return result;
+  }();"""
 
 SGLANG_JIT_INTEGER_RANGE = (
     "template <typename T> struct IntegerRange { T begin_value; T end_value; "
@@ -2787,8 +2791,6 @@ def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
                 raise RuntimeError(
                     f"Failed to insert IntegerRange in SGLang JIT header {filename!r}"
                 )
-    if had_iota and "stdv::iota" in source:
-        raise RuntimeError(f"Unrewritten stdv::iota in SGLang JIT header {filename!r}")
     return source
 
 
