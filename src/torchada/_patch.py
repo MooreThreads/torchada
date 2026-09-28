@@ -2207,7 +2207,25 @@ class _CDLLWrapper:
     def __getattr__(self, name: str):
         cdll = object.__getattribute__(self, "_cdll")
         translated_name = self._translate_name(name)
-        value = getattr(cdll, translated_name)
+        try:
+            value = getattr(cdll, translated_name)
+        except AttributeError:
+            # Current MCCL images do not export NCCL's optional
+            # InitRankConfig entry point. Preserve SGLang's four-argument
+            # call ABI while using the base communicator initializer.
+            if (
+                object.__getattribute__(self, "_lib_type") == "mccl"
+                and translated_name == "mcclCommInitRankConfig"
+            ):
+                init_rank = getattr(cdll, "mcclCommInitRank")
+
+                def init_rank_config(world_size, unique_id, rank, config):
+                    del config
+                    return init_rank(world_size, unique_id, rank)
+
+                value = init_rank_config
+            else:
+                raise
         # Cache in __dict__ for faster subsequent access
         object.__setattr__(self, name, value)
         return value
