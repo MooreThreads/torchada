@@ -238,10 +238,7 @@ def test_sglang_jit_header_rewrite_rejects_unexpected_cuda_guard_count():
 
 
 def test_sglang_jit_utils_header_defines_musa_grid_constant():
-    from torchada._patch import (
-        SGLANG_JIT_MUSA_GRID_CONSTANT,
-        _rewrite_sglang_jit_header,
-    )
+    from torchada._patch import SGLANG_JIT_MUSA_GRID_CONSTANT, _rewrite_sglang_jit_header
 
     source = "#pragma once\n#include <cuda_runtime.h>\n"
     rewritten = _rewrite_sglang_jit_header("utils.cuh", source)
@@ -252,12 +249,7 @@ def test_sglang_jit_utils_header_defines_musa_grid_constant():
 def test_sglang_jit_utils_header_does_not_duplicate_grid_constant():
     from torchada._patch import _rewrite_sglang_jit_header
 
-    source = (
-        "#pragma once\n"
-        "#ifndef __grid_constant__\n"
-        "#define __grid_constant__\n"
-        "#endif\n"
-    )
+    source = "#pragma once\n" "#ifndef __grid_constant__\n" "#define __grid_constant__\n" "#endif\n"
     rewritten = _rewrite_sglang_jit_header("utils.cuh", source)
     assert _rewrite_sglang_jit_header("utils.cuh", rewritten) == rewritten
 

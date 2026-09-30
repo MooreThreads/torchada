@@ -28,8 +28,8 @@ import logging
 import os
 import shutil
 import sys
-import threading
 import tempfile
+import threading
 import time
 import warnings
 from types import ModuleType, SimpleNamespace
@@ -1179,9 +1179,7 @@ def _discover_factory_functions() -> Tuple[List[str], List[str]]:
     if not names:
         names.update(_FALLBACK_FACTORY_FUNCTIONS)
         # torch does not device-inject into the ``*_like`` family.
-        device_injectable.update(
-            n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like")
-        )
+        device_injectable.update(n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like"))
     # ``*_like`` variants accept device= but are not device-injected by torch.
     names |= {n + "_like" for n in tuple(names) if callable(getattr(torch, n + "_like", None))}
     for extra in _EXTRA_FACTORY_FUNCTIONS:
@@ -2736,7 +2734,10 @@ def _replace_sglang_jit_source(
 
 
 def _rewrite_sglang_jit_header(filename: str, source: str) -> str:
-    if filename == "utils.cuh" and "#if defined(__MUSACC__) && !defined(__grid_constant__)" not in source:
+    if (
+        filename == "utils.cuh"
+        and "#if defined(__MUSACC__) && !defined(__grid_constant__)" not in source
+    ):
         source = _replace_sglang_jit_source(
             source,
             "#pragma once\n",
