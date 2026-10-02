@@ -431,6 +431,7 @@ if is_nvidia() or is_musa():
 | [LightX2V](https://github.com/ModelTC/LightX2V) | 图像/视频生成 | ✅ 已合并 | — |
 | [赤兔](https://github.com/thu-pacman/chitu) | 模型服务 | ✅ 已合并 | — |
 | [Mooncake](https://github.com/kvcache-ai/Mooncake) | KV 缓存 | ✅ 已合并 | — |
+| [ms-swift](https://github.com/modelscope/ms-swift) | 训练/微调 | ✅ 已合并 | — |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | 图像/视频生成 | 🚧 进行中 | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
 
 

@@ -452,6 +452,7 @@ if is_nvidia() or is_musa():
 | [LightX2V](https://github.com/ModelTC/LightX2V) | Image/Video Generation | ✅ Merged | — |
 | [Chitu](https://github.com/thu-pacman/chitu) | Model Serving | ✅ Merged | — |
 | [Mooncake](https://github.com/kvcache-ai/Mooncake) | KVCache | ✅ Merged | — |
+| [ms-swift](https://github.com/modelscope/ms-swift) | Training / Fine-tuning | ✅ Merged | — |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | Image/Video Generation | 🚧 In Progress | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
 
 ## License
