@@ -6,19 +6,21 @@ import triton
 import triton.language as tl
 
 from torchada.triton.kernels.moe.kernel import invoke_fused_moe_kernel
+from torchada.triton.musa_compat import triton_backend_is_musa
 from torchada.triton.runtime.fused_moe.config import (
     get_config_dtype_str,
     try_get_optimal_moe_config,
 )
 
 try:
-    # Triton 3.2 ships ``triton.tools.tensor_descriptor`` on MUSA, but does
-    # not expose the language-level constructor used by the TMA path.  Check
-    # the API that the generated kernel actually calls instead of treating the
-    # import itself as proof of support.
+    # The TMA path passes host ``TensorDescriptor`` arguments to the kernel.
+    # ``tl.make_tensor_descriptor`` marks a Triton with tensor-descriptor
+    # support; the path is not validated on the MUSA backend, so it stays off.
     from triton.tools.tensor_descriptor import TensorDescriptor  # noqa: F401
 
-    _support_tensor_descriptor = hasattr(tl, "make_tensor_descriptor")
+    _support_tensor_descriptor = (
+        hasattr(tl, "make_tensor_descriptor") and not triton_backend_is_musa()
+    )
 except (ImportError, AttributeError):
     _support_tensor_descriptor = False
 

@@ -1176,9 +1176,7 @@ def _discover_factory_functions() -> Tuple[List[str], List[str]]:
     if not names:
         names.update(_FALLBACK_FACTORY_FUNCTIONS)
         # torch does not device-inject into the ``*_like`` family.
-        device_injectable.update(
-            n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like")
-        )
+        device_injectable.update(n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like"))
     # ``*_like`` variants accept device= but are not device-injected by torch.
     names |= {n + "_like" for n in tuple(names) if callable(getattr(torch, n + "_like", None))}
     for extra in _EXTRA_FACTORY_FUNCTIONS:
@@ -2500,6 +2498,110 @@ def _patch_triton_extra():
 
 
 @patch_function
+@requires_import("torch_musa", "triton")
+def _patch_triton_backend_hash():
+    """Let torchada Triton codegen patches salt the MUSA backend hash.
+
+    Installed before any compilation so that Triton's cache keys and torch
+    Inductor's cached ``triton_hash_with_backend`` include every salt. Without
+    a registered salt the hash is unchanged.
+    """
+    if not is_musa_platform():
+        return
+
+    from .triton.musa_compat import install_backend_hash_salt, musa_triton_info
+
+    if musa_triton_info().is_musa_backend:
+        install_backend_hash_salt()
+
+
+@patch_function
+@requires_import("torch_musa", "triton.compiler.code_generator")
+def _patch_triton_ast_function_deserialize():
+    """Keep ``ASTFunction`` argument attributes on the arguments they describe.
+
+    Applies to MUSA Triton 3.6, whose ``ASTFunction`` takes ``attrs`` but no
+    ``constants``. Native launches compile unchanged; torch Inductor's
+    ``generate_ttir`` mutation analysis gets a correctly attributed signature.
+    """
+    if not is_musa_platform():
+        return
+
+    from .triton.musa_compat import install_deserialize_fix
+
+    install_deserialize_fix()
+
+
+@patch_function
+@requires_import("torch_musa", "triton.runtime.jit")
+def _patch_triton_inplace_alias_pairs():
+    """Number MUSA Triton ``inplace_alias_pairs`` by IR argument.
+
+    ``TORCHADA_TRITON_INPLACE_ALIAS`` selects ``fix`` (default), ``off`` (emit
+    no pairs) or ``vendor`` (keep Triton's helper).
+    """
+    if not is_musa_platform():
+        return
+
+    from .triton.musa_compat import inplace_alias_mode, install_inplace_alias_fix
+
+    status = install_inplace_alias_fix(inplace_alias_mode())
+    logger.debug("torchada: Triton inplace_alias_pairs: %s", status)
+
+
+def _warn_inductor_compile_workers(feature: str) -> None:
+    """Warn when Inductor may compile Triton kernels in worker processes."""
+    try:
+        from torch._inductor import config as inductor_config
+    except Exception:  # noqa: BLE001 - Inductor unavailable
+        return
+    threads = getattr(inductor_config, "compile_threads", 1) or 1
+    if threads > 1:
+        logger.warning(
+            "torchada: %s is enabled but torch._inductor.config.compile_threads=%s; "
+            "Inductor compile workers that do not import torchada compile without it",
+            feature,
+            threads,
+        )
+
+
+@patch_function
+@requires_import("torch_musa", "triton.language")
+def _patch_triton_fast_exp():
+    """Opt-in: lower fp32 ``tl.exp`` to ``exp2(x * log2(e))`` on MUSA.
+
+    Enabled by ``TORCHADA_TRITON_FAST_EXP=1``. Kernels are recompiled because
+    the change is salted into the MUSA backend hash.
+    """
+    if not is_musa_platform():
+        return
+
+    from .triton.musa_compat import FAST_EXP_ENV, fast_exp_requested, install_fast_exp
+
+    if fast_exp_requested() and install_fast_exp():
+        _warn_inductor_compile_workers(f"{FAST_EXP_ENV}=1")
+
+
+@patch_function
+@requires_import("torch_musa", "triton")
+def _patch_triton_f32_default():
+    """Opt-in: set the fp32 ``tl.dot`` precision on MUSA.
+
+    ``TORCHADA_TRITON_F32_DEFAULT=<precision>`` exports ``TRITON_F32_DEFAULT``
+    unless it is already set. Triton applies it to every fp32 ``tl.dot``
+    without an explicit ``input_precision=``, overriding ``allow_tf32=`` and
+    Inductor's fp32 mm template setting. Values the MUSA backend does not
+    accept are refused with a warning.
+    """
+    if not is_musa_platform():
+        return
+
+    from .triton.musa_compat import install_f32_default
+
+    install_f32_default()
+
+
+@patch_function
 def _patch_ctypes_cdll():
     """
     Patch ctypes.CDLL to automatically translate CUDA/NCCL function names to MUSA/MCCL.
@@ -2590,6 +2692,10 @@ def apply_patches():
     - torch.accelerator.synchronize() -> torch.musa.synchronize()
     - torch.accelerator context managers (device_index, stream) for forward compatibility
     - Triton tl.extra.cuda.gdc_wait / gdc_launch_dependents unsupported shim
+    - MUSA Triton fixes: ASTFunction argument attributes on IR arguments only,
+      inplace_alias_pairs numbered by IR argument (TORCHADA_TRITON_INPLACE_ALIAS),
+      opt-in fp32 tl.exp fast path (TORCHADA_TRITON_FAST_EXP) and opt-in fp32
+      tl.dot default precision (TORCHADA_TRITON_F32_DEFAULT)
     - ctypes.CDLL function name translation for MUSA libraries:
         - cudaXxx -> musaXxx (for libmusart)
         - ncclXxx -> mcclXxx (for libmccl)

@@ -70,6 +70,7 @@ torch.cuda.synchronize()
 | MUSA mm/bmm `out_dtype` | 在 `torch_musa 2.13.0` 以下，`torch.mm`/`torch.bmm` 的 `out_dtype=` 复用普通重载并以 fp32 累加，同时运行期探针报告该重载损坏。实测损坏于 `2.11.0.post1+musa5.2.0`（`mm` 全零、`bmm` 错值）；**torch_musa 承诺在 `2.13.0` 修复，我们尚未验证** —— 包装层在该版本以下武装、自该版本起不安装，正确性由探针按进程裁决 |
 | Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
 | Triton 融合 MoE | 面向 vLLM 和 SGLang 的 Triton 3.2.0 MTT S5000 调优配置 |
+| MUSA Triton 3.6 | 前端/运行时修复与可选代码生成设置，vLLM 与 SGLang 共用 |
 
 **未覆盖**：binding 本身不含 `*_Dtype` 重载的构建，`out_dtype=` 仍会报错。那是 binding 的契约、不是 torchada 要修的缺陷，
 为该情形做 CUDA 等价支持不在范围内。
@@ -156,6 +157,22 @@ JoyAI-LLM-Flash 上、下投影配置。调优结果与环境相关；其他 Tri
 导入时，torchada 会通过 `SGLANG_MOE_CONFIG_DIR` 和
 `VLLM_TUNED_CONFIG_FOLDER` 将 SGLang 与 vLLM 指向内置配置。已有环境变量不会
 被覆盖；如需使用自定义配置，请在导入 torchada 前设置相应变量。
+
+### MUSA Triton
+
+torchada 在导入时应用以下 Triton 修复与可选设置。前三项仅作用于 MUSA Triton 3.6；
+`TORCHADA_TRITON_F32_DEFAULT` 作用于任何带 `musa` backend 的 Triton。其他平台以及
+MUSA Triton 3.2（`mtgpu` backend）保持不变。
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| （无） | 开启 | `ASTFunction.deserialize` 只把参数属性放到 IR 参数上，torch Inductor 对用户 Triton kernel 的写入分析因此得到正确的签名 |
+| `TORCHADA_TRITON_INPLACE_ALIAS` | `fix` | `fix` 按 IR 参数编号 `inplace_alias_pairs`，`off` 不生成任何配对，`vendor` 保留 Triton 自带实现 |
+| `TORCHADA_TRITON_FAST_EXP` | 未设置 | 设为 `1` 时把 fp32 `tl.exp` 降级为 `exp2(x * log2(e))`，以精度换速度；MUSA backend hash 会加入 salt，已缓存的 kernel 会重新编译 |
+| `TORCHADA_TRITON_F32_DEFAULT` | 未设置 | 在 `TRITON_F32_DEFAULT` 未设置时导出该值（`ieee`、`tf32`、`tf32x3`、`bf16x3`、`bf16x6`）。Triton 会把它用于所有未显式指定 `input_precision=` 的 fp32 `tl.dot`，并覆盖 `allow_tf32=`（包括 `allow_tf32=False` 和 Inductor 的 fp32 mm 模板）；在其他取值下生成的 Inductor autotune 缓存需要清除 |
+
+请在第一次 Triton 编译之前、以及在导入时绑定 `tl.exp` 的模块之前导入 torchada。
+torchada 的融合 MoE kernel 在 MUSA backend 上关闭 tensor descriptor（TMA）路径，该路径尚未在 MUSA 上验证。
 
 ### SGLang FlashAttention
 
