@@ -168,7 +168,7 @@ MUSA Triton 3.2（`mtgpu` backend）保持不变。
 |------|------|------|
 | （无） | 开启 | `ASTFunction.deserialize` 只把参数属性放到 IR 参数上，torch Inductor 对用户 Triton kernel 的写入分析因此得到正确的签名 |
 | `TORCHADA_TRITON_INPLACE_ALIAS` | `fix` | `fix` 按 IR 参数编号 `inplace_alias_pairs`，`off` 不生成任何配对，`vendor` 保留 Triton 自带实现 |
-| `TORCHADA_TRITON_FAST_EXP` | 未设置 | 设为 `1` 时把 fp32 `tl.exp` 降级为 `exp2(x * log2(e))`，以精度换速度；MUSA backend hash 会加入 salt，已缓存的 kernel 会重新编译 |
+| `TORCHADA_TRITON_FAST_EXP` | 开启 | 把 fp32 `tl.exp` 改为 `exp2(x * log2(e))`，与 MUSA Triton 3.2 的做法一致（3.6 生成较慢的软件 expf）；设为 `0` 时保留 Triton 原有实现。MUSA backend hash 会加入 salt，已缓存的 kernel 会重新编译 |
 | `TORCHADA_TRITON_F32_DEFAULT` | 未设置 | 在 `TRITON_F32_DEFAULT` 未设置时导出该值（`ieee`、`tf32`、`tf32x3`、`bf16x3`、`bf16x6`）。Triton 会把它用于所有未显式指定 `input_precision=` 的 fp32 `tl.dot`，并覆盖 `allow_tf32=`（包括 `allow_tf32=False` 和 Inductor 的 fp32 mm 模板）；在其他取值下生成的 Inductor autotune 缓存需要清除 |
 
 请在第一次 Triton 编译之前、以及在导入时绑定 `tl.exp` 的模块之前导入 torchada。

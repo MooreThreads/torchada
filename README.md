@@ -179,7 +179,7 @@ applies to any Triton with the `musa` backend. Other platforms and MUSA Triton
 |----------|---------|--------|
 | (none) | on | `ASTFunction.deserialize` places argument attributes on IR arguments only, so torch Inductor's mutation analysis of user Triton kernels sees the correct signature |
 | `TORCHADA_TRITON_INPLACE_ALIAS` | `fix` | `fix` numbers `inplace_alias_pairs` by IR argument, `off` emits no pairs, `vendor` keeps Triton's helper |
-| `TORCHADA_TRITON_FAST_EXP` | unset | `1` lowers fp32 `tl.exp` to `exp2(x * log2(e))`, trading accuracy for speed; the MUSA backend hash is salted so cached kernels are rebuilt |
+| `TORCHADA_TRITON_FAST_EXP` | on | Lowers fp32 `tl.exp` to `exp2(x * log2(e))`, as MUSA Triton 3.2 did (3.6 emits a slower software expf); `0` keeps Triton's lowering. The MUSA backend hash is salted so cached kernels are rebuilt |
 | `TORCHADA_TRITON_F32_DEFAULT` | unset | Exports `TRITON_F32_DEFAULT` (`ieee`, `tf32`, `tf32x3`, `bf16x3`, `bf16x6`) unless it is already set. Triton applies it to every fp32 `tl.dot` without an explicit `input_precision=`, overriding `allow_tf32=` (including `allow_tf32=False` and Inductor's fp32 mm templates); clear Inductor autotune caches built under another value |
 
 Import torchada before the first Triton compilation and before modules that bind

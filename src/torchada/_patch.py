@@ -2568,18 +2568,28 @@ def _warn_inductor_compile_workers(feature: str) -> None:
 @patch_function
 @requires_import("torch_musa", "triton.language")
 def _patch_triton_fast_exp():
-    """Opt-in: lower fp32 ``tl.exp`` to ``exp2(x * log2(e))`` on MUSA.
+    """Lower fp32 ``tl.exp`` to ``exp2(x * log2(e))`` on MUSA Triton 3.6.
 
-    Enabled by ``TORCHADA_TRITON_FAST_EXP=1``. Kernels are recompiled because
-    the change is salted into the MUSA backend hash.
+    This is the lowering MUSA Triton 3.2 used; 3.6 emits a slower software expf.
+    ``TORCHADA_TRITON_FAST_EXP=0`` keeps Triton's lowering. Kernels are recompiled
+    because the change is salted into the MUSA backend hash.
     """
     if not is_musa_platform():
         return
 
-    from .triton.musa_compat import FAST_EXP_ENV, fast_exp_requested, install_fast_exp
+    from .triton.musa_compat import (
+        FAST_EXP_ENV,
+        fast_exp_requested,
+        install_fast_exp,
+        musa_triton_info,
+    )
 
-    if fast_exp_requested() and install_fast_exp():
-        _warn_inductor_compile_workers(f"{FAST_EXP_ENV}=1")
+    if not fast_exp_requested():
+        return
+    if not musa_triton_info().is_musa_triton_36 and FAST_EXP_ENV not in os.environ:
+        return
+    if install_fast_exp():
+        _warn_inductor_compile_workers("the fp32 tl.exp fast path")
 
 
 @patch_function
@@ -2694,8 +2704,8 @@ def apply_patches():
     - Triton tl.extra.cuda.gdc_wait / gdc_launch_dependents unsupported shim
     - MUSA Triton fixes: ASTFunction argument attributes on IR arguments only,
       inplace_alias_pairs numbered by IR argument (TORCHADA_TRITON_INPLACE_ALIAS),
-      opt-in fp32 tl.exp fast path (TORCHADA_TRITON_FAST_EXP) and opt-in fp32
-      tl.dot default precision (TORCHADA_TRITON_F32_DEFAULT)
+      fp32 tl.exp lowered through exp2 (TORCHADA_TRITON_FAST_EXP=0 disables) and
+      opt-in fp32 tl.dot default precision (TORCHADA_TRITON_F32_DEFAULT)
     - ctypes.CDLL function name translation for MUSA libraries:
         - cudaXxx -> musaXxx (for libmusart)
         - ncclXxx -> mcclXxx (for libmccl)

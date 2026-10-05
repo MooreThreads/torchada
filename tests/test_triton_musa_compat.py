@@ -3,8 +3,8 @@
 import functools
 import importlib.util
 import inspect
-import logging
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -44,7 +44,6 @@ requires_musa_triton_36 = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-
 @pytest.fixture
 def mc_caplog(caplog, monkeypatch):
     """Capture this module's log records even if another test reconfigured logging.
@@ -56,6 +55,7 @@ def mc_caplog(caplog, monkeypatch):
     monkeypatch.setattr(mc.logger, "propagate", True)
     caplog.set_level(logging.INFO, logger=mc.__name__)
     return caplog
+
 
 class TestMusaTritonInfo:
     @pytest.mark.parametrize(
@@ -126,7 +126,8 @@ class TestEnvironmentSelection:
         assert "bogus" in mc_caplog.text
 
     @pytest.mark.parametrize(
-        "value, expected", [(None, False), ("0", False), ("1", True), ("true", True)]
+        "value, expected",
+        [(None, True), ("", True), ("1", True), ("0", False), ("off", False), ("False", False)],
     )
     def test_fast_exp_requested(self, value, expected):
         env = {} if value is None else {mc.FAST_EXP_ENV: value}
@@ -625,15 +626,15 @@ def _run_subprocess(tmp_path, env_updates):
 @requires_musa_triton_36
 class TestRealCodegenPatches:
     def test_fast_exp(self, tmp_path):
-        default = _run_subprocess(tmp_path, {})
-        assert default["ttir_exp2"] == 0
-        assert default["llir_exp2"] == 0
-        assert "-torchada:" not in default["hash"]
+        native = _run_subprocess(tmp_path, {mc.FAST_EXP_ENV: "0"})
+        assert native["ttir_exp2"] == 0
+        assert native["llir_exp2"] == 0
+        assert "-torchada:" not in native["hash"]
 
-        fast = _run_subprocess(tmp_path, {mc.FAST_EXP_ENV: "1"})
+        fast = _run_subprocess(tmp_path, {})
         assert fast["ttir_exp2"] == 1
         assert fast["llir_exp2"] > 0
-        assert fast["hash"] == default["hash"] + f"-torchada:fast-exp:{mc.FAST_EXP_REVISION}"
+        assert fast["hash"] == native["hash"] + f"-torchada:fast-exp:{mc.FAST_EXP_REVISION}"
 
     def test_f32_default(self, tmp_path):
         assert _run_subprocess(tmp_path, {})["f32_default"] is None

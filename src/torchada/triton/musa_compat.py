@@ -552,13 +552,10 @@ def install_inplace_alias_fix(
 # ---------------------------------------------------------------------------
 
 
-def _env_flag(env: Mapping[str, str], name: str) -> bool:
-    return env.get(name, "").strip().lower() in ("1", "true", "yes", "on")
-
-
 def fast_exp_requested(env: Optional[Mapping[str, str]] = None) -> bool:
-    """True when ``TORCHADA_TRITON_FAST_EXP`` enables the fast exp path."""
-    return _env_flag(os.environ if env is None else env, FAST_EXP_ENV)
+    """True unless ``TORCHADA_TRITON_FAST_EXP`` is set to 0/false/no/off."""
+    value = (os.environ if env is None else env).get(FAST_EXP_ENV, "").strip().lower()
+    return value not in ("0", "false", "no", "off")
 
 
 def _make_fast_exp(original_exp: Callable) -> Callable:
