@@ -68,6 +68,7 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `Stream`, `Event`, ... |
 | MUSA float64 in-place log | On `torch_musa < 2.11.0.post2`, `Tensor.log_()` reuses the supported out-of-place operation while preserving the in-place contract |
 | MUSA mm/bmm `out_dtype` | Below `torch_musa 2.13.0`, `torch.mm`/`torch.bmm` `out_dtype=` reuses the plain overloads and accumulates in fp32 while a runtime probe reports the overload broken. Measured broken on `2.11.0.post1+musa5.2.0` (`mm` writes zeros, `bmm` writes wrong values); **torch_musa committed to fix this in `2.13.0`, which we have not verified** — the wrappers are armed below that release, nothing is installed from it on, and the probe decides correctness per process |
+| MUSA asynchronous `isfinite` | `torch.isfinite`/`Tensor.isfinite` on MUSA float16/bfloat16/float32/float64 tensors run as `abs() < inf`, because the boolean `mul` in ATen's composite blocks the host until the device queue drains (measured on `2.11.0.post2+musa5.2.0`); other dtypes keep the original op |
 | Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
 | Triton Fused MoE | Triton 3.2.0 MTT S5000 tuning configs for vLLM and SGLang |
 
@@ -407,7 +408,7 @@ See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.90
+torchada>=0.1.91
 ```
 
 ### Step 2: Conditional Import
