@@ -2212,6 +2212,66 @@ class TestCppExtensionPaths:
         assert isinstance(paths, list)
         assert len(paths) > 0
 
+    def test_paths_accept_the_positional_torch_signature(self):
+        """torch 2.10+ Inductor calls include_paths(device_type, torch_include_dirs) by position."""
+        import torch.utils.cpp_extension as cpp_extension
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert cpp_extension.include_paths("cpu", True) == cpp_extension.include_paths(
+            device_type="cpu"
+        )
+        assert cpp_extension.include_paths("cuda") == cpp_extension.include_paths(
+            device_type="cuda"
+        )
+        assert cpp_extension.library_paths(
+            "cuda", torch_include_dirs=True, cross_target_platform=None
+        ) == cpp_extension.library_paths(device_type="cuda")
+        # A positional bool is the PyTorch < 2.6 ``cuda`` argument.
+        assert cpp_extension.include_paths(True) == cpp_extension.include_paths(cuda=True)
+        assert cpp_extension.library_paths(False) == cpp_extension.library_paths(cuda=False)
+
+    def test_paths_without_torch_dirs(self):
+        """torch_include_dirs=False leaves out PyTorch's own include and lib directories."""
+        import torch
+        import torch.utils.cpp_extension as cpp_extension
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        torch_root = os.path.realpath(os.path.dirname(torch.__file__))
+        for function in (cpp_extension.include_paths, cpp_extension.library_paths):
+            paths = function("cuda", torch_include_dirs=False)
+            assert paths
+            assert not any(os.path.realpath(path).startswith(torch_root + os.sep) for path in paths)
+            assert set(paths) <= set(function("cuda"))
+
+    def test_inductor_cpu_compile_with_a_cold_cache(self, tmp_path):
+        """A cold Inductor cache builds CPU kernels through the patched path helpers."""
+        import subprocess
+        import sys
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        code = (
+            "import torchada, torch\n"
+            "out = torch.compile(lambda x: (x * 2 + 1).sum(-1), fullgraph=True)(torch.ones(8, 16))\n"
+            "assert torch.equal(out, torch.full((8,), 48.0))\n"
+        )
+        env = dict(os.environ, TORCHINDUCTOR_CACHE_DIR=str(tmp_path / "inductor"))
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=600
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+
     def test_include_paths_patched_in_torch_module(self):
         """Test that include_paths is properly patched in torch.utils.cpp_extension."""
         import torch.utils.cpp_extension
