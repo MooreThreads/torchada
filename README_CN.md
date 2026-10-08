@@ -68,6 +68,7 @@ torch.cuda.synchronize()
 | 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`Stream`、`Event` 等 |
 | MUSA float64 原地对数 | `torch_musa < 2.11.0.post2` 时，`Tensor.log_()` 复用受支持的非原地操作，同时保持原地操作契约 |
 | MUSA mm/bmm `out_dtype` | 在 `torch_musa 2.13.0` 以下，`torch.mm`/`torch.bmm` 的 `out_dtype=` 复用普通重载并以 fp32 累加，同时运行期探针报告该重载损坏。实测损坏于 `2.11.0.post1+musa5.2.0`（`mm` 全零、`bmm` 错值）；**torch_musa 承诺在 `2.13.0` 修复，我们尚未验证** —— 包装层在该版本以下武装、自该版本起不安装，正确性由探针按进程裁决 |
+| MUSA 异步 `isfinite` | MUSA 上 float16/bfloat16/float32/float64 张量的 `torch.isfinite`/`Tensor.isfinite` 改为 `abs() < inf`：ATen 组合实现里的 bool `mul` 会阻塞主机直到设备队列清空（实测于 `2.11.0.post2+musa5.2.0`）；其他 dtype 仍走原算子 |
 | Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
 | Triton 融合 MoE | 面向 vLLM 和 SGLang 的 Triton 3.2.0 MTT S5000 调优配置 |
 

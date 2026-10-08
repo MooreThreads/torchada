@@ -45,6 +45,7 @@ _original_init_process_group = None
 _original_tensor_log_ = None
 _original_torch_mm = None
 _original_torch_bmm = None
+_original_torch_isfinite = None
 
 # Registry for patch functions
 _patch_registry: List[Callable[[], None]] = []
@@ -200,6 +201,78 @@ def _patch_tensor_log_():
         return _original_tensor_log_(self)
 
     torch.Tensor.log_ = patched_log_
+
+
+# ---------------------------------------------------------------------------
+# Asynchronous torch.isfinite for MUSA floating tensors
+# ---------------------------------------------------------------------------
+#
+# ATen computes ``isfinite`` of a floating tensor as ``(x == x) * (x.abs() != inf)``.
+# On torch_musa 2.11.0.post2+musa5.2.0 every boolean ``mul`` (tensor or scalar
+# operand, in place or not) blocks the host until the device queue drains, while
+# ``&``, ``logical_and`` and integer ``mul`` do not. Each ``isfinite`` call therefore
+# holds back later kernel launches until the work already queued has finished.
+# ``x.abs() < inf`` is the same predicate for real floating tensors (False for NaN
+# and for both infinities) and stays asynchronous. It is used for float16, bfloat16,
+# float32 and float64 only: integer and bool tensors are always finite, complex
+# magnitudes can overflow for finite parts, and fp8 types do not reliably implement
+# ``abs`` and ``lt``, so those keep the original op.
+#
+# Lifecycle: delete this shim once torch_musa's boolean ``mul`` stops synchronizing.
+
+_ASYNC_ISFINITE_DTYPES = frozenset({torch.float16, torch.bfloat16, torch.float32, torch.float64})
+_ISFINITE_AOT_CACHE_SALT = "torchada-musa-isfinite-v1"
+
+
+def _uses_async_isfinite(value: Any) -> bool:
+    return (
+        isinstance(value, torch.Tensor)
+        and value.device.type == "musa"
+        and value.dtype in _ASYNC_ISFINITE_DTYPES
+    )
+
+
+def _finite_mask(value: torch.Tensor) -> torch.Tensor:
+    return value.detach().abs() < float("inf")
+
+
+@patch_function
+@requires_import("torch_musa")
+def _patch_isfinite():
+    """Keep ``torch.isfinite`` on MUSA floating tensors free of a host sync."""
+    global _original_torch_isfinite
+
+    if not is_musa_platform() or _original_torch_isfinite is not None:
+        return
+
+    original = torch.isfinite
+    original_method = torch.Tensor.isfinite
+    _original_torch_isfinite = original
+
+    @functools.wraps(original)
+    def isfinite(input):
+        if _uses_async_isfinite(input):
+            return _finite_mask(input)
+        return original(input)
+
+    @functools.wraps(original_method)
+    def tensor_isfinite(self):
+        if _uses_async_isfinite(self):
+            return _finite_mask(self)
+        return original_method(self)
+
+    _register_jit_builtin_alias(original, isfinite)
+    torch.isfinite = isfinite
+    torch.Tensor.isfinite = tensor_isfinite
+    # Keep compiled graphs that call the wrapper eligible for the AOT autograd cache.
+    try:
+        import torch._inductor.config as inductor_config
+
+        inductor_config.unsafe_marked_cacheable_functions.setdefault(
+            "torch.isfinite", _ISFINITE_AOT_CACHE_SALT
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
