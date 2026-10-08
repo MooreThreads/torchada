@@ -895,6 +895,17 @@ def _patch_torch_device():
     except (AttributeError, ImportError, RuntimeError, TypeError):
         logger.debug("Unable to register torch.device as a TorchScript builtin", exc_info=True)
 
+    # FX code generation prints device constants as ``device(...)`` and binds
+    # that name only to the object registered as its ``device`` builtin, which
+    # must be the current torch.device. Registering the wrapper updates both
+    # the builtin table and the reserved-name table FX uses to assign names.
+    try:
+        from torch.fx.graph import _register_custom_builtin
+
+        _register_custom_builtin("device", "from torch import device", DeviceFactoryWrapper)
+    except (AttributeError, ImportError, TypeError):
+        logger.debug("Unable to register torch.device as an FX builtin", exc_info=True)
+
 
 # Store original torch.Generator for patching
 _original_torch_generator = None
