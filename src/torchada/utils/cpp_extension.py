@@ -838,20 +838,46 @@ def _port_cuda_source(source_code: str, mapping_rules: Optional[Dict[str, str]] 
     )
 
 
-def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None) -> List[str]:
+def _split_device_argument(
+    device_type: Optional[Any], cuda: Optional[bool]
+) -> Tuple[Optional[str], Optional[bool]]:
+    """Return ``(device_type, cuda)``, moving a PyTorch < 2.6 positional ``cuda`` bool."""
+    if isinstance(device_type, bool):
+        return None, device_type
+    return device_type, cuda
+
+
+def _is_torch_path(path: str, subdir: str) -> bool:
+    """Whether ``path`` lies in PyTorch's own ``include`` or ``lib`` directory."""
+    import torch
+
+    root = os.path.realpath(os.path.join(os.path.dirname(torch.__file__), subdir))
+    path = os.path.realpath(path)
+    return path == root or path.startswith(root + os.sep)
+
+
+def include_paths(
+    device_type: Optional[str] = None,
+    torch_include_dirs: bool = True,
+    *,
+    cuda: Optional[bool] = None,
+) -> List[str]:
     """
     Get include paths for compiling extensions.
 
     Supports both PyTorch < 2.6 (cuda=True) and PyTorch 2.6+ (device_type="cuda")
-    signatures for compatibility.
+    signatures for compatibility, called positionally or by keyword.
 
     Args:
-        cuda: (PyTorch < 2.6) Whether to include CUDA/MUSA paths. Deprecated in 2.6+.
         device_type: (PyTorch 2.6+) Device type string, e.g. "cuda", "cpu", "musa".
+            A bool here is the PyTorch < 2.6 positional ``cuda`` argument.
+        torch_include_dirs: (PyTorch 2.10+) Whether to include PyTorch's own headers.
+        cuda: (PyTorch < 2.6) Whether to include CUDA/MUSA paths. Deprecated in 2.6+.
 
     Returns:
         List of include paths
     """
+    device_type, cuda = _split_device_argument(device_type, cuda)
     # Handle both old (cuda=bool) and new (device_type=str) signatures
     if device_type is not None:
         # PyTorch 2.6+ style: device_type="cuda" or "cpu"
@@ -888,6 +914,8 @@ def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
         # torch_musa shipping the real header wins.
         if include_device:
             paths.append(stable_compat_include_dir())
+        if not torch_include_dirs:
+            paths = [path for path in paths if not _is_torch_path(path, "include")]
         return paths
 
     else:
@@ -899,10 +927,13 @@ def include_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
         sig = inspect.signature(torch_include_paths)
         if "device_type" in sig.parameters:
             # PyTorch 2.6+
-            if device_type is not None:
-                return torch_include_paths(device_type=device_type)
-            else:
-                return torch_include_paths(device_type="cuda" if include_device else "cpu")
+            if device_type is None:
+                device_type = "cuda" if include_device else "cpu"
+            if "torch_include_dirs" in sig.parameters:
+                return torch_include_paths(
+                    device_type=device_type, torch_include_dirs=torch_include_dirs
+                )
+            return torch_include_paths(device_type=device_type)
         else:
             # PyTorch < 2.6
             return torch_include_paths(cuda=include_device)
@@ -933,20 +964,30 @@ def stable_compat_box_header() -> str:
     return os.path.join(stable_compat_include_dir(), "torchada_stable_box.h")
 
 
-def library_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None) -> List[str]:
+def library_paths(
+    device_type: Optional[str] = None,
+    torch_include_dirs: bool = True,
+    cross_target_platform: Optional[str] = None,
+    *,
+    cuda: Optional[bool] = None,
+) -> List[str]:
     """
     Get library paths for compiling extensions.
 
     Supports both PyTorch < 2.6 (cuda=True) and PyTorch 2.6+ (device_type="cuda")
-    signatures for compatibility.
+    signatures for compatibility, called positionally or by keyword.
 
     Args:
-        cuda: (PyTorch < 2.6) Whether to include CUDA/MUSA library paths. Deprecated in 2.6+.
         device_type: (PyTorch 2.6+) Device type string, e.g. "cuda", "cpu", "musa".
+            A bool here is the PyTorch < 2.6 positional ``cuda`` argument.
+        torch_include_dirs: (PyTorch 2.10+) Whether to include PyTorch's own libraries.
+        cross_target_platform: (PyTorch 2.10+) Passed through to PyTorch off MUSA.
+        cuda: (PyTorch < 2.6) Whether to include CUDA/MUSA library paths. Deprecated in 2.6+.
 
     Returns:
         List of library paths
     """
+    device_type, cuda = _split_device_argument(device_type, cuda)
     # Handle both old (cuda=bool) and new (device_type=str) signatures
     if device_type is not None:
         # PyTorch 2.6+ style: device_type="cuda" or "cpu"
@@ -969,7 +1010,10 @@ def library_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
 
             if hasattr(musa_ext, "library_paths"):
                 # musa_ext uses musa=bool parameter, not cuda= or device_type=
-                return musa_ext.library_paths(musa=include_device)
+                paths = list(musa_ext.library_paths(musa=include_device))
+                if not torch_include_dirs:
+                    paths = [path for path in paths if not _is_torch_path(path, "lib")]
+                return paths
         except ImportError:
             pass
 
@@ -990,10 +1034,14 @@ def library_paths(cuda: Optional[bool] = None, device_type: Optional[str] = None
         sig = inspect.signature(torch_library_paths)
         if "device_type" in sig.parameters:
             # PyTorch 2.6+
-            if device_type is not None:
-                return torch_library_paths(device_type=device_type)
-            else:
-                return torch_library_paths(device_type="cuda" if include_device else "cpu")
+            if device_type is None:
+                device_type = "cuda" if include_device else "cpu"
+            kwargs: Dict[str, Any] = {}
+            if "torch_include_dirs" in sig.parameters:
+                kwargs["torch_include_dirs"] = torch_include_dirs
+            if "cross_target_platform" in sig.parameters:
+                kwargs["cross_target_platform"] = cross_target_platform
+            return torch_library_paths(device_type=device_type, **kwargs)
         else:
             # PyTorch < 2.6
             return torch_library_paths(cuda=include_device)
