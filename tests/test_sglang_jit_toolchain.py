@@ -270,3 +270,17 @@ def test_sglang_jit_utils_header_adds_musa_guard_when_hip_guard_exists():
     rewritten = _rewrite_sglang_jit_header("utils.cuh", source)
     assert rewritten.count("#define __grid_constant__") == 2
     assert "#if defined(__MUSACC__) && !defined(__grid_constant__)" in rewritten
+
+
+def test_stable_runtime_header_uses_the_existing_musa_pdl_mapping():
+    header = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "torchada"
+        / "csrc"
+        / "stable_compat"
+        / "cuda_runtime.h"
+    ).read_text()
+    assert (
+        "#define cudaLaunchAttributeProgrammaticStreamSerialization " "musaLaunchAttributeIgnore"
+    ) in header
