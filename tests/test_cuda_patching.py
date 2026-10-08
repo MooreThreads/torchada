@@ -1144,6 +1144,21 @@ class TestVisibleDevicesEnv:
         assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
+def _legacy_cuda_heuristic_copy_armed() -> bool:
+    """Whether torchada's CUDA -> MUSA template heuristic copy is still armed.
+
+    The copy is a legacy shim installed below torch_musa 2.11.0.post2 only: from
+    that release on torch_musa registers its own MUSA heuristics. An unknown or
+    unparsable version ranks lowest in ``version_of``, so a stack whose version
+    cannot be read keeps the workaround armed instead of skipping here.
+    """
+    import torch
+
+    from torchada._version import version_of
+
+    return version_of(getattr(torch, "musa", None)) < "2.11.0.post2"
+
+
 class TestInductorTemplateHeuristics:
     """Test CUDA-compatible Triton heuristic registration for MUSA."""
 
@@ -1165,6 +1180,10 @@ class TestInductorTemplateHeuristics:
         assert ("triton::mm", "musa", None) not in heuristic_registry
         assert ("cached",) in heuristic_cache
 
+    @pytest.mark.skipif(
+        not _legacy_cuda_heuristic_copy_armed(),
+        reason="the CUDA heuristic copy is only armed below torch_musa 2.11.0.post2",
+    )
     def test_copies_only_cuda_triton_heuristics_and_clears_cache(self, monkeypatch):
         from torch._inductor.codegen import common
         from torch._inductor.template_heuristics import registry
@@ -1202,7 +1221,12 @@ class TestInductorTemplateHeuristics:
         assert ("triton::mm", "cpu", None) in heuristic_registry
         assert heuristic_cache == {}
 
+    @pytest.mark.skipif(
+        not _legacy_cuda_heuristic_copy_armed(),
+        reason="the CUDA heuristic copy is only armed below torch_musa 2.11.0.post2",
+    )
     def test_is_idempotent_and_preserves_cache_without_changes(self, monkeypatch):
+        from torch._inductor.codegen import common
         from torch._inductor.template_heuristics import registry
 
         from torchada import _patch
@@ -1211,6 +1235,9 @@ class TestInductorTemplateHeuristics:
         heuristic_registry = {("triton::mm", "cuda", None): heuristic}
         heuristic_cache = {}
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        # A real first backend registration lets torch_musa write its own MUSA
+        # heuristics into this test's registry.
+        monkeypatch.setattr(common, "init_backend_registration", lambda: None)
         monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
         monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
 
