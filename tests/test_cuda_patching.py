@@ -1166,6 +1166,7 @@ class TestInductorTemplateHeuristics:
         assert ("cached",) in heuristic_cache
 
     def test_copies_only_cuda_triton_heuristics_and_clears_cache(self, monkeypatch):
+        import torch
         from torch._inductor.codegen import common
         from torch._inductor.template_heuristics import registry
 
@@ -1189,6 +1190,8 @@ class TestInductorTemplateHeuristics:
             heuristic_registry[("triton::lazy_mm", "cuda", None)] = lazy_cuda_heuristic
 
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        # The heuristic copy is a shim installed only below 2.11.0.post2.
+        monkeypatch.setattr(torch.musa, "__version__", "2.11.0.post1+musa5.2.0")
         monkeypatch.setattr(common, "init_backend_registration", register_lazy_heuristic)
         monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
         monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
@@ -1203,6 +1206,8 @@ class TestInductorTemplateHeuristics:
         assert heuristic_cache == {}
 
     def test_is_idempotent_and_preserves_cache_without_changes(self, monkeypatch):
+        import torch
+        from torch._inductor.codegen import common
         from torch._inductor.template_heuristics import registry
 
         from torchada import _patch
@@ -1211,6 +1216,10 @@ class TestInductorTemplateHeuristics:
         heuristic_registry = {("triton::mm", "cuda", None): heuristic}
         heuristic_cache = {}
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
+        monkeypatch.setattr(torch.musa, "__version__", "2.11.0.post1+musa5.2.0")
+        # A real first backend registration would add torch_musa's own MUSA heuristics
+        # to this registry.
+        monkeypatch.setattr(common, "init_backend_registration", lambda: None)
         monkeypatch.setattr(registry, "_TEMPLATE_HEURISTIC_REGISTRY", heuristic_registry)
         monkeypatch.setattr(registry, "_HEURISTIC_CACHE", heuristic_cache)
 
