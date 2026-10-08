@@ -60,6 +60,7 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | Profiler | `ProfilerActivity.CUDA` → uses PrivateUse1 |
 | Custom Ops | `Library.impl(..., "CUDA")` → uses PrivateUse1 |
 | Distributed | `dist.init_process_group(backend='nccl')` → uses MCCL |
+| FSDP2 on non-MUSA meshes | `fully_shard` on a CPU (gloo) mesh runs PyTorch's FSDP2; MUSA meshes keep torch_musa's FSDP2 streams, overlap level and collectives |
 | torch.compile | Inductor with AOT-cacheable tensor factory wrappers |
 | C++ Extensions | `CUDAExtension`, `BuildExtension`, in-place source porting, stable-ABI shims |
 | FlexAttention | `torch.nn.attention.flex_attention` works on MUSA |

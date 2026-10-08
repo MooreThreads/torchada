@@ -1688,6 +1688,32 @@ def _patch_distributed_backend():
     dist.new_group = patched_new_group
 
 
+# torch_musa replaces parts of FSDP2 (fully_shard) with versions that create MUSA
+# streams whatever the mesh device is, so fully_shard on a CPU (gloo) mesh fails in
+# the root pre-forward. Keep torch_musa's versions for MUSA meshes and run PyTorch's
+# own for every other mesh.
+# Lifecycle: delete once torch_musa's FSDP2 replacements dispatch on the device type.
+_fsdp2_dispatch_installed = False
+
+
+@patch_function
+@requires_import("torch_musa")
+def _patch_fsdp2_device_dispatch():
+    """Run torch_musa's FSDP2 replacements only on MUSA device meshes."""
+    global _fsdp2_dispatch_installed
+
+    if not is_musa_platform() or _fsdp2_dispatch_installed:
+        return
+    _fsdp2_dispatch_installed = True
+    try:
+        from . import _fsdp2
+
+        if _fsdp2.install():
+            logger.debug("FSDP2 on non-MUSA device meshes runs PyTorch's implementation")
+    except Exception:  # noqa: BLE001
+        logger.warning("FSDP2 device dispatch was not installed", exc_info=True)
+
+
 @patch_function
 def _patch_tensor_is_cuda():
     """

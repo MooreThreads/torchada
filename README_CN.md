@@ -60,6 +60,7 @@ torch.cuda.synchronize()
 | 性能分析 | `ProfilerActivity.CUDA` → 使用 PrivateUse1 |
 | 自定义算子 | `Library.impl(..., "CUDA")` → 使用 PrivateUse1 |
 | 分布式训练 | `dist.init_process_group(backend='nccl')` → 使用 MCCL |
+| 非 MUSA mesh 上的 FSDP2 | CPU（gloo）mesh 上的 `fully_shard` 运行 PyTorch 自身的 FSDP2；MUSA mesh 保留 torch_musa 的 FSDP2 流、overlap 级别和集合通信 |
 | torch.compile | Inductor，以及支持 AOT 缓存的张量工厂函数包装器 |
 | C++ 扩展 | `CUDAExtension`、`BuildExtension`、源码原地移植、稳定 ABI 兼容层 |
 | FlexAttention | `torch.nn.attention.flex_attention` 支持 MUSA 设备 |
