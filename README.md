@@ -71,6 +71,7 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | MUSA asynchronous `isfinite` | `torch.isfinite`/`Tensor.isfinite` on MUSA float16/bfloat16/float32/float64 tensors run as `abs() < inf`, because the boolean `mul` in ATen's composite blocks the host until the device queue drains (measured on `2.11.0.post2+musa5.2.0`); other dtypes keep the original op |
 | Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
 | Triton Fused MoE | Triton 3.2.0 MTT S5000 tuning configs for vLLM and SGLang |
+| MUSA Triton 3.6 | Frontend/runtime fixes and opt-in codegen settings, shared by vLLM and SGLang |
 
 **Not covered:** builds whose binding has no `*_Dtype` overload keep raising on `out_dtype=`. That is
 the binding's contract, not a defect torchada repairs, so CUDA parity for that case is out of scope.
@@ -167,6 +168,24 @@ On import, torchada points SGLang and vLLM to the bundled configurations through
 `SGLANG_MOE_CONFIG_DIR` and `VLLM_TUNED_CONFIG_FOLDER`. Existing environment
 values are never overwritten, so set either variable before importing torchada
 to use custom configurations.
+
+### MUSA Triton
+
+torchada applies the following Triton fixes and opt-in settings at import.
+The first three entries apply to MUSA Triton 3.6 only; `TORCHADA_TRITON_F32_DEFAULT`
+applies to any Triton with the `musa` backend. Other platforms and MUSA Triton
+3.2 (`mtgpu` backend) are left unchanged.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| (none) | on | `ASTFunction.deserialize` places argument attributes on IR arguments only, so torch Inductor's mutation analysis of user Triton kernels sees the correct signature |
+| `TORCHADA_TRITON_INPLACE_ALIAS` | `fix` | `fix` numbers `inplace_alias_pairs` by IR argument, `off` emits no pairs, `vendor` keeps Triton's helper |
+| `TORCHADA_TRITON_FAST_EXP` | on | Lowers fp32 `tl.exp` to `exp2(x * log2(e))`, as MUSA Triton 3.2 did (3.6 emits a slower software expf); `0` keeps Triton's lowering. The MUSA backend hash is salted so cached kernels are rebuilt |
+| `TORCHADA_TRITON_F32_DEFAULT` | unset | Exports `TRITON_F32_DEFAULT` (`ieee`, `tf32`, `tf32x3`, `bf16x3`, `bf16x6`) unless it is already set. Triton applies it to every fp32 `tl.dot` without an explicit `input_precision=`, overriding `allow_tf32=` (including `allow_tf32=False` and Inductor's fp32 mm templates); clear Inductor autotune caches built under another value |
+
+Import torchada before the first Triton compilation and before modules that bind
+`tl.exp` at import time. torchada's fused-MoE kernels keep the
+tensor-descriptor (TMA) path off on the MUSA backend, where it is not validated.
 
 ### SGLang FlashAttention
 

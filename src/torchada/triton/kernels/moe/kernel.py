@@ -12,12 +12,16 @@ from torchada.triton.kernels.quant.fp8 import (
     per_token_group_quant_int8,
     per_token_quant_int8,
 )
+from torchada.triton.musa_compat import triton_backend_is_musa
 from torchada.triton.runtime.fp8_utils import scaled_fp8_quant
 
 try:
     from triton.tools.tensor_descriptor import TensorDescriptor
 
-    _support_tensor_descriptor = hasattr(tl, "make_tensor_descriptor")
+    # The host-TensorDescriptor TMA path is not validated on the MUSA backend.
+    _support_tensor_descriptor = (
+        hasattr(tl, "make_tensor_descriptor") and not triton_backend_is_musa()
+    )
 except (ImportError, AttributeError):
     _support_tensor_descriptor = False
 
