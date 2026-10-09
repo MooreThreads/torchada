@@ -408,7 +408,7 @@ See `src/torchada/_mappings/` for 400+ mapping rules grouped by API domain.
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.94
+torchada>=0.1.95
 ```
 
 ### Step 2: Conditional Import
