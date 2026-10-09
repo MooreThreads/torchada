@@ -2,6 +2,9 @@
 
 import errno
 import fcntl
+import sys
+import types
+import warnings
 
 import pytest
 import torch.utils.cpp_extension as cpp_ext
@@ -68,3 +71,41 @@ def test_filelock_based_torch_is_left_alone(ext_dir, monkeypatch):
 
     assert _load(lambda **kwargs: kwargs) == {"name": EXT_NAME}
     assert not (ext_dir / _cpp_ops._FLOCK_FILE).exists()
+
+
+def test_baton_is_removed_even_when_warnings_are_errors(ext_dir):
+    """Under ``-W error`` the warning raises, but only after the stale baton is gone."""
+    ext_dir.mkdir()
+    (ext_dir / "lock").write_bytes(b"")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(UserWarning, match="stale JIT build lock"):
+            _load(lambda **kwargs: None)
+    assert not (ext_dir / "lock").exists()
+
+
+def test_musa_loader_build_directory_is_used(tmp_path, monkeypatch):
+    """MUSA sources lock and build in torch_musa's build directory."""
+    musa_dir = tmp_path / "musa" / EXT_NAME
+
+    def get_build_directory(name, verbose):
+        musa_dir.mkdir(parents=True, exist_ok=True)
+        return str(musa_dir)
+
+    loader = types.ModuleType("torch_musa.utils.musa_extension")
+    loader.FileBaton = object
+    loader._get_build_directory = get_build_directory
+    utils = types.ModuleType("torch_musa.utils")
+    utils.musa_extension = loader
+    package = types.ModuleType("torch_musa")
+    package.utils = utils
+    for module in (package, utils, loader):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    musa_dir.mkdir(parents=True)
+    (musa_dir / "lock").write_bytes(b"")
+    with pytest.warns(UserWarning, match="stale JIT build lock"):
+        kwargs = _cpp_ops._locked_load(lambda **kw: kw, name=EXT_NAME, musa=True)
+    assert kwargs["build_directory"] == str(musa_dir)
+    assert not (musa_dir / "lock").exists()

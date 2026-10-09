@@ -105,8 +105,8 @@ def _locked_load(load, name: str, musa: bool, **kwargs):
         else:
             baton = os.path.join(build_dir, "lock")
             if os.path.exists(baton):
-                warnings.warn(f"torchada: removing stale JIT build lock {baton}")
                 os.remove(baton)
+                warnings.warn(f"torchada: removed stale JIT build lock {baton}")
         return load(name=name, build_directory=build_dir, **kwargs)
 
 
