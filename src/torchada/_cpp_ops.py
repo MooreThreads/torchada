@@ -24,6 +24,8 @@ _cpp_ops_module: Optional[object] = None
 _graph_rotation_module: Optional[object] = None
 _musa_arch_cached: Optional[str] = None
 
+_FLOCK_FILE = ".torchada.flock"
+
 
 def _detect_musa_arch() -> str:
     """
@@ -68,6 +70,44 @@ def _detect_musa_arch() -> str:
 
     _musa_arch_cached = arch
     return arch
+
+
+def _jit_loader_module(musa: bool):
+    """torch_musa's JIT loader for MUSA sources when importable, else torch's."""
+    if musa:
+        try:
+            import torch_musa.utils.musa_extension as loader
+
+            return loader
+        except ImportError:
+            pass
+    import torch.utils.cpp_extension as loader
+
+    return loader
+
+
+def _locked_load(load, name: str, musa: bool, **kwargs):
+    """Call a JIT ``load`` under a flock that, unlike torch's ``lock`` baton, dies with its holder."""
+    import fcntl
+    import warnings
+
+    loader = _jit_loader_module(musa)
+    if not hasattr(loader, "FileBaton"):  # newer torch guards JIT builds with a FileLock itself
+        return load(name=name, **kwargs)
+    build_dir = loader._get_build_directory(name, False)
+    with open(os.path.join(build_dir, _FLOCK_FILE), "a") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            warnings.warn(
+                f"torchada: flock unavailable on {lock_file.name}, building without it: {e}"
+            )
+        else:
+            baton = os.path.join(build_dir, "lock")
+            if os.path.exists(baton):
+                os.remove(baton)
+                warnings.warn(f"torchada: removed stale JIT build lock {baton}")
+        return load(name=name, build_directory=build_dir, **kwargs)
 
 
 def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
@@ -144,8 +184,10 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
                 mtgpu_target = _detect_musa_arch()
             extra_cuda_cflags.append(f"--offload-arch={mtgpu_target}")
 
-            _cpp_ops_module = load(
+            _cpp_ops_module = _locked_load(
+                load,
                 name="torchada_cpp_ops",
+                musa=True,
                 sources=all_sources,
                 extra_include_paths=[csrc_dir],
                 extra_cuda_cflags=extra_cuda_cflags,
@@ -155,8 +197,10 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
             # Pure C++ extension - use torch's loader directly
             from torch.utils.cpp_extension import load
 
-            _cpp_ops_module = load(
+            _cpp_ops_module = _locked_load(
+                load,
                 name="torchada_cpp_ops",
+                musa=False,
                 sources=all_sources,
                 extra_include_paths=[csrc_dir],
                 verbose=verbose,
@@ -211,8 +255,10 @@ def load_graph_rotation_ops(force_reload: bool = False) -> Optional[object]:
         libdir = osp.join(tm, "lib")
         verbose = os.environ.get("TORCHADA_CPP_OPS_VERBOSE") == "1"
 
-        _graph_rotation_module = load(
+        _graph_rotation_module = _locked_load(
+            load,
             name="torchada_graph_rotation_ops",
+            musa=False,
             sources=[src],
             extra_include_paths=include_dirs,
             extra_cflags=["-O2"],
