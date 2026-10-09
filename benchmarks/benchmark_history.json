@@ -3,7 +3,7 @@
   "description": "Historical benchmark results for torchada performance tracking",
   "results": [
     {
-      "version": "0.1.95",
+      "version": "0.1.94",
       "date": "2026-01-29",
       "platform": "MUSA",
       "pytorch_version": "2.7.1",
@@ -78,6 +78,90 @@
       "summary": {
         "fast_ops_count": 7,
         "medium_ops_count": 6,
+        "notes": ""
+      }
+    },
+    {
+      "version": "0.1.95",
+      "date": "2026-10-09",
+      "platform": "MUSA",
+      "pytorch_version": "2.11.0.post2+musa5.2.0",
+      "torch_musa_version": "2.11.0.post2+musa5.2.0",
+      "operations": {
+        "torch.cuda.device_count()": {
+          "mean_ns": 209,
+          "median_ns": 202,
+          "min_ns": 182
+        },
+        "torch.cuda.current_device()": {
+          "mean_ns": 519,
+          "median_ns": 515,
+          "min_ns": 474
+        },
+        "torch.cuda.is_available() [NOT redirected]": {
+          "mean_ns": 609,
+          "median_ns": 606,
+          "min_ns": 575
+        },
+        "torch.cuda.Stream (attr)": {
+          "mean_ns": 177,
+          "median_ns": 172,
+          "min_ns": 161
+        },
+        "torch.cuda.Event (attr)": {
+          "mean_ns": 177,
+          "median_ns": 172,
+          "min_ns": 161
+        },
+        "cudart.cudaHostRegister (attr)": {
+          "mean_ns": 109,
+          "median_ns": 111,
+          "min_ns": 100
+        },
+        "torch.device('cuda')": {
+          "mean_ns": 599,
+          "median_ns": 595,
+          "min_ns": 535
+        },
+        "torch.device('cuda:0')": {
+          "mean_ns": 610,
+          "median_ns": 596,
+          "min_ns": 545
+        },
+        "torch.device('cuda', 0)": {
+          "mean_ns": 634,
+          "median_ns": 626,
+          "min_ns": 565
+        },
+        "cpu_tensor.is_cuda (property)": {
+          "mean_ns": 438,
+          "median_ns": 434,
+          "min_ns": 393
+        },
+        "gpu_tensor.is_cuda (property)": {
+          "mean_ns": 434,
+          "median_ns": 434,
+          "min_ns": 384
+        },
+        "_translate_device('cuda')": {
+          "mean_ns": 181,
+          "median_ns": 182,
+          "min_ns": 161
+        },
+        "_translate_device('cuda:0')": {
+          "mean_ns": 179,
+          "median_ns": 172,
+          "min_ns": 161
+        },
+        "torch.backends.cuda.is_built()": {
+          "mean_ns": 263,
+          "median_ns": 262,
+          "min_ns": 242
+        }
+      },
+      "summary": {
+        "fast_ops_count": 5,
+        "medium_ops_count": 9,
         "notes": ""
       }
     }
