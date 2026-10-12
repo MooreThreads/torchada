@@ -10,6 +10,7 @@ The switch is read when torchada applies its patches, so every case that
 depends on it has to run in a child interpreter with a controlled environment.
 """
 
+import functools
 import json
 import os
 import subprocess
@@ -97,12 +98,22 @@ def _run_child(code, **env_overrides):
     return result.stdout
 
 
-def _probe(**env_overrides):
-    """Import torchada in a child interpreter and report the availability state."""
-    for line in _run_child(_CHILD_PROBE, **env_overrides).splitlines():
+@functools.lru_cache(maxsize=None)
+def _probe_cached(env_key):
+    """Run the probe once per distinct environment and keep its result."""
+    for line in _run_child(_CHILD_PROBE, **dict(env_key)).splitlines():
         if line.startswith("PROBE_JSON="):
             return json.loads(line[len("PROBE_JSON=") :])
     raise AssertionError("child interpreter did not report a probe payload")
+
+
+def _probe(**env_overrides):
+    """Import torchada in a child interpreter and report the availability state.
+
+    The interpreter starts once per environment, so the cases that assert
+    different facts about the same mode share one run.
+    """
+    return dict(_probe_cached(tuple(sorted(env_overrides.items()))))
 
 
 class TestSwitchParsing:
