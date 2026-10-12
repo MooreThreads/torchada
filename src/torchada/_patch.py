@@ -1347,7 +1347,8 @@ class _CudartWrapper:
 # check report torch.musa.is_available() instead. Every other torch.cuda
 # attribute (device_count, get_device_name, memory_*, ...) is already
 # redirected to torch.musa in both modes, so is_available is the only attribute
-# whose default this switch changes.
+# whose default this switch changes. Platform detection is unaffected:
+# detect_platform() checks the MUSA markers before torch.cuda.is_available().
 _FORCE_CUDA_AVAILABLE_ENV = "TORCHADA_FORCE_CUDA_AVAILABLE"
 
 # Values accepted as "on" for the boolean environment switches, compared
@@ -1358,12 +1359,9 @@ _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 def _force_cuda_available_enabled() -> bool:
     """
-    Return True when TORCHADA_FORCE_CUDA_AVAILABLE opts into CUDA-compatible
-    availability reporting.
+    Return True when TORCHADA_FORCE_CUDA_AVAILABLE is set to an accepted value.
 
-    The switch is read when the patch is applied (that is, at ``import
-    torchada``), so a process keeps one consistent value for its lifetime, just
-    like the other TORCHADA_* switches.
+    Read once when the patches are applied, like the other TORCHADA_* switches.
     """
     value = os.environ.get(_FORCE_CUDA_AVAILABLE_ENV, "")
     return value.strip().lower() in _TRUTHY_ENV_VALUES
@@ -1377,11 +1375,6 @@ class _CudaModuleWrapper(ModuleType):
     This allows downstream projects to detect MUSA platform using:
         torch.cuda.is_available()  # Returns False on MUSA (original behavior)
     While still using torch.cuda.* APIs that redirect to torch.musa.
-
-    With ``force_cuda_available=True`` (TORCHADA_FORCE_CUDA_AVAILABLE), that one
-    attribute reports torch.musa.is_available() instead, for CUDA-only projects
-    that never look for MUSA. Platform detection inside torchada is unaffected:
-    detect_platform() checks the MUSA markers before torch.cuda.is_available().
 
     Performance optimization: Resolved attributes are cached in __dict__ to avoid
     repeated __getattr__ calls. This reduces overhead from ~800ns to ~50ns for
@@ -1435,8 +1428,8 @@ class _CudaModuleWrapper(ModuleType):
         return self._cudart_wrapper
 
     def __getattr__(self, name):
-        # Keep original is_available behavior, unless CUDA-compatible
-        # availability reporting was requested through the opt-in switch.
+        # is_available keeps the original behavior unless the opt-in switch
+        # redirected it to torch.musa.
         if name in self._NO_REDIRECT:
             if name == "is_available" and self._force_cuda_available:
                 value = self._musa_module.is_available
@@ -1493,11 +1486,8 @@ def _patch_torch_cuda_module():
 
     This allows developers to use torch.cuda.* APIs transparently.
 
-    Note: torch.cuda.is_available() keeps its original behavior (False on MUSA)
-    by default, so that downstream projects can detect the platform. Setting
-    TORCHADA_FORCE_CUDA_AVAILABLE=1 before importing torchada makes it report
-    torch.musa.is_available() instead, for CUDA-only projects that gate all
-    their GPU code on that single check.
+    Note: torch.cuda.is_available() keeps the original behavior (False on MUSA)
+    unless TORCHADA_FORCE_CUDA_AVAILABLE is set before importing torchada.
     """
     global _original_torch_cuda
 
@@ -1510,7 +1500,7 @@ def _patch_torch_cuda_module():
 
         # Create wrapper module that redirects most things to torch.musa
         # but keeps is_available pointing to the original unless the opt-in
-        # CUDA-compatibility switch asked for MUSA-based reporting
+        # switch is set
         force_cuda_available = _force_cuda_available_enabled()
         if force_cuda_available:
             logger.info(
@@ -2719,8 +2709,8 @@ def apply_patches():
     - torch.cuda.CUDAGraph -> torch.musa.MUSAGraph
     - optional CUDA graph debug dumps via TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH
     - torch.cuda.nccl -> torch.musa.mccl
-    - torch.cuda.is_available() keeps the original torch.cuda behavior unless
-      TORCHADA_FORCE_CUDA_AVAILABLE opts into CUDA-compatible reporting
+    - torch.cuda.is_available() keeps the original behavior unless
+      TORCHADA_FORCE_CUDA_AVAILABLE is set
     - torch.amp.autocast(device_type='cuda') -> 'musa'
     - torch.mm / torch.bmm out_dtype= backport while the MUSA dtype overload
       does not write its result

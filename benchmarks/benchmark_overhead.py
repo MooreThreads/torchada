@@ -75,7 +75,12 @@ def run_comprehensive_benchmarks():
 
     # TORCHADA_FORCE_CUDA_AVAILABLE redirects this attribute to torch.musa, so
     # keep the reported name honest about which implementation was measured.
-    is_available_redirected = torch.cuda.is_available is torch.musa.is_available
+    # torch.musa only exists once torch_musa is imported, and this script also
+    # runs on CUDA hosts.
+    musa_module = getattr(torch, "musa", None)
+    is_available_redirected = (
+        musa_module is not None and torch.cuda.is_available is musa_module.is_available
+    )
     results.append(
         benchmark_function(
             lambda: torch.cuda.is_available(),

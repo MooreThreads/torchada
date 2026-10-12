@@ -246,7 +246,7 @@ torch.cuda.synchronize()
 
 ## Why torch.cuda.is_available() Returns False on MUSA
 
-By design, `torch.cuda.is_available()` is NOT redirected to `torch.musa.is_available()`.
+By design, `torch.cuda.is_available()` is NOT redirected to `torch.musa.is_available()` by default.
 This allows downstream projects (like SGLang, vLLM) to properly detect the platform using
 patterns like:
 
