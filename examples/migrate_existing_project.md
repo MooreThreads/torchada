@@ -34,9 +34,6 @@ and `torch.utils.cpp_extension` imports work on all supported platforms.
 `torch.cuda.is_available()` returns `False` on MUSA platform by design. This allows
 downstream projects to properly detect the platform. Define a helper like this:
 
-For a project that cannot be changed at all, see the
-`TORCHADA_FORCE_CUDA_AVAILABLE` opt-in at the end of this document.
-
 ```python
 import torch
 
@@ -48,6 +45,9 @@ def has_gpu():
         return True
     return False
 ```
+
+For a project that cannot be changed at all, see the
+`TORCHADA_FORCE_CUDA_AVAILABLE` opt-in at the end of this document.
 
 For **platform detection** (choosing platform-specific code paths), use `torch.version`:
 

@@ -1344,8 +1344,9 @@ class _CudartWrapper:
 # projects are written for CUDA only and gate every GPU path on that one check
 # (``device = "cuda" if torch.cuda.is_available() else "cpu"``); for them,
 # setting TORCHADA_FORCE_CUDA_AVAILABLE=1 before importing torchada makes the
-# check report torch.musa.is_available() instead. Every other torch.cuda
-# attribute (device_count, get_device_name, memory_*, ...) is already
+# check report torch.musa.is_available() instead. The value is read once, when
+# the patches are applied, like the other TORCHADA_* switches. Every other
+# torch.cuda attribute (device_count, get_device_name, memory_*, ...) is already
 # redirected to torch.musa in both modes, so is_available is the only attribute
 # whose default this switch changes. Platform detection is unaffected:
 # detect_platform() checks the MUSA markers before torch.cuda.is_available().
@@ -1358,11 +1359,7 @@ _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def _force_cuda_available_enabled() -> bool:
-    """
-    Return True when TORCHADA_FORCE_CUDA_AVAILABLE is set to an accepted value.
-
-    Read once when the patches are applied, like the other TORCHADA_* switches.
-    """
+    """Return True when TORCHADA_FORCE_CUDA_AVAILABLE is set to an accepted value."""
     value = os.environ.get(_FORCE_CUDA_AVAILABLE_ENV, "")
     return value.strip().lower() in _TRUTHY_ENV_VALUES
 
@@ -1428,8 +1425,7 @@ class _CudaModuleWrapper(ModuleType):
         return self._cudart_wrapper
 
     def __getattr__(self, name):
-        # is_available keeps the original behavior unless the opt-in switch
-        # redirected it to torch.musa.
+        # Keep original is_available behavior
         if name in self._NO_REDIRECT:
             if name == "is_available" and self._force_cuda_available:
                 value = self._musa_module.is_available
@@ -1486,8 +1482,8 @@ def _patch_torch_cuda_module():
 
     This allows developers to use torch.cuda.* APIs transparently.
 
-    Note: torch.cuda.is_available() keeps the original behavior (False on MUSA)
-    unless TORCHADA_FORCE_CUDA_AVAILABLE is set before importing torchada.
+    Note: torch.cuda.is_available() is NOT redirected - it keeps the original
+    behavior to allow downstream projects to detect the platform properly.
     """
     global _original_torch_cuda
 
@@ -1499,8 +1495,7 @@ def _patch_torch_cuda_module():
             _original_torch_cuda = torch.cuda
 
         # Create wrapper module that redirects most things to torch.musa
-        # but keeps is_available pointing to the original unless the opt-in
-        # switch is set
+        # but keeps is_available pointing to the original
         force_cuda_available = _force_cuda_available_enabled()
         if force_cuda_available:
             logger.info(
@@ -2709,8 +2704,6 @@ def apply_patches():
     - torch.cuda.CUDAGraph -> torch.musa.MUSAGraph
     - optional CUDA graph debug dumps via TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH
     - torch.cuda.nccl -> torch.musa.mccl
-    - torch.cuda.is_available() keeps the original behavior unless
-      TORCHADA_FORCE_CUDA_AVAILABLE is set
     - torch.amp.autocast(device_type='cuda') -> 'musa'
     - torch.mm / torch.bmm out_dtype= backport while the MUSA dtype overload
       does not write its result
