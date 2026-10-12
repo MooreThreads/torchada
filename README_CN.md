@@ -370,6 +370,7 @@ with torch.accelerator.stream(torch.musa.Stream()):
 | 环境变量 | 默认值 | 作用 |
 |----------|--------|------|
 | `TORCHADA_PLATFORM` | 自动检测 | 强制指定平台：`cuda`、`musa` 或 `cpu` |
+| `TORCHADA_FORCE_CUDA_AVAILABLE` | 未设置 | 设为 `1` 时 `torch.cuda.is_available()` 返回 `torch.musa.is_available()` |
 | `TORCHADA_EXCLUDE_DIRS` | 未设置 | 原地源码移植额外排除的 include 根目录 |
 | `TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH` | 未设置 | MUSA graph `.dot` dump 目录 |
 | `TORCHADA_GRAPH_ROTATION` | `1` | 设为 `0` 关闭 CUDA graph executable 轮换 |
@@ -437,6 +438,37 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 # 或者: device.type in ("cuda", "musa")
 ```
 
+**`torch.cuda.is_available()` 在 MUSA 上返回 `False`：**
+
+```python
+device = "cuda" if torch.cuda.is_available() else "cpu"  # 在 MUSA 上会静默回落到 CPU
+```
+
+这是有意为之：便于项目区分两种平台。需要判断是否存在 GPU 时，请使用
+`torchada.is_musa_platform()`，或 [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection)
+中的 `has_gpu()` 模式。
+
+如果某个项目只支持 CUDA、且无法为 MUSA 改动代码，可以在
+**导入 torchada 之前**设置 `TORCHADA_FORCE_CUDA_AVAILABLE=1`，
+此时 `torch.cuda.is_available()` 会返回 `torch.musa.is_available()`：
+
+```bash
+TORCHADA_FORCE_CUDA_AVAILABLE=1 python serve.py
+```
+
+```python
+import torchada
+import torch
+
+torch.cuda.is_available()  # 在 MUSA GPU 上返回 True
+device = torch.device("cuda")  # 会被转换为 musa
+```
+
+只有这一个属性会改变。`torch.cuda.device_count()`、`torch.cuda.get_device_name()`、
+`torch.cuda.memory_*()` 等在所有模式下本来就会重定向到 `torch.musa`，
+`torchada.detect_platform()` 也依然返回 `Platform.MUSA`。该变量在补丁生效时读取一次，
+因此请在导入 torchada 之前设置到环境变量（或 `os.environ`）中。
+
 ## 常用 API 参考
 
 | 函数 | 描述 |
@@ -451,7 +483,7 @@ if torchada.is_gpu_device(device):  # 在 CUDA 和 MUSA 上都能工作
 | `cublas_to_mublas_name(name)` | 转换 `cublasXxx` → `mublasXxx` |
 | `curand_to_murand_name(name)` | 转换 `curandXxx` → `murandXxx` |
 
-**注意**：`torch.cuda.is_available()` 故意没有重定向 — 在 MUSA 上返回 `False`。这是为了支持正确的平台检测。关于 GPU 可用性检查，请参见 [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection) 中的 `has_gpu()` 模式。
+**注意**：`torch.cuda.is_available()` 默认故意没有重定向 — 在 MUSA 上返回 `False`。这是为了支持正确的平台检测。在导入 torchada 之前设置 `TORCHADA_FORCE_CUDA_AVAILABLE=1`，可让它改为返回 `torch.musa.is_available()`（见[已知限制](#已知限制)）。关于 GPU 可用性检查，请参见 [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection) 中的 `has_gpu()` 模式。
 
 **注意**：名称转换工具函数可供手动使用，但 `ctypes.CDLL` 已自动打补丁，加载 MUSA 库时会自动转换函数名。
 

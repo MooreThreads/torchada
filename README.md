@@ -407,6 +407,7 @@ with `2.11.0.post2`, the fixed official implementations are used automatically.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `TORCHADA_PLATFORM` | auto-detect | Force platform detection: `cuda`, `musa`, or `cpu` |
+| `TORCHADA_FORCE_CUDA_AVAILABLE` | unset | `1` makes `torch.cuda.is_available()` report `torch.musa.is_available()` |
 | `TORCHADA_EXCLUDE_DIRS` | unset | Extra include roots excluded from in-place source porting |
 | `TORCHADA_CUDA_GRAPH_DEBUG_DUMP_PATH` | unset | Directory for MUSA graph `.dot` dumps |
 | `TORCHADA_GRAPH_ROTATION` | `1` | `0` disables CUDA-graph executable rotation |
@@ -478,6 +479,40 @@ if torchada.is_gpu_device(device):  # Works on both CUDA and MUSA
 # Or: device.type in ("cuda", "musa")
 ```
 
+**`torch.cuda.is_available()` returns `False` on MUSA:**
+
+```python
+device = "cuda" if torch.cuda.is_available() else "cpu"  # silently picks the CPU on MUSA
+```
+
+This is intentional: it lets a project tell the two platforms apart. Use
+`torchada.is_musa_platform()`, or the `has_gpu()` pattern in
+[examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection),
+when you need to know whether a GPU is present.
+
+For a project that is written for CUDA only and cannot be modified for MUSA, set
+`TORCHADA_FORCE_CUDA_AVAILABLE=1` **before importing torchada**.
+`torch.cuda.is_available()` then reports `torch.musa.is_available()`:
+
+```bash
+TORCHADA_FORCE_CUDA_AVAILABLE=1 python serve.py
+```
+
+```python
+import torchada
+import torch
+
+torch.cuda.is_available()  # True on a MUSA GPU
+device = torch.device("cuda")  # translated to musa
+```
+
+Only that single attribute changes. `torch.cuda.device_count()`,
+`torch.cuda.get_device_name()`, `torch.cuda.memory_*()`, and the rest are
+already redirected to `torch.musa` in both modes, and
+`torchada.detect_platform()` still reports `Platform.MUSA`. The variable is read
+once, when the patches are applied, so set it in the environment (or in
+`os.environ`) before torchada is imported.
+
 ## Selected API Reference
 
 | Function | Description |
@@ -492,7 +527,7 @@ if torchada.is_gpu_device(device):  # Works on both CUDA and MUSA
 | `cublas_to_mublas_name(name)` | Convert `cublasXxx` → `mublasXxx` |
 | `curand_to_murand_name(name)` | Convert `curandXxx` → `murandXxx` |
 
-**Note**: `torch.cuda.is_available()` is intentionally NOT redirected — it returns `False` on MUSA. This allows proper platform detection. For GPU availability checks, see the `has_gpu()` pattern in [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection).
+**Note**: `torch.cuda.is_available()` is intentionally NOT redirected by default — it returns `False` on MUSA. This allows proper platform detection. Set `TORCHADA_FORCE_CUDA_AVAILABLE=1` before importing torchada to have it report `torch.musa.is_available()` instead (see [Known Limitation](#known-limitation)). For GPU availability checks, see the `has_gpu()` pattern in [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection).
 
 **Note**: The name conversion utilities are exported for manual use, but `ctypes.CDLL` is automatically patched to translate function names when loading MUSA libraries.
 

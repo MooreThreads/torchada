@@ -17,7 +17,10 @@ Usage:
     x = torch.randn(3, 3).cuda()
     torch.cuda.synchronize()
 
-    # Note: torch.cuda.is_available() is NOT patched (returns False on MUSA).
+    # Note: torch.cuda.is_available() keeps its original torch.cuda behavior
+    # (returns False on MUSA), so the platform stays detectable. Set
+    # TORCHADA_FORCE_CUDA_AVAILABLE=1 before importing torchada to have it
+    # report torch.musa.is_available() for CUDA-only projects.
     # For GPU availability checks, see examples/migrate_existing_project.md.
 
     # Build extensions using standard imports:

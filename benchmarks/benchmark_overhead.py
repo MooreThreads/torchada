@@ -73,9 +73,17 @@ def run_comprehensive_benchmarks():
             benchmark_function(lambda: torch.cuda.current_device(), "torch.cuda.current_device()")
         )
 
+    # TORCHADA_FORCE_CUDA_AVAILABLE redirects this attribute to torch.musa, so
+    # keep the reported name honest about which implementation was measured.
+    is_available_redirected = torch.cuda.is_available is torch.musa.is_available
     results.append(
         benchmark_function(
-            lambda: torch.cuda.is_available(), "torch.cuda.is_available() [NOT redirected]"
+            lambda: torch.cuda.is_available(),
+            (
+                "torch.cuda.is_available() [redirected]"
+                if is_available_redirected
+                else "torch.cuda.is_available() [NOT redirected]"
+            ),
         )
     )
 
