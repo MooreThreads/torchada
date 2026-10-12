@@ -439,7 +439,7 @@ def is_musa():
 ## Performance
 
 torchada uses aggressive caching to minimize runtime overhead. The numbers below are
-the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.96
+the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.95
 (2026-10-09, MTT S5000, PyTorch and torch_musa `2.11.0.post2+musa5.2.0`), as median
 per-call overhead:
 
