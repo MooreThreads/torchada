@@ -402,7 +402,7 @@ def is_musa():
 ## 性能
 
 torchada 使用激进的缓存策略来最小化运行时开销。下表的数字取自仓库中已提交的
-`benchmarks/benchmark_history.json`（torchada 0.1.95，2026-10-09，MTT S5000，
+`benchmarks/benchmark_history.json`（torchada 0.1.96，2026-10-09，MTT S5000，
 PyTorch 与 torch_musa `2.11.0.post2+musa5.2.0`），为每次调用的开销中位数：
 
 | 操作 | 开销 |
@@ -522,7 +522,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.95
+torchada>=0.1.96
 ```
 
 ### 步骤 2：条件导入
