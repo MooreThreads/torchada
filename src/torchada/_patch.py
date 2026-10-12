@@ -1260,9 +1260,7 @@ def _discover_factory_functions() -> Tuple[List[str], List[str]]:
     if not names:
         names.update(_FALLBACK_FACTORY_FUNCTIONS)
         # torch does not device-inject into the ``*_like`` family.
-        device_injectable.update(
-            n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like")
-        )
+        device_injectable.update(n for n in _FALLBACK_FACTORY_FUNCTIONS if not n.endswith("_like"))
     # ``*_like`` variants accept device= but are not device-injected by torch.
     names |= {n + "_like" for n in tuple(names) if callable(getattr(torch, n + "_like", None))}
     for extra in _EXTRA_FACTORY_FUNCTIONS:
@@ -1339,6 +1337,33 @@ class _CudartWrapper:
         raise AttributeError(f"CUDA runtime has no attribute '{name}'")
 
 
+# Opt-in CUDA-compatible availability reporting.
+#
+# torch.cuda.is_available() deliberately keeps its original torch.cuda behavior
+# (False on MUSA) so downstream projects can tell the two platforms apart. Some
+# projects are written for CUDA only and gate every GPU path on that one check
+# (``device = "cuda" if torch.cuda.is_available() else "cpu"``); for them,
+# setting TORCHADA_FORCE_CUDA_AVAILABLE=1 before importing torchada makes the
+# check report torch.musa.is_available() instead. The value is read once, when
+# the patches are applied, like the other TORCHADA_* switches. Every other
+# torch.cuda attribute (device_count, get_device_name, memory_*, ...) is already
+# redirected to torch.musa in both modes, so is_available is the only attribute
+# whose default this switch changes. Platform detection is unaffected:
+# detect_platform() checks the MUSA markers before torch.cuda.is_available().
+_FORCE_CUDA_AVAILABLE_ENV = "TORCHADA_FORCE_CUDA_AVAILABLE"
+
+# Values accepted as "on" for the boolean environment switches, compared
+# case-insensitively after stripping surrounding whitespace. Anything else,
+# including an empty or unset variable, keeps the default behavior.
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _force_cuda_available_enabled() -> bool:
+    """Return True when TORCHADA_FORCE_CUDA_AVAILABLE is set to an accepted value."""
+    value = os.environ.get(_FORCE_CUDA_AVAILABLE_ENV, "")
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
 class _CudaModuleWrapper(ModuleType):
     """
     A wrapper module that redirects torch.cuda to torch.musa,
@@ -1376,10 +1401,11 @@ class _CudaModuleWrapper(ModuleType):
         # These are typically not called in hot paths anyway
     }
 
-    def __init__(self, original_cuda, musa_module):
+    def __init__(self, original_cuda, musa_module, force_cuda_available=False):
         super().__init__("torch.cuda")
         self._original_cuda = original_cuda
         self._musa_module = musa_module
+        self._force_cuda_available = force_cuda_available
         self._cudart_wrapper = None
 
     def cudart(self):
@@ -1401,7 +1427,10 @@ class _CudaModuleWrapper(ModuleType):
     def __getattr__(self, name):
         # Keep original is_available behavior
         if name in self._NO_REDIRECT:
-            value = getattr(self._original_cuda, name)
+            if name == "is_available" and self._force_cuda_available:
+                value = self._musa_module.is_available
+            else:
+                value = getattr(self._original_cuda, name)
             # Cache in __dict__ for faster subsequent access
             if name not in self._NO_CACHE:
                 object.__setattr__(self, name, value)
@@ -1467,7 +1496,17 @@ def _patch_torch_cuda_module():
 
         # Create wrapper module that redirects most things to torch.musa
         # but keeps is_available pointing to the original
-        cuda_wrapper = _CudaModuleWrapper(_original_torch_cuda, torch.musa)
+        force_cuda_available = _force_cuda_available_enabled()
+        if force_cuda_available:
+            logger.info(
+                "%s is set: torch.cuda.is_available() reports torch.musa.is_available()",
+                _FORCE_CUDA_AVAILABLE_ENV,
+            )
+        cuda_wrapper = _CudaModuleWrapper(
+            _original_torch_cuda,
+            torch.musa,
+            force_cuda_available=force_cuda_available,
+        )
 
         # Replace torch.cuda with our wrapper in sys.modules
         # This makes 'from torch.cuda import ...' work

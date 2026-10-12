@@ -46,6 +46,9 @@ def has_gpu():
     return False
 ```
 
+For a project that cannot be changed at all, see the
+`TORCHADA_FORCE_CUDA_AVAILABLE` opt-in at the end of this document.
+
 For **platform detection** (choosing platform-specific code paths), use `torch.version`:
 
 ```python
@@ -243,7 +246,7 @@ torch.cuda.synchronize()
 
 ## Why torch.cuda.is_available() Returns False on MUSA
 
-By design, `torch.cuda.is_available()` is NOT redirected to `torch.musa.is_available()`.
+By design, `torch.cuda.is_available()` is NOT redirected to `torch.musa.is_available()` by default.
 This allows downstream projects (like SGLang, vLLM) to properly detect the platform using
 patterns like:
 
@@ -255,3 +258,11 @@ elif hasattr(torch.version, 'musa') and torch.version.musa is not None:
 ```
 
 Use `torch.version.cuda` and `torch.version.musa` for platform detection.
+
+For a project that cannot be modified at all — a CUDA-only dependency, for
+example — set `TORCHADA_FORCE_CUDA_AVAILABLE=1` before importing torchada:
+`torch.cuda.is_available()` then reports `torch.musa.is_available()` for that
+process. Only that one attribute changes, and `torchada.detect_platform()` still
+reports `Platform.MUSA`. Prefer the `has_gpu()` helper above for code you own,
+because the opt-in switch hides the platform from any code that relies on
+`torch.cuda.is_available()` to tell CUDA apart from MUSA.

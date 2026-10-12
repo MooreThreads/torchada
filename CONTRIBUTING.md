@@ -113,7 +113,7 @@ def _patch_feature_name():
 
 ## Critical Constraints
 
-1. **Never patch** `torch.cuda.is_available()` or `torch.version.cuda` — downstream projects use these for platform detection
+1. **Never patch** `torch.cuda.is_available()` or `torch.version.cuda` by default — downstream projects use these for platform detection. The only allowed exception is the explicit opt-in switch `TORCHADA_FORCE_CUDA_AVAILABLE`, which redirects `torch.cuda.is_available()` to `torch.musa.is_available()` for unmodifiable CUDA-only projects; an unset or non-truthy value must keep the original behavior
 2. **Import order matters**: `import torchada` must come before other torch imports in user code
 3. **MUSA tensors use `PrivateUse1` dispatch key**, not `CUDA` — always translate dispatch keys
 
