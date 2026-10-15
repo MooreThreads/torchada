@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from torchada.utils.cpp_extension import forwarding_include_dir
+from torchada.utils.cpp_extension import forwarding_include_dir, stable_compat_include_dir
 
 
 @pytest.mark.parametrize("standard", ["c++17", "c++20"])
@@ -25,6 +25,8 @@ def test_runtime_headers_compile_without_source_porting(tmp_path, standard):
             "--offload-arch=" + os.environ.get("MTGPU_TARGET", "mp_31"),
             "-I",
             forwarding_include_dir(),
+            "-I",
+            stable_compat_include_dir(),
             "-c",
             str(source),
             "-o",

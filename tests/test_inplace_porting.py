@@ -274,7 +274,11 @@ def test_source_parent_is_not_filtered_as_system_include(tmp_path, monkeypatch):
 
 
 def test_unset_exclude_dirs_keeps_original_include_filter(monkeypatch):
-    from torchada.utils.cpp_extension import BuildExtension, stable_compat_include_dir
+    from torchada.utils.cpp_extension import (
+        BuildExtension,
+        forwarding_include_dir,
+        stable_compat_include_dir,
+    )
 
     monkeypatch.delenv("TORCHADA_EXCLUDE_DIRS", raising=False)
 
@@ -284,6 +288,10 @@ def test_unset_exclude_dirs_keeps_original_include_filter(monkeypatch):
     assert BuildExtension._is_system_include_dir(stable_compat_include_dir())
     assert BuildExtension._is_system_include_dir(
         os.path.join(stable_compat_include_dir(), "torch", "csrc")
+    )
+    assert BuildExtension._is_system_include_dir(forwarding_include_dir())
+    assert BuildExtension._is_system_include_dir(
+        os.path.join(forwarding_include_dir(), "nested")
     )
     assert not BuildExtension._is_system_include_dir("/home/project/include")
 
