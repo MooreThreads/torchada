@@ -1967,6 +1967,19 @@ def _patch_torch_c_exports():
         if hasattr(musac, name) and not hasattr(torch._C, name):
             setattr(torch._C, name, getattr(musac, name))
 
+    # CUDA-named symbols that downstream code (e.g. torch._inductor's
+    # cudagraph_trees, reached via torch.compiler.cudagraph_mark_step_begin)
+    # imports from torch._C once torch.backends.cuda.is_built() reports True
+    # (which torchada itself enables on MUSA). Alias each to its real MUSA
+    # counterpart so the import chain keeps working.
+    _CUDA_TO_MUSA_C_EXPORTS = {
+        "_cuda_CUDAAllocator_AllocatorState": "_musa_MUSAAllocator_AllocatorState",
+    }
+
+    for cuda_name, musa_name in _CUDA_TO_MUSA_C_EXPORTS.items():
+        if not hasattr(torch._C, cuda_name) and hasattr(musac, musa_name):
+            setattr(torch._C, cuda_name, getattr(musac, musa_name))
+
 
 @patch_function
 @requires_import("torch_musa")
