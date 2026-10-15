@@ -955,6 +955,19 @@ def stable_compat_include_dir() -> str:
     )
 
 
+def forwarding_include_dir() -> str:
+    """Directory holding generic CUDA-named forwarding headers for MUSA builds.
+
+    These headers provide runtime and FP8 aliases for native MUSA compiler
+    consumers. They are separate from the stable ABI compatibility headers.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "csrc",
+        "forwarding",
+    )
+
+
 def stable_compat_box_header() -> str:
     """Path to the force-include header providing ``TORCH_BOX`` for the stable ABI.
 

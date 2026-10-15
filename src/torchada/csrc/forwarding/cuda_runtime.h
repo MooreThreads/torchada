@@ -1,7 +1,7 @@
 #pragma once
-// MUSA: there is no <cuda_runtime.h> on MUSA; libtorch-stable kernels that
-// include it (e.g. torch_utils.h) get the MUSA runtime instead. Resolved ahead
-// of any toolchain header via the stable_compat include dir.
+// MUSA: there is no <cuda_runtime.h> on MUSA; CUDA-named MUSA consumers that
+// include it get the MUSA runtime instead. Resolved through
+// forwarding_include_dir(), not the stable ABI compatibility include path.
 #include <musa_runtime.h>
 
 // MUSA: libtorch-stable kernels use the CUDA runtime spelling for device

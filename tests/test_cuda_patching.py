@@ -3840,7 +3840,7 @@ class TestStableCompatHeaders:
         assert "std::pair" in text
 
     def test_cuda_family_shim_headers_redirect_to_musa(self):
-        """cuda_bf16/fp16/fp8/runtime + cublas_v2 shims include the MUSA headers."""
+        """Stable ABI CUDA family shims include the MUSA headers."""
         import os
 
         from torchada.utils.cpp_extension import stable_compat_include_dir
@@ -3849,12 +3849,22 @@ class TestStableCompatHeaders:
         for name, needle in [
             ("cuda_bf16.h", "musa_bf16.h"),
             ("cuda_fp16.h", "musa_fp16.h"),
-            ("cuda_fp8.h", "musa_fp8.h"),
-            ("cuda_runtime.h", "musa_runtime.h"),
             ("cublas_v2.h", "mublas.h"),
         ]:
             p = os.path.join(d, name)
             assert os.path.isfile(p), f"{name} shim missing"
+            assert needle in open(p, encoding="utf-8").read(), f"{name} !-> {needle}"
+
+    def test_forwarding_headers_redirect_to_musa(self):
+        """Generic runtime and FP8 forwarding headers stay off the stable ABI path."""
+        import os
+
+        from torchada.utils.cpp_extension import forwarding_include_dir
+
+        d = forwarding_include_dir()
+        for name, needle in [("cuda_fp8.h", "musa_fp8.h"), ("cuda_runtime.h", "musa_runtime.h")]:
+            p = os.path.join(d, name)
+            assert os.path.isfile(p), f"{name} forwarding header missing"
             assert needle in open(p, encoding="utf-8").read(), f"{name} !-> {needle}"
 
     def test_cuda_bf16_shim_aliases_nv_types(self):

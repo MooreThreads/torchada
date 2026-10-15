@@ -16,10 +16,7 @@ import sys
 import pytest
 
 import torchada  # noqa: F401  apply MUSA patches first
-from torchada.utils.cpp_extension import (
-    stable_compat_box_header,
-    stable_compat_include_dir,
-)
+from torchada.utils.cpp_extension import stable_compat_box_header, stable_compat_include_dir
 
 CSRC = os.path.join(os.path.dirname(__file__), "csrc")
 OPS_CU = os.path.join(CSRC, "stable_abi_ops.cu")
