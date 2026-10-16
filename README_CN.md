@@ -256,7 +256,9 @@ torchada 还为近期 vLLM 和 SGLang 在 torch_musa 2.9 上使用的 libtorch �
 稳定 ABI 构建应显式加入 `stable_compat_include_dir()`；使用 `TORCH_BOX` 的内核
 还必须通过编译器强制 include `stable_compat_box_header()` 返回的头文件。这两个
 辅助函数都位于 `torchada.utils.cpp_extension`。自定义 stable ABI 扩展应通过
-上述方式显式加入兼容头。torch_musa 2.9 头文件回补会在 MUSA 扩展构建时延迟、
+上述方式显式加入兼容头。直接使用 CUDA 命名 runtime 或 FP8 头文件的 MUSA
+消费者可以使用 `forwarding_include_dir()`。torch_musa 2.9 头文件回补会在 MUSA
+扩展构建时延迟、
 尽力执行；torch 2.11 及更新版本已经原生提供 stable ABI，因此会跳过回补。单纯
 `import torchada` 不会修改 PyTorch 或 torch_musa 头文件。
 
