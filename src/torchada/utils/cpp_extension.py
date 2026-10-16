@@ -911,8 +911,7 @@ def include_paths(
         # Always expose generic CUDA-named forwarding headers. Add the legacy
         # stable-ABI backport only on stacks that still need it.
         if include_device:
-            if _stable_header_backport_required():
-                paths.append(stable_compat_include_dir())
+            paths.append(stable_compat_include_dir())
             paths.append(forwarding_include_dir())
         if not torch_include_dirs:
             paths = [path for path in paths if not _is_torch_path(path, "include")]
