@@ -51,6 +51,16 @@
 #ifndef cudaLaunchAttributeProgrammaticStreamSerialization
 #define cudaLaunchAttributeProgrammaticStreamSerialization musaLaunchAttributeIgnore
 #endif
+#ifndef cudaLaunchAttributeCooperative
+#define cudaLaunchAttributeCooperative musaLaunchAttributeCooperative
+#endif
+#ifndef cudaLaunchAttributeClusterDimension
+#define cudaLaunchAttributeClusterDimension musaLaunchAttributeClusterDimension
+#endif
+#ifndef cudaLaunchAttributeClusterSchedulingPolicyPreference
+#define cudaLaunchAttributeClusterSchedulingPolicyPreference \
+    musaLaunchAttributeClusterSchedulingPolicyPreference
+#endif
 #ifndef cudaLaunchKernel
 #define cudaLaunchKernel musaLaunchKernel
 #endif
