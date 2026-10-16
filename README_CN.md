@@ -253,8 +253,7 @@ jpeg_ext = CUDAExtension(
 torchada 还为近期 vLLM 和 SGLang 在 torch_musa 2.9 上使用的 libtorch 稳定 ABI
 内核提供兼容头文件及源码移植支持。在 MUSA 上，打补丁后的
 `torch.utils.cpp_extension.include_paths()` 会返回该兼容 include 目录。自定义
-稳定 ABI 构建应显式加入 `stable_compat_include_dir()`；直接使用 CUDA 名称 runtime
-或 FP8 头文件的 MUSA 内核应显式加入 `forwarding_include_dir()`；使用 `TORCH_BOX` 的内核
+稳定 ABI 构建应显式加入 `stable_compat_include_dir()`；使用 `TORCH_BOX` 的内核
 还必须通过编译器强制 include `stable_compat_box_header()` 返回的头文件。这两个
 辅助函数都位于 `torchada.utils.cpp_extension`。自定义 stable ABI 扩展应通过
 上述方式显式加入兼容头。torch_musa 2.9 头文件回补会在 MUSA 扩展构建时延迟、
@@ -265,9 +264,7 @@ torchada 还为近期 vLLM 和 SGLang 在 torch_musa 2.9 上使用的 libtorch �
 `TORCHADA_EXCLUDE_DIRS` 额外配置要排除的目录；每一项可以是目录路径，也可以是目录
 名称，使用平台路径分隔符，也支持逗号分隔。名称会按完整路径组件匹配，因此
 `TORCHADA_EXCLUDE_DIRS=torch_musa` 可以直接排除 `/home/torch_musa`，无需填写完整路径。
-即使源目录位于排除目录下，扩展显式提供的源目录仍会执行转换。对于 editable 安装，
-TorchADA 自己的 stable ABI 和 forwarding 兼容目录会受到原地移植保护，因为其中的
-CUDA 命名声明属于包自身的兼容输入。
+即使源目录位于排除目录下，扩展显式提供的源目录仍会执行转换。
 
 移植也会处理嵌套的 PyTorch 头文件：`<torch/cuda.h>` 和 `"torch/cuda.h"` 都会变成
 `torch/musa.h`，而形如 `decode_jpegs_cuda.h` 的项目内文件名保持不变。
