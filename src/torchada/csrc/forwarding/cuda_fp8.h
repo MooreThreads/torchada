@@ -12,4 +12,7 @@ using __nv_fp8x2_e4m3 = __mt_fp8x2_e4m3;
 using __nv_fp8x2_e5m2 = __mt_fp8x2_e5m2;
 using __nv_fp8x4_e4m3 = __mt_fp8x4_e4m3;
 using __nv_fp8x4_e5m2 = __mt_fp8x4_e5m2;
+using __nv_fp8_storage_t = __mt_fp8_storage_t;
+using __nv_fp8x2_storage_t = __mt_fp8x2_storage_t;
+using __nv_fp8x4_storage_t = __mt_fp8x4_storage_t;
 #endif

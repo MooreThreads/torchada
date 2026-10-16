@@ -48,6 +48,9 @@
 #ifndef cudaLaunchAttribute
 #define cudaLaunchAttribute musaLaunchAttribute
 #endif
+#ifndef cudaLaunchAttributeProgrammaticStreamSerialization
+#define cudaLaunchAttributeProgrammaticStreamSerialization musaLaunchAttributeIgnore
+#endif
 #ifndef cudaLaunchKernel
 #define cudaLaunchKernel musaLaunchKernel
 #endif
@@ -66,10 +69,17 @@
 #ifndef cudaMemcpyDeviceToHost
 #define cudaMemcpyDeviceToHost musaMemcpyDeviceToHost
 #endif
+#ifndef cudaMemcpyDeviceToDevice
+#define cudaMemcpyDeviceToDevice musaMemcpyDeviceToDevice
+#endif
+#ifndef cudaMemcpyHostToHost
+#define cudaMemcpyHostToHost musaMemcpyHostToHost
+#endif
 #ifndef cudaDeviceGetAttribute
 #define cudaDeviceGetAttribute musaDeviceGetAttribute
 #endif
 #ifndef cudaRuntimeGetVersion
+// This reports the MUSA runtime encoding, not a CUDA toolkit version.
 #define cudaRuntimeGetVersion musaRuntimeGetVersion
 #endif
 #ifndef cudaDevAttrMultiProcessorCount

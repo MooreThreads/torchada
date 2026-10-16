@@ -278,7 +278,9 @@ torchada also provides compatibility headers and source porting for the
 libtorch stable-ABI kernels used by recent vLLM and SGLang releases on
 torch_musa 2.9. The patched `torch.utils.cpp_extension.include_paths()` exposes
 the compatibility include directory on MUSA. Custom stable-ABI builds should
-add `stable_compat_include_dir()` explicitly, and kernels that use `TORCH_BOX`
+add `stable_compat_include_dir()` explicitly. Native MUSA consumers that include
+CUDA-named runtime or FP8 headers should add `forwarding_include_dir()`, and kernels
+that use `TORCH_BOX`
 must force-include the path returned by `stable_compat_box_header()`. Both
 helpers are available from `torchada.utils.cpp_extension`. The torch_musa 2.9
 header backport runs lazily and best-effort at MUSA extension
@@ -292,7 +294,9 @@ be directory paths or directory names and are separated by the platform path
 separator; commas are also accepted. A name matches a complete path component,
 so `TORCHADA_EXCLUDE_DIRS=torch_musa` excludes `/home/torch_musa` without the
 full path. Explicit source directories remain eligible for porting even when
-they are below an excluded root.
+they are below an excluded root. TorchADA's stable-ABI and forwarding compatibility
+directories are protected from in-place source porting, including for editable
+installs, because their CUDA-named declarations are package-owned inputs.
 
 Porting reaches nested PyTorch headers as well: both `<torch/cuda.h>` and
 `"torch/cuda.h"` become `torch/musa.h`, while project-local names such as

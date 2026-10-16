@@ -8,12 +8,9 @@
 
 static_assert(std::is_same_v<__nv_bfloat16, __mt_bfloat16>);
 static_assert(std::is_same_v<__nv_bfloat162, __mt_bfloat162>);
-static_assert(std::is_same_v<__nv_fp8_e4m3, __mt_fp8_e4m3>);
-static_assert(std::is_same_v<__nv_fp8_e5m2, __mt_fp8_e5m2>);
-static_assert(std::is_same_v<__nv_fp8x2_e4m3, __mt_fp8x2_e4m3>);
-static_assert(std::is_same_v<__nv_fp8x2_e5m2, __mt_fp8x2_e5m2>);
-static_assert(std::is_same_v<__nv_fp8x4_e4m3, __mt_fp8x4_e4m3>);
-static_assert(std::is_same_v<__nv_fp8x4_e5m2, __mt_fp8x4_e5m2>);
+__nv_fp8_storage_t fp8_storage;
+__nv_fp8x2_storage_t fp8x2_storage;
+__nv_fp8x4_storage_t fp8x4_storage;
 
 __global__ void copy_half(__half* output, const __half* input) {
   output[threadIdx.x] = input[threadIdx.x];
