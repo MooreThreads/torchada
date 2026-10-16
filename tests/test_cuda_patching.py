@@ -3879,9 +3879,10 @@ class TestStableCompatHeaders:
         assert "__nv_bfloat16 = __mt_bfloat16" in text
         assert "__nv_bfloat162 = __mt_bfloat162" in text
 
-    def test_include_paths_appends_compat_dirs_on_musa(self):
-        """include_paths() auto-appends both compat dirs for device builds on MUSA."""
+    def test_include_paths_appends_compat_dirs_on_musa(self, monkeypatch):
+        """MUSA device builds expose forwarding and required stable backports."""
         import torchada
+        import torchada.utils.cpp_extension as cpp_extension
         from torchada.utils.cpp_extension import (
             forwarding_include_dir,
             include_paths,
@@ -3891,11 +3892,31 @@ class TestStableCompatHeaders:
         if not torchada.is_musa_platform():
             pytest.skip("Only applicable on MUSA platform")
 
+        monkeypatch.setattr(cpp_extension, "_stable_header_backport_required", lambda: True)
         paths = include_paths(device_type="cuda")
         assert stable_compat_include_dir() in paths
         assert forwarding_include_dir() in paths
         # Both TorchADA-owned directories are appended after vendor paths.
         assert paths[-2:] == [stable_compat_include_dir(), forwarding_include_dir()]
+
+    def test_include_paths_uses_only_forwarding_with_native_stable_abi(self, monkeypatch):
+        """Native stable ABI stacks do not inherit the legacy compatibility path."""
+        import torchada
+        import torchada.utils.cpp_extension as cpp_extension
+        from torchada.utils.cpp_extension import (
+            forwarding_include_dir,
+            include_paths,
+            stable_compat_include_dir,
+        )
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        monkeypatch.setattr(cpp_extension, "_stable_header_backport_required", lambda: False)
+        paths = include_paths(device_type="cuda")
+        assert forwarding_include_dir() in paths
+        assert stable_compat_include_dir() not in paths
+        assert paths[-1] == forwarding_include_dir()
 
     def test_include_paths_omits_stable_compat_for_cpu_only(self):
         """include_paths(device_type='cpu') does not add the device stable_compat dir."""

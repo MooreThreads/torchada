@@ -908,12 +908,11 @@ def include_paths(
             if musa_home:
                 paths.append(os.path.join(musa_home, "include"))
 
-        # Auto-append torchada's libtorch-stable ABI compat headers so
-        # libtorch-stable kernels (vLLM, SGLang, ...) resolve
-        # <torch/headeronly/core/Dispatch.h> on MUSA. Appended LAST so a future
-        # torch_musa shipping the real header wins.
+        # Always expose generic CUDA-named forwarding headers. Add the legacy
+        # stable-ABI backport only on stacks that still need it.
         if include_device:
-            paths.append(stable_compat_include_dir())
+            if _stable_header_backport_required():
+                paths.append(stable_compat_include_dir())
             paths.append(forwarding_include_dir())
         if not torch_include_dirs:
             paths = [path for path in paths if not _is_torch_path(path, "include")]
