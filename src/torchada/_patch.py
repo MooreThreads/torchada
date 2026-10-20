@@ -28,6 +28,7 @@ import os
 import sys
 import threading
 import time
+import typing
 import warnings
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, List, Optional, Tuple
@@ -867,6 +868,28 @@ class DeviceFactoryWrapper(metaclass=_DeviceFactoryMeta):
             return original()
 
 
+def _register_device_schema_type(wrapper: type) -> None:
+    """
+    Teach ``torch.library.infer_schema`` about the patched ``torch.device``.
+
+    ``infer_schema`` looks annotations up in a table keyed by the original
+    ``torch.device`` class.  Once ``torch.device`` is replaced, functions
+    annotated with ``torch.device`` (e.g. SGLang custom ops) carry the wrapper
+    instead, so register the wrapper under the same schema types to keep
+    ``torch.library.infer_schema`` and ``torch.library.custom_op`` working.
+    """
+    from torch._library import infer_schema as infer_schema_module
+
+    supported_types = infer_schema_module.SUPPORTED_PARAM_TYPES
+    original = _original_torch_device
+    for annotation, schema_type in list(supported_types.items()):
+        if annotation is original:
+            supported_types[wrapper] = schema_type
+        elif any(arg is original for arg in typing.get_args(annotation)):
+            # e.g. typing.Optional[torch.device] -> typing.Optional[wrapper]
+            supported_types[typing.Optional[wrapper]] = schema_type
+
+
 @patch_function
 def _patch_torch_device():
     """
@@ -905,6 +928,14 @@ def _patch_torch_device():
         _register_custom_builtin("device", "from torch import device", DeviceFactoryWrapper)
     except (AttributeError, ImportError, TypeError):
         logger.debug("Unable to register torch.device as an FX builtin", exc_info=True)
+
+    # torch.library.infer_schema keys its supported parameter types by the
+    # original torch.device class; register the wrapper so annotations that now
+    # resolve to it are still accepted.
+    try:
+        _register_device_schema_type(DeviceFactoryWrapper)
+    except (AttributeError, ImportError, TypeError):
+        logger.debug("Unable to register torch.device with infer_schema", exc_info=True)
 
 
 # Store original torch.Generator for patching
