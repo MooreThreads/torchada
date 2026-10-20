@@ -27,6 +27,8 @@ Usage:
     from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CUDA_HOME
 """
 
+import torch
+
 __version__ = "0.1.100"
 
 from . import cuda, utils
@@ -83,6 +85,27 @@ def get_backend():
     return get_torch_device_module()
 
 
+def apply_rope_inplace(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    is_neox: bool,
+    rope_dim: int = 0,
+) -> None:
+    """Apply MUSA rotary position embedding to query and key in place."""
+    resolved_rope_dimension = rope_dim or cos_sin_cache.size(-1)
+    torch.ops.torchada.apply_rope_inplace(
+        query,
+        key,
+        cos_sin_cache,
+        positions,
+        is_neox,
+        resolved_rope_dimension,
+    )
+
+
 __all__ = [
     # Version
     "__version__",
@@ -99,6 +122,7 @@ __all__ = [
     "get_device_name",
     "get_platform",
     "get_backend",
+    "apply_rope_inplace",
     # Device helpers
     "is_gpu_device",
     "is_cuda_like_device",
