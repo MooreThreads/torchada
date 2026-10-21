@@ -768,6 +768,21 @@ def _wrap_to_method(original_to: Callable) -> Callable:
     return wrapped_to
 
 
+def _cuda_method_target_device(device: Any) -> Any:
+    """Translate a ``.cuda()`` device argument into the MUSA equivalent.
+
+    ``Tensor.cuda()``/``Module.cuda()`` accept ``None`` (the current device),
+    an integer index, a device string, or a ``torch.device``. Integers become an
+    explicitly indexed MUSA device; the other forms go through the regular
+    ``cuda`` -> ``musa`` translation.
+    """
+    if device is None:
+        return "musa"
+    if isinstance(device, int):
+        return f"musa:{device}"
+    return _translate_device(device)
+
+
 def _wrap_tensor_cuda(original_cuda: Callable) -> Callable:
     """Wrap tensor.cuda() to use musa on MUSA platform."""
     # Cache platform check at wrapper creation time
@@ -776,13 +791,12 @@ def _wrap_tensor_cuda(original_cuda: Callable) -> Callable:
     @functools.wraps(original_cuda)
     def wrapped_cuda(self, device=None, non_blocking=False):
         if _is_musa:
-            # Use .musa() instead
-            if hasattr(self, "musa"):
-                return self.musa(device=device, non_blocking=non_blocking)
-            else:
-                # Fallback to .to()
-                target_device = f"musa:{device}" if device is not None else "musa"
-                return self.to(target_device, non_blocking=non_blocking)
+            # Move with .to() rather than .musa(). torch_musa's Tensor.musa()
+            # re-enters its own C binding, which mis-dispatches while a
+            # __torch_function__ mode is active (for example inside
+            # ``with torch.device("cuda"):``) and raises a TypeError; .to() is a
+            # regular aten op and works in that context.
+            return self.to(_cuda_method_target_device(device), non_blocking=non_blocking)
         return original_cuda(self, device=device, non_blocking=non_blocking)
 
     return wrapped_cuda
@@ -796,11 +810,9 @@ def _wrap_module_cuda(original_cuda: Callable) -> Callable:
     @functools.wraps(original_cuda)
     def wrapped_cuda(self, device=None):
         if _is_musa:
-            if hasattr(self, "musa"):
-                return self.musa(device=device)
-            else:
-                target_device = f"musa:{device}" if device is not None else "musa"
-                return self.to(target_device)
+            # Same hazard as _wrap_tensor_cuda: Module.musa() applies
+            # Tensor.musa() to every parameter and buffer.
+            return self.to(_cuda_method_target_device(device))
         return original_cuda(self, device=device)
 
     return wrapped_cuda
@@ -2740,9 +2752,9 @@ def apply_patches():
     - torch.cuda.* API -> torch.musa.*
     - torch.cuda.nvtx -> no-op stub
     - torch.cuda.Stream.cuda_stream -> musa_stream
-    - torch.Tensor.cuda() -> torch.Tensor.musa()
+    - torch.Tensor.cuda() -> torch.Tensor.to("musa")
     - torch.Tensor.is_cuda -> True for MUSA tensors
-    - torch.nn.Module.cuda() -> torch.nn.Module.musa()
+    - torch.nn.Module.cuda() -> torch.nn.Module.to("musa")
     - Device string translation ("cuda" -> "musa")
     - torch.distributed with 'nccl' backend -> 'mccl'
     - torch.cuda.CUDAGraph -> torch.musa.MUSAGraph

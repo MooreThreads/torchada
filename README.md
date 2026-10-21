@@ -439,7 +439,7 @@ def is_musa():
 ## Performance
 
 torchada uses aggressive caching to minimize runtime overhead. The numbers below are
-the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.99
+the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.100
 (2026-10-09, MTT S5000, PyTorch and torch_musa `2.11.0.post2+musa5.2.0`), as median
 per-call overhead:
 
@@ -567,7 +567,7 @@ nvJPEG, libtorch-stable, FlashInfer, cutlass, thrust, ...).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.99
+torchada>=0.1.100
 ```
 
 ### Step 2: Conditional Import
