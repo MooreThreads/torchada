@@ -2315,6 +2315,60 @@ def _patch_flash_attn():
             flash_attn_interface._flash_attn_forward = _flash_attn_forward
 
 
+_SGLANG_ROPE_MODULE = "sglang.kernels.ops.attention.rope"
+
+
+def _apply_sglang_rope_patch(rope):
+    from . import apply_rope_inplace
+
+    rope.apply_rope_inplace = apply_rope_inplace
+
+
+class _SglangRopeLoader:
+    def __init__(self, loader):
+        self.loader = loader
+
+    def create_module(self, spec):
+        if hasattr(self.loader, "create_module"):
+            return self.loader.create_module(spec)
+        return None
+
+    def exec_module(self, module):
+        self.loader.exec_module(module)
+        _apply_sglang_rope_patch(module)
+
+
+class _SglangRopeFinder:
+    _torchada_sglang_rope = True
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname != _SGLANG_ROPE_MODULE:
+            return None
+        if fullname in sys.modules:
+            _apply_sglang_rope_patch(sys.modules[fullname])
+            return None
+        for finder in sys.meta_path:
+            if finder is self:
+                continue
+            spec = finder.find_spec(fullname, path, target)
+            if spec is None or spec.loader is None:
+                continue
+            spec.loader = _SglangRopeLoader(spec.loader)
+            return spec
+        return None
+
+
+@patch_function
+def _patch_sglang_rope():
+    """Patch SGLang-Omni's fused-RoPE import when that module is loaded."""
+    if any(getattr(finder, "_torchada_sglang_rope", False) for finder in sys.meta_path):
+        return
+    sys.meta_path.insert(0, _SglangRopeFinder())
+    rope = sys.modules.get(_SGLANG_ROPE_MODULE)
+    if rope is not None:
+        _apply_sglang_rope_patch(rope)
+
+
 class _CDLLWrapper:
     """
     Wrapper for ctypes.CDLL that automatically translates CUDA/NCCL function names

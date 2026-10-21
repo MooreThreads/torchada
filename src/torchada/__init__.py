@@ -27,7 +27,9 @@ Usage:
     from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CUDA_HOME
 """
 
-__version__ = "0.1.100"
+import torch
+
+__version__ = "0.1.101"
 
 from . import cuda, utils
 
@@ -53,6 +55,33 @@ from ._runtime import (
 )
 from .triton.autotune.fused_moe import set_default_moe_config_dir
 from .utils.cpp_extension import CUDA_HOME
+
+
+def apply_rope_inplace(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    is_neox: bool,
+    rope_dim: int = 0,
+) -> None:
+    """Apply MUSA rotary position embedding to query and key in place.
+
+    Each position must be in ``[0, cos_sin_cache.size(0))``.
+    """
+    if query.device.type != "musa":
+        raise RuntimeError("torchada.apply_rope_inplace requires MUSA tensors")
+    resolved_rope_dimension = rope_dim or cos_sin_cache.size(-1)
+    torch.ops.torchada.apply_rope_inplace(
+        query,
+        key,
+        cos_sin_cache,
+        positions,
+        is_neox,
+        resolved_rope_dimension,
+    )
+
 
 load_cpp_ops()
 
@@ -99,6 +128,7 @@ __all__ = [
     "get_device_name",
     "get_platform",
     "get_backend",
+    "apply_rope_inplace",
     # Device helpers
     "is_gpu_device",
     "is_cuda_like_device",
