@@ -9,14 +9,36 @@
 
 namespace torchada {
 
-template <typename scalar_t, typename index_t>
-__global__ void
-apply_rope_inplace_kernel(scalar_t *query, scalar_t *key,
-                          const float *cos_sin_cache, const index_t *positions,
-                          int64_t token_count, int64_t query_head_count,
-                          int64_t key_head_count, int64_t query_token_stride,
-                          int64_t key_token_stride, int64_t head_stride,
-                          int64_t rope_dimension, bool is_neox) {
+template <typename scalar_t>
+__device__ __forceinline__ void rotate_head(scalar_t *head,
+                                            int64_t pair_index,
+                                            int64_t pair_count, float cosine,
+                                            float sine, bool is_neox) {
+  int64_t first_dimension;
+  int64_t second_dimension;
+  if (is_neox) {
+    first_dimension = pair_index;
+    second_dimension = pair_index + pair_count;
+  } else {
+    first_dimension = pair_index * 2;
+    second_dimension = first_dimension + 1;
+  }
+
+  const float first_value = static_cast<float>(head[first_dimension]);
+  const float second_value = static_cast<float>(head[second_dimension]);
+  head[first_dimension] =
+      static_cast<scalar_t>(first_value * cosine - second_value * sine);
+  head[second_dimension] =
+      static_cast<scalar_t>(second_value * cosine + first_value * sine);
+}
+
+template <typename query_scalar_t, typename key_scalar_t, typename index_t>
+__global__ void apply_rope_inplace_kernel(
+    query_scalar_t *query, key_scalar_t *key, const float *cos_sin_cache,
+    const index_t *positions, int64_t token_count, int64_t query_head_count,
+    int64_t key_head_count, int64_t query_token_stride,
+    int64_t key_token_stride, int64_t head_stride, int64_t rope_dimension,
+    bool is_neox) {
   const int64_t pair_count = rope_dimension / 2;
   const int64_t heads_per_token = query_head_count + key_head_count;
   const int64_t work_count = token_count * heads_per_token * pair_count;
@@ -26,39 +48,23 @@ apply_rope_inplace_kernel(scalar_t *query, scalar_t *key,
     const int64_t pair_index = work_index % pair_count;
     const int64_t head_index = (work_index / pair_count) % heads_per_token;
     const int64_t token_index = work_index / (pair_count * heads_per_token);
-    scalar_t *head;
-    if (head_index < query_head_count) {
-      head =
-          query + token_index * query_token_stride + head_index * head_stride;
-    } else {
-      head = key + token_index * key_token_stride +
-             (head_index - query_head_count) * head_stride;
-    }
-
-    int64_t first_dimension;
-    int64_t second_dimension;
-    if (is_neox) {
-      first_dimension = pair_index;
-      second_dimension = pair_index + pair_count;
-    } else {
-      first_dimension = pair_index * 2;
-      second_dimension = first_dimension + 1;
-    }
-
     const int64_t cache_offset =
         static_cast<int64_t>(positions[token_index]) * rope_dimension;
     const float cosine = cos_sin_cache[cache_offset + pair_index];
     const float sine = cos_sin_cache[cache_offset + pair_index + pair_count];
-    const float first_value = static_cast<float>(head[first_dimension]);
-    const float second_value = static_cast<float>(head[second_dimension]);
-    head[first_dimension] =
-        static_cast<scalar_t>(first_value * cosine - second_value * sine);
-    head[second_dimension] =
-        static_cast<scalar_t>(second_value * cosine + first_value * sine);
+    if (head_index < query_head_count) {
+      rotate_head(query + token_index * query_token_stride +
+                      head_index * head_stride,
+                  pair_index, pair_count, cosine, sine, is_neox);
+    } else {
+      rotate_head(key + token_index * key_token_stride +
+                      (head_index - query_head_count) * head_stride,
+                  pair_index, pair_count, cosine, sine, is_neox);
+    }
   }
 }
 
-template <typename scalar_t, typename index_t>
+template <typename query_scalar_t, typename key_scalar_t, typename index_t>
 void launch_apply_rope_inplace(at::Tensor &query, at::Tensor &key,
                                const at::Tensor &cos_sin_cache,
                                const at::Tensor &positions, bool is_neox,
@@ -72,11 +78,41 @@ void launch_apply_rope_inplace(at::Tensor &query, at::Tensor &key,
   }
   const int blocks = static_cast<int>((work_count + threads - 1) / threads);
   musaStream_t stream = at::musa::getCurrentMUSAStream();
-  apply_rope_inplace_kernel<scalar_t, index_t><<<blocks, threads, 0, stream>>>(
-      query.data_ptr<scalar_t>(), key.data_ptr<scalar_t>(),
-      cos_sin_cache.data_ptr<float>(), positions.data_ptr<index_t>(),
-      query.size(0), query.size(1), key.size(1), query.stride(0), key.stride(0),
-      query.stride(1), rope_dimension, is_neox);
+  apply_rope_inplace_kernel<query_scalar_t, key_scalar_t, index_t>
+      <<<blocks, threads, 0, stream>>>(
+          query.data_ptr<query_scalar_t>(), key.data_ptr<key_scalar_t>(),
+          cos_sin_cache.data_ptr<float>(), positions.data_ptr<index_t>(),
+          query.size(0), query.size(1), key.size(1), query.stride(0),
+          key.stride(0), query.stride(1), rope_dimension, is_neox);
+}
+
+template <typename index_t>
+void dispatch_apply_rope_dtypes(at::Tensor &query, at::Tensor &key,
+                                const at::Tensor &cos_sin_cache,
+                                const at::Tensor &positions, bool is_neox,
+                                int64_t rope_dimension) {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, query.scalar_type(),
+      "torchada_apply_rope_inplace_query", [&] {
+        using query_scalar_t = scalar_t;
+        AT_DISPATCH_FLOATING_TYPES_AND2(
+            at::ScalarType::Half, at::ScalarType::BFloat16, key.scalar_type(),
+            "torchada_apply_rope_inplace_key", [&] {
+              using key_scalar_t = scalar_t;
+              launch_apply_rope_inplace<query_scalar_t, key_scalar_t, index_t>(
+                  query, key, cos_sin_cache, positions, is_neox,
+                  rope_dimension);
+            });
+      });
+}
+
+template <typename index_t>
+void dispatch_apply_rope_positions(at::Tensor &query, at::Tensor &key,
+                                   const at::Tensor &cos_sin_cache,
+                                   const at::Tensor &positions, bool is_neox,
+                                   int64_t rope_dimension) {
+  dispatch_apply_rope_dtypes<index_t>(query, key, cos_sin_cache, positions,
+                                      is_neox, rope_dimension);
 }
 
 void apply_rope_inplace_musa(at::Tensor &query, at::Tensor &key,
@@ -99,12 +135,16 @@ void apply_rope_inplace_musa(at::Tensor &query, at::Tensor &key,
               "query and key must have a contiguous last dimension");
   TORCH_CHECK(query.stride(1) == key.stride(1),
               "query and key must have matching head strides");
-  TORCH_CHECK(query.scalar_type() == key.scalar_type(),
-              "query and key must have the same dtype");
   TORCH_CHECK(query.scalar_type() == at::ScalarType::Half ||
                   query.scalar_type() == at::ScalarType::BFloat16 ||
                   query.scalar_type() == at::ScalarType::Float,
               "query and key must use float16, bfloat16, or float32");
+  TORCH_CHECK(key.scalar_type() == at::ScalarType::Half ||
+                  key.scalar_type() == at::ScalarType::BFloat16 ||
+                  key.scalar_type() == at::ScalarType::Float,
+              "query and key must use float16, bfloat16, or float32");
+  TORCH_CHECK(query.element_size() == key.element_size(),
+              "query and key dtypes must have the same element size");
   TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.is_contiguous(),
               "cos_sin_cache must be a contiguous matrix");
   TORCH_CHECK(cos_sin_cache.scalar_type() == at::ScalarType::Float,
@@ -123,17 +163,13 @@ void apply_rope_inplace_musa(at::Tensor &query, at::Tensor &key,
               "rope_dimension must match the head and cache dimensions");
 
   const c10::musa::MUSAGuard device_guard(query.device());
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, query.scalar_type(),
-      "torchada_apply_rope_inplace", [&] {
-        if (positions.scalar_type() == at::ScalarType::Int) {
-          launch_apply_rope_inplace<scalar_t, int32_t>(
-              query, key, cos_sin_cache, positions, is_neox, rope_dimension);
-        } else {
-          launch_apply_rope_inplace<scalar_t, int64_t>(
-              query, key, cos_sin_cache, positions, is_neox, rope_dimension);
-        }
-      });
+  if (positions.scalar_type() == at::ScalarType::Int) {
+    dispatch_apply_rope_positions<int32_t>(
+        query, key, cos_sin_cache, positions, is_neox, rope_dimension);
+  } else {
+    dispatch_apply_rope_positions<int64_t>(
+        query, key, cos_sin_cache, positions, is_neox, rope_dimension);
+  }
 
   const musaError_t error = musaGetLastError();
   TORCH_CHECK(error == musaSuccess, "MUSA apply_rope_inplace kernel failed: ",

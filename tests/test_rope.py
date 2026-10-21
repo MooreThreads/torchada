@@ -36,17 +36,27 @@ def reference_rope(
 
 @pytest.mark.musa
 @pytest.mark.gpu
-@pytest.mark.parametrize("tensor_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    ("query_dtype", "key_dtype"),
+    [
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.float32, torch.float32),
+        (torch.float16, torch.bfloat16),
+        (torch.bfloat16, torch.float16),
+    ],
+)
 @pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("is_neox", [False, True])
 def test_apply_rope_inplace_matches_reference(
-    tensor_dtype: torch.dtype,
+    query_dtype: torch.dtype,
+    key_dtype: torch.dtype,
     position_dtype: torch.dtype,
     is_neox: bool,
 ) -> None:
     torch.manual_seed(0)
-    query = torch.randn(5, 3, 16, device="musa", dtype=tensor_dtype)
-    key = torch.randn(5, 2, 16, device="musa", dtype=tensor_dtype)
+    query = torch.randn(5, 3, 16, device="musa", dtype=query_dtype)
+    key = torch.randn(5, 2, 16, device="musa", dtype=key_dtype)
     angles = torch.randn(7, 8, device="musa", dtype=torch.float32)
     cos_sin_cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
     positions = torch.tensor([0, 3, 1, 6, 2], device="musa", dtype=position_dtype)
