@@ -1,5 +1,8 @@
 """Tests for the MUSA joint rotary-position kernel."""
 
+import sys
+import types
+
 import pytest
 import torch
 
@@ -115,6 +118,28 @@ def test_apply_rope_inplace_supports_partial_rotary_views(is_neox: bool) -> None
         rtol=0,
         atol=0,
     )
+
+
+def test_install_sglang_rope_compat(monkeypatch: pytest.MonkeyPatch) -> None:
+    sglang = types.ModuleType("sglang")
+    sglang.__path__ = []
+    kernels = types.ModuleType("sglang.kernels")
+    kernels.__path__ = []
+    ops = types.ModuleType("sglang.kernels.ops")
+    ops.__path__ = []
+    attention = types.ModuleType("sglang.kernels.ops.attention")
+    attention.__path__ = []
+    rope = types.ModuleType("sglang.kernels.ops.attention.rope")
+    attention.rope = rope
+    monkeypatch.setitem(sys.modules, "sglang", sglang)
+    monkeypatch.setitem(sys.modules, "sglang.kernels", kernels)
+    monkeypatch.setitem(sys.modules, "sglang.kernels.ops", ops)
+    monkeypatch.setitem(sys.modules, "sglang.kernels.ops.attention", attention)
+    monkeypatch.setitem(sys.modules, "sglang.kernels.ops.attention.rope", rope)
+
+    torchada.install_sglang_rope_compat()
+
+    assert rope.apply_rope_inplace is torchada.apply_rope_inplace
 
 
 @pytest.mark.musa

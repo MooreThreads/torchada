@@ -106,6 +106,13 @@ def apply_rope_inplace(
     )
 
 
+def install_sglang_rope_compat() -> None:
+    """Route SGLang's joint-RoPE import path to the TorchADA MUSA provider."""
+    from sglang.kernels.ops.attention import rope
+
+    rope.apply_rope_inplace = apply_rope_inplace
+
+
 __all__ = [
     # Version
     "__version__",
@@ -123,6 +130,7 @@ __all__ = [
     "get_platform",
     "get_backend",
     "apply_rope_inplace",
+    "install_sglang_rope_compat",
     # Device helpers
     "is_gpu_device",
     "is_cuda_like_device",
