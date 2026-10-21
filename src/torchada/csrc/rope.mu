@@ -33,10 +33,12 @@ __device__ __forceinline__ void rotate_head(scalar_t *head,
       static_cast<scalar_t>(second_value * cosine + first_value * sine);
 }
 
-template <typename query_scalar_t, typename key_scalar_t, typename index_t>
+template <typename query_scalar_t, typename key_scalar_t,
+          typename cache_scalar_t, typename index_t>
 __global__ void apply_rope_inplace_kernel(
-    query_scalar_t *query, key_scalar_t *key, const float *cos_sin_cache,
-    const index_t *positions, int64_t query_head_count, int64_t key_head_count,
+    query_scalar_t *query, key_scalar_t *key,
+    const cache_scalar_t *cos_sin_cache, const index_t *positions,
+    int64_t query_head_count, int64_t key_head_count,
     int64_t query_token_stride, int64_t key_token_stride, int64_t head_stride,
     int64_t rope_dimension, bool is_neox) {
   const int64_t pair_count = rope_dimension / 2;
@@ -48,8 +50,10 @@ __global__ void apply_rope_inplace_kernel(
 
   for (int64_t pair_index = threadIdx.x; pair_index < pair_count;
        pair_index += blockDim.x) {
-    const float cosine = cos_sin_cache[cache_offset + pair_index];
-    const float sine = cos_sin_cache[cache_offset + pair_index + pair_count];
+    const float cosine =
+        static_cast<float>(cos_sin_cache[cache_offset + pair_index]);
+    const float sine =
+        static_cast<float>(cos_sin_cache[cache_offset + pair_index + pair_count]);
     for (int64_t head_index = 0; head_index < query_head_count; ++head_index) {
       rotate_head(query_token + head_index * head_stride, pair_index,
                   pair_count, cosine, sine, is_neox);
@@ -61,7 +65,8 @@ __global__ void apply_rope_inplace_kernel(
   }
 }
 
-template <typename query_scalar_t, typename key_scalar_t, typename index_t>
+template <typename query_scalar_t, typename key_scalar_t,
+          typename cache_scalar_t, typename index_t>
 void launch_apply_rope_inplace(at::Tensor &query, at::Tensor &key,
                                const at::Tensor &cos_sin_cache,
                                const at::Tensor &positions, bool is_neox,
@@ -78,12 +83,14 @@ void launch_apply_rope_inplace(at::Tensor &query, at::Tensor &key,
     threads *= 2;
   }
   musaStream_t stream = at::musa::getCurrentMUSAStream();
-  apply_rope_inplace_kernel<query_scalar_t, key_scalar_t, index_t>
+  apply_rope_inplace_kernel<query_scalar_t, key_scalar_t, cache_scalar_t,
+                            index_t>
       <<<static_cast<int>(token_count), threads, 0, stream>>>(
           query.data_ptr<query_scalar_t>(), key.data_ptr<key_scalar_t>(),
-          cos_sin_cache.data_ptr<float>(), positions.data_ptr<index_t>(),
-          query.size(1), key.size(1), query.stride(0), key.stride(0),
-          query.stride(1), rope_dimension, is_neox);
+          cos_sin_cache.data_ptr<cache_scalar_t>(),
+          positions.data_ptr<index_t>(), query.size(1), key.size(1),
+          query.stride(0), key.stride(0), query.stride(1), rope_dimension,
+          is_neox);
 }
 
 template <typename index_t>
@@ -99,9 +106,16 @@ void dispatch_apply_rope_dtypes(at::Tensor &query, at::Tensor &key,
             at::ScalarType::Half, at::ScalarType::BFloat16, key.scalar_type(),
             "torchada_apply_rope_inplace_key", [&] {
               using key_scalar_t = scalar_t;
-              launch_apply_rope_inplace<query_scalar_t, key_scalar_t, index_t>(
-                  query, key, cos_sin_cache, positions, is_neox,
-                  rope_dimension);
+              AT_DISPATCH_FLOATING_TYPES_AND2(
+                  at::ScalarType::Half, at::ScalarType::BFloat16,
+                  cos_sin_cache.scalar_type(),
+                  "torchada_apply_rope_inplace_cache", [&] {
+                    using cache_scalar_t = scalar_t;
+                    launch_apply_rope_inplace<
+                        query_scalar_t, key_scalar_t, cache_scalar_t, index_t>(
+                        query, key, cos_sin_cache, positions, is_neox,
+                        rope_dimension);
+                  });
             });
       });
 }
@@ -147,8 +161,10 @@ void apply_rope_inplace_musa(at::Tensor &query, at::Tensor &key,
               "query and key dtypes must have the same element size");
   TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.is_contiguous(),
               "cos_sin_cache must be a contiguous matrix");
-  TORCH_CHECK(cos_sin_cache.scalar_type() == at::ScalarType::Float,
-              "cos_sin_cache must use float32");
+  TORCH_CHECK(cos_sin_cache.scalar_type() == at::ScalarType::Half ||
+                  cos_sin_cache.scalar_type() == at::ScalarType::BFloat16 ||
+                  cos_sin_cache.scalar_type() == at::ScalarType::Float,
+              "cos_sin_cache must use float16, bfloat16, or float32");
   TORCH_CHECK(positions.dim() == 1 && positions.is_contiguous(),
               "positions must be a contiguous vector");
   TORCH_CHECK(positions.scalar_type() == at::ScalarType::Int ||

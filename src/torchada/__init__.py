@@ -67,6 +67,8 @@ def apply_rope_inplace(
     rope_dim: int = 0,
 ) -> None:
     """Apply MUSA rotary position embedding to query and key in place."""
+    if query.device.type != "musa":
+        raise RuntimeError("torchada.apply_rope_inplace requires MUSA tensors")
     resolved_rope_dimension = rope_dim or cos_sin_cache.size(-1)
     torch.ops.torchada.apply_rope_inplace(
         query,

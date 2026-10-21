@@ -1,5 +1,7 @@
 """Tests for the MUSA joint rotary-position kernel."""
 
+import importlib
+import importlib.machinery
 import sys
 import types
 
@@ -7,7 +9,7 @@ import pytest
 import torch
 
 import torchada
-from torchada._patch import _patch_registry, _patch_sglang_rope
+from torchada._patch import _SGLANG_ROPE_MODULE, _patch_registry, _patch_sglang_rope
 
 
 def reference_rope(
@@ -38,6 +40,10 @@ def reference_rope(
 @pytest.mark.musa
 @pytest.mark.gpu
 @pytest.mark.parametrize(
+    "cache_dtype",
+    [torch.float32, torch.float16, torch.bfloat16],
+)
+@pytest.mark.parametrize(
     ("query_dtype", "key_dtype"),
     [
         (torch.float16, torch.float16),
@@ -50,6 +56,7 @@ def reference_rope(
 @pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("is_neox", [False, True])
 def test_apply_rope_inplace_matches_reference(
+    cache_dtype: torch.dtype,
     query_dtype: torch.dtype,
     key_dtype: torch.dtype,
     position_dtype: torch.dtype,
@@ -59,7 +66,7 @@ def test_apply_rope_inplace_matches_reference(
     query = torch.randn(5, 3, 16, device="musa", dtype=query_dtype)
     key = torch.randn(5, 2, 16, device="musa", dtype=key_dtype)
     angles = torch.randn(7, 8, device="musa", dtype=torch.float32)
-    cos_sin_cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    cos_sin_cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(cache_dtype)
     positions = torch.tensor([0, 3, 1, 6, 2], device="musa", dtype=position_dtype)
     expected_query = reference_rope(query, cos_sin_cache, positions, is_neox)
     expected_key = reference_rope(key, cos_sin_cache, positions, is_neox)
@@ -131,9 +138,35 @@ def test_apply_rope_inplace_supports_partial_rotary_views(is_neox: bool) -> None
     )
 
 
-def test_sglang_rope_patch_uses_torchada_provider(
+def test_sglang_rope_patch_defers_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        sys,
+        "meta_path",
+        [finder for finder in sys.meta_path if not getattr(finder, "_torchada_sglang_rope", False)],
+    )
+    for module_name in tuple(sys.modules):
+        if module_name == "sglang" or module_name.startswith("sglang."):
+            monkeypatch.delitem(sys.modules, module_name)
+
+    _patch_sglang_rope()
+
+    assert _patch_sglang_rope in _patch_registry
+    assert any(getattr(finder, "_torchada_sglang_rope", False) for finder in sys.meta_path)
+    assert not any(
+        module_name == "sglang" or module_name.startswith("sglang.") for module_name in sys.modules
+    )
+
+
+def test_sglang_rope_patch_updates_an_imported_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "meta_path",
+        [finder for finder in sys.meta_path if not getattr(finder, "_torchada_sglang_rope", False)],
+    )
     sglang = types.ModuleType("sglang")
     sglang.__path__ = []
     kernels = types.ModuleType("sglang.kernels")
@@ -152,8 +185,67 @@ def test_sglang_rope_patch_uses_torchada_provider(
 
     _patch_sglang_rope()
 
-    assert _patch_sglang_rope in _patch_registry
     assert rope.apply_rope_inplace is torchada.apply_rope_inplace
+
+
+def test_sglang_rope_patch_applies_when_module_is_imported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "meta_path",
+        [finder for finder in sys.meta_path if not getattr(finder, "_torchada_sglang_rope", False)],
+    )
+    for module_name in tuple(sys.modules):
+        if module_name == "sglang" or module_name.startswith("sglang."):
+            monkeypatch.delitem(sys.modules, module_name)
+
+    for package_name in (
+        "sglang",
+        "sglang.kernels",
+        "sglang.kernels.ops",
+        "sglang.kernels.ops.attention",
+    ):
+        package = types.ModuleType(package_name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, package_name, package)
+
+    class TestLoader:
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            module.loaded = True
+
+    class TestFinder:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == _SGLANG_ROPE_MODULE:
+                return importlib.machinery.ModuleSpec(fullname, TestLoader())
+            return None
+
+    sys.meta_path.append(TestFinder())
+    _patch_sglang_rope()
+
+    rope = importlib.import_module(_SGLANG_ROPE_MODULE)
+
+    assert rope.loaded
+    assert rope.apply_rope_inplace is torchada.apply_rope_inplace
+
+
+def test_apply_rope_inplace_rejects_non_musa_tensors() -> None:
+    query = torch.empty(2, 2, 8, dtype=torch.float16)
+    key = torch.empty(2, 1, 8, dtype=torch.float16)
+    cos_sin_cache = torch.empty(4, 8, dtype=torch.float32)
+    positions = torch.zeros(2, dtype=torch.int64)
+
+    with pytest.raises(RuntimeError, match="requires MUSA tensors"):
+        torchada.apply_rope_inplace(
+            query,
+            key,
+            cos_sin_cache,
+            positions,
+            is_neox=False,
+        )
 
 
 @pytest.mark.musa
