@@ -522,7 +522,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.100
+torchada>=0.1.101
 ```
 
 ### 步骤 2：条件导入

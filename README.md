@@ -567,7 +567,7 @@ nvJPEG, libtorch-stable, FlashInfer, cutlass, thrust, ...).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.100
+torchada>=0.1.101
 ```
 
 ### Step 2: Conditional Import
