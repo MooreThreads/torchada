@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import torchada
+from torchada._patch import _patch_sglang_rope
 
 
 def reference_rope(
@@ -130,7 +131,9 @@ def test_apply_rope_inplace_supports_partial_rotary_views(is_neox: bool) -> None
     )
 
 
-def test_install_sglang_rope_compat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sglang_rope_patch_uses_torchada_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sglang = types.ModuleType("sglang")
     sglang.__path__ = []
     kernels = types.ModuleType("sglang.kernels")
@@ -147,7 +150,7 @@ def test_install_sglang_rope_compat(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sglang.kernels.ops.attention", attention)
     monkeypatch.setitem(sys.modules, "sglang.kernels.ops.attention.rope", rope)
 
-    torchada.install_sglang_rope_compat()
+    _patch_sglang_rope()
 
     assert rope.apply_rope_inplace is torchada.apply_rope_inplace
 

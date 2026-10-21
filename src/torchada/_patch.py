@@ -2315,6 +2315,17 @@ def _patch_flash_attn():
             flash_attn_interface._flash_attn_forward = _flash_attn_forward
 
 
+@patch_function
+@requires_import("sglang.kernels.ops.attention.rope")
+def _patch_sglang_rope():
+    """Route SGLang's fused-RoPE import path to the TorchADA MUSA provider."""
+    from sglang.kernels.ops.attention import rope
+
+    from . import apply_rope_inplace
+
+    rope.apply_rope_inplace = apply_rope_inplace
+
+
 class _CDLLWrapper:
     """
     Wrapper for ctypes.CDLL that automatically translates CUDA/NCCL function names

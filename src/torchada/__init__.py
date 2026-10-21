@@ -56,6 +56,28 @@ from ._runtime import (
 from .triton.autotune.fused_moe import set_default_moe_config_dir
 from .utils.cpp_extension import CUDA_HOME
 
+
+def apply_rope_inplace(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    is_neox: bool,
+    rope_dim: int = 0,
+) -> None:
+    """Apply MUSA rotary position embedding to query and key in place."""
+    resolved_rope_dimension = rope_dim or cos_sin_cache.size(-1)
+    torch.ops.torchada.apply_rope_inplace(
+        query,
+        key,
+        cos_sin_cache,
+        positions,
+        is_neox,
+        resolved_rope_dimension,
+    )
+
+
 load_cpp_ops()
 
 # Automatically apply patches on import
@@ -85,34 +107,6 @@ def get_backend():
     return get_torch_device_module()
 
 
-def apply_rope_inplace(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    *,
-    is_neox: bool,
-    rope_dim: int = 0,
-) -> None:
-    """Apply MUSA rotary position embedding to query and key in place."""
-    resolved_rope_dimension = rope_dim or cos_sin_cache.size(-1)
-    torch.ops.torchada.apply_rope_inplace(
-        query,
-        key,
-        cos_sin_cache,
-        positions,
-        is_neox,
-        resolved_rope_dimension,
-    )
-
-
-def install_sglang_rope_compat() -> None:
-    """Route SGLang's joint-RoPE import path to the TorchADA MUSA provider."""
-    from sglang.kernels.ops.attention import rope
-
-    rope.apply_rope_inplace = apply_rope_inplace
-
-
 __all__ = [
     # Version
     "__version__",
@@ -130,7 +124,6 @@ __all__ = [
     "get_platform",
     "get_backend",
     "apply_rope_inplace",
-    "install_sglang_rope_compat",
     # Device helpers
     "is_gpu_device",
     "is_cuda_like_device",
