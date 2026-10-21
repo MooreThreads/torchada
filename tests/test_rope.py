@@ -7,7 +7,7 @@ import pytest
 import torch
 
 import torchada
-from torchada._patch import _patch_sglang_rope
+from torchada._patch import _patch_registry, _patch_sglang_rope
 
 
 def reference_rope(
@@ -152,7 +152,63 @@ def test_sglang_rope_patch_uses_torchada_provider(
 
     _patch_sglang_rope()
 
+    assert _patch_sglang_rope in _patch_registry
     assert rope.apply_rope_inplace is torchada.apply_rope_inplace
+
+
+@pytest.mark.musa
+@pytest.mark.gpu
+def test_apply_rope_inplace_rejects_mismatched_element_sizes() -> None:
+    query = torch.empty(2, 2, 8, device="musa", dtype=torch.float16)
+    key = torch.empty(2, 1, 8, device="musa", dtype=torch.float32)
+    cos_sin_cache = torch.empty(4, 8, device="musa", dtype=torch.float32)
+    positions = torch.zeros(2, device="musa", dtype=torch.int64)
+
+    with pytest.raises(RuntimeError, match="same element size"):
+        torchada.apply_rope_inplace(
+            query,
+            key,
+            cos_sin_cache,
+            positions,
+            is_neox=False,
+        )
+
+
+@pytest.mark.musa
+@pytest.mark.gpu
+def test_apply_rope_inplace_rejects_mismatched_head_strides() -> None:
+    query_storage = torch.empty(2, 2, 24, device="musa", dtype=torch.float16)
+    query = query_storage[..., :16]
+    key = torch.empty(2, 1, 16, device="musa", dtype=torch.float16)
+    cos_sin_cache = torch.empty(4, 16, device="musa", dtype=torch.float32)
+    positions = torch.zeros(2, device="musa", dtype=torch.int64)
+
+    with pytest.raises(RuntimeError, match="matching head strides"):
+        torchada.apply_rope_inplace(
+            query,
+            key,
+            cos_sin_cache,
+            positions,
+            is_neox=False,
+        )
+
+
+@pytest.mark.musa
+@pytest.mark.gpu
+def test_apply_rope_inplace_rejects_position_count_mismatch() -> None:
+    query = torch.empty(3, 2, 8, device="musa", dtype=torch.bfloat16)
+    key = torch.empty(3, 1, 8, device="musa", dtype=torch.bfloat16)
+    cos_sin_cache = torch.empty(4, 8, device="musa", dtype=torch.float32)
+    positions = torch.zeros(2, device="musa", dtype=torch.int64)
+
+    with pytest.raises(RuntimeError, match="one value per token"):
+        torchada.apply_rope_inplace(
+            query,
+            key,
+            cos_sin_cache,
+            positions,
+            is_neox=False,
+        )
 
 
 @pytest.mark.musa
