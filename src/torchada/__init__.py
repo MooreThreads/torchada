@@ -27,9 +27,16 @@ Usage:
     from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CUDA_HOME
 """
 
+from ._visible_devices import _should_sync_visible_devices_env, _sync_visible_devices_env
+
+# Keep this bootstrap before importing torch: a MUSA build may initialize its
+# runtime while torch or torch_musa extension modules are imported.
+if _should_sync_visible_devices_env():
+    _sync_visible_devices_env()
+
 import torch
 
-__version__ = "0.1.101"
+__version__ = "0.1.102"
 
 from . import cuda, utils
 

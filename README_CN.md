@@ -178,8 +178,8 @@ CUDA Graph capture 和 `torch.compile` AOT 缓存保持兼容。打补丁后的
 - 打补丁后的 `torch.device` 会注册为 FX 的 `device` builtin，因此持有 device 常量的
   `GraphModule` 仍能绑定 `device` 这个名字，并在 `eager` 与 `aot_eager` 后端下正常运行。
   （Inductor 执行的是自己生成的代码，因此两种情况都不受影响。）
-- 当两者都存在时，`MUSA_VISIBLE_DEVICES` 会镜像到 `CUDA_VISIBLE_DEVICES`，Inductor 的
-  autotune 子进程读取的是 MUSA 变量。
+- `MUSA_VISIBLE_DEVICES` 是权威值并会镜像到 `CUDA_VISIBLE_DEVICES`；仅设置 CUDA 变量时，
+  其值会补写到 MUSA 变量。Inductor 的 autotune 子进程读取的是 MUSA 变量。
 
 在 `2.11.0.post2` 之前的 torch_musa 上，Inductor matmul 模板启发式注册表中缺失的 `musa`
 条目会从 CUDA 条目补齐；更新的版本会自行注册，torchada 不做干预。
@@ -522,7 +522,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.101
+torchada>=0.1.102
 ```
 
 ### 步骤 2：条件导入

@@ -38,6 +38,7 @@ import torch
 from ._cpp_ops import get_module
 from ._platform import is_musa_platform
 from ._version import version_of
+from ._visible_devices import _sync_visible_devices_env
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,7 @@ def patch_function(func: Callable[[], None]) -> Callable[[], None]:
 
 @patch_function
 def _patch_visible_devices_env():
-    if "MUSA_VISIBLE_DEVICES" in os.environ:
-        os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["MUSA_VISIBLE_DEVICES"]
-    else:
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    _sync_visible_devices_env()
 
 
 def requires_import(*module_names: str) -> Callable[[Callable], Callable]:
