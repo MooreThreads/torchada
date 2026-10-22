@@ -4,6 +4,8 @@ Tests for torch.cuda patching functionality.
 These tests verify that torch.cuda.* APIs work transparently on MUSA.
 """
 
+import ast
+import importlib.util
 import os
 
 import pytest
@@ -1159,6 +1161,63 @@ class TestVisibleDevicesEnv:
         assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
+class TestInitializationOrder:
+    """Test visibility is synchronized before MUSA runtime setup."""
+
+    def test_visible_devices_sync_runs_before_torch_import(self):
+        import torchada
+
+        with open(torchada.__file__, encoding="utf-8") as source_file:
+            module = ast.parse(source_file.read())
+
+        torch_import_index = next(
+            index
+            for index, statement in enumerate(module.body)
+            if isinstance(statement, ast.Import)
+            and any(alias.name == "torch" for alias in statement.names)
+        )
+        visibility_sync_index = next(
+            index
+            for index, statement in enumerate(module.body)
+            if isinstance(statement, ast.If)
+            and any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_sync_visible_devices_env"
+                for node in ast.walk(statement)
+            )
+        )
+
+        assert visibility_sync_index < torch_import_index
+
+    @pytest.mark.parametrize(
+        ("forced_platform", "torch_musa_installed", "expected"),
+        [
+            ("musa", False, True),
+            ("cuda", True, False),
+            ("cpu", True, False),
+            (None, True, True),
+            (None, False, False),
+        ],
+    )
+    def test_visibility_sync_is_only_enabled_for_musa_installations(
+        self, monkeypatch, forced_platform, torch_musa_installed, expected
+    ):
+        from torchada._visible_devices import _should_sync_visible_devices_env
+
+        if forced_platform is None:
+            monkeypatch.delenv("TORCHADA_PLATFORM", raising=False)
+        else:
+            monkeypatch.setenv("TORCHADA_PLATFORM", forced_platform)
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: object() if name == "torch_musa" and torch_musa_installed else None,
+        )
+
+        assert _should_sync_visible_devices_env() is expected
+
+
 def _legacy_cuda_heuristic_copy_armed() -> bool:
     """Whether torchada's CUDA -> MUSA template heuristic copy is still armed.
 
@@ -1390,6 +1449,8 @@ class TestPatchDecorators:
         # All entries should be callable
         for fn in _patch_registry:
             assert callable(fn)
+
+        assert _patch_registry[0].__name__ == "_patch_visible_devices_env"
 
     def test_patch_registry_contains_expected_functions(self):
         """Test that registry contains the expected patch functions."""
