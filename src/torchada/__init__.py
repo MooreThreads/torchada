@@ -29,7 +29,7 @@ Usage:
 
 import torch
 
-__version__ = "0.1.101"
+__version__ = "0.1.102"
 
 from . import cuda, utils
 
