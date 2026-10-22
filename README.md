@@ -193,8 +193,9 @@ Three more patches keep compiled code working end to end:
   `GraphModule` holding a device constant still binds the name `device` and runs with
   the `eager` and `aot_eager` backends. (Inductor executes its own generated code, so
   it is unaffected either way.)
-- `MUSA_VISIBLE_DEVICES` is mirrored to `CUDA_VISIBLE_DEVICES` when both are present,
-  and Inductor's autotune subprocess reads the MUSA variable.
+- `MUSA_VISIBLE_DEVICES` is authoritative and mirrored to `CUDA_VISIBLE_DEVICES`; when
+  only the CUDA variable is set, it is copied to the MUSA variable. Inductor's autotune
+  subprocess reads the MUSA variable.
 
 On torch_musa releases before `2.11.0.post2`, missing `musa` entries in Inductor's
 matmul template-heuristic registry are filled in from the CUDA entries; newer releases

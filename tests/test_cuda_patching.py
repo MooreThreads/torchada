@@ -1107,10 +1107,11 @@ class TestVisibleDevicesEnv:
 
         _patch._patch_visible_devices_env()
 
+        assert os.environ["MUSA_VISIBLE_DEVICES"] == "1,3"
         assert os.environ["CUDA_VISIBLE_DEVICES"] == "1,3"
 
-    def test_cuda_visible_devices_is_cleared_when_musa_is_absent(self, monkeypatch):
-        """Test CUDA_VISIBLE_DEVICES is removed when MUSA is not configured."""
+    def test_cuda_visible_devices_syncs_to_musa_when_musa_is_absent(self, monkeypatch):
+        """Test MUSA_VISIBLE_DEVICES mirrors a CUDA-only device mask."""
         from torchada import _patch
 
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
@@ -1118,7 +1119,8 @@ class TestVisibleDevicesEnv:
 
         _patch._patch_visible_devices_env()
 
-        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+        assert os.environ["MUSA_VISIBLE_DEVICES"] == "1,3"
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "1,3"
 
     def test_empty_musa_visible_devices_clears_cuda_value(self, monkeypatch):
         """Test an explicitly empty MUSA value is mirrored exactly."""
@@ -1129,6 +1131,19 @@ class TestVisibleDevicesEnv:
 
         _patch._patch_visible_devices_env()
 
+        assert os.environ["MUSA_VISIBLE_DEVICES"] == ""
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+
+    def test_empty_cuda_visible_devices_syncs_to_musa_when_musa_is_absent(self, monkeypatch):
+        """Test an explicitly empty CUDA-only value is mirrored exactly."""
+        from torchada import _patch
+
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+        monkeypatch.delenv("MUSA_VISIBLE_DEVICES", raising=False)
+
+        _patch._patch_visible_devices_env()
+
+        assert os.environ["MUSA_VISIBLE_DEVICES"] == ""
         assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
 
     def test_visible_devices_env_absent_noop(self, monkeypatch):
