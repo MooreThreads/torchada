@@ -223,6 +223,12 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
   README.md \
   README_CN.md
 
+# 2b. Relabel the newest benchmark-history row: new "version", same numbers.
+#     The left side is whatever that row currently records -- it may lag $OLD.
+#     Skip when the file has no row yet.
+sed -i 's/"version": "0.1.100"/"version": "0.1.103"/' benchmarks/benchmark_history.json
+git diff --stat benchmarks/benchmark_history.json   # 1 insertion(+), 1 deletion(-)
+
 # 3. Prove nothing is left behind — scoped to the seven carriers
 git grep -nF "$OLD" -- pyproject.toml src/torchada/__init__.py \
     src/torchada/csrc/ops.h tests/test_platform.py \
@@ -233,18 +239,25 @@ python -m pytest tests/test_platform.py -q
 
 # 4. Commit the bump on its own
 git add pyproject.toml src/torchada/__init__.py src/torchada/csrc/ops.h \
-        tests/test_platform.py examples/extension_setup.py README.md README_CN.md
+        tests/test_platform.py examples/extension_setup.py README.md README_CN.md \
+        benchmarks/benchmark_history.json
 git commit -m "chore: bump torchada to $NEW"
 ```
 
-`benchmarks/benchmark_history.json` is **not** part of the bump. It is written by
-`benchmarks/benchmark_overhead.py --save`, which keys rows on `(version, platform)`:
-it appends a row when the version has none and replaces the row of the version it runs
-on. Never hand-edit or relabel a row — relabelling claims that a measurement taken on
-the old release was taken on the new one, and the file is only useful because it
-records version, date, and stack together. If you did not run `--save`, leave it
-alone; when the recorded numbers do change, update the performance tables in both
-READMEs in the same PR.
+### One data row rides along
+
+`benchmarks/benchmark_history.json` holds one row per measured version, and the newest
+row stands for the current release. Include it in the bump: relabel that row's `version`
+to the new number and leave its numbers as they are. They were not re-measured, the
+benchmark is not load-bearing, and the file only has to stay aligned with the release it
+points at. Older rows keep the version they were measured at, so the edit is exactly one
+changed line — `git diff --stat` shows `1 insertion(+), 1 deletion(-)` and nothing else,
+which is how you prove no numbers moved.
+
+The numbers are produced by `benchmarks/benchmark_overhead.py`, which keys rows on
+`(version, platform)`: `--save` appends a row for a version that has none and replaces
+the row of the version it runs on. If a hot path actually changed, run `--save` instead
+of editing, and update the performance tables in both READMEs in the same PR.
 
 ### Keep the split when merging
 
@@ -338,6 +351,7 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
 
 - [ ] At least two commits: the work, then `chore: bump torchada to <version>` (documentation-only PR: no bump commit)
 - [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing
+- [ ] Newest `benchmarks/benchmark_history.json` row relabeled to `<version>` (`git diff --stat`: one insertion, one deletion)
 - [ ] `pre-commit run --all-files` passes
 - [ ] Tests pass (`pytest tests/`), or the PR states which subset ran and why
 - [ ] `README.md` and `README_CN.md` updated for anything user-visible

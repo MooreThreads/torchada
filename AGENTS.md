@@ -277,6 +277,11 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
   README.md \
   README_CN.md
 
+# 2b. Relabel the newest benchmark-history row: same numbers, new "version".
+#     The left side is whatever that row currently records -- it may lag $OLD.
+sed -i 's/"version": "0.1.100"/"version": "0.1.103"/' benchmarks/benchmark_history.json
+git diff --stat benchmarks/benchmark_history.json   # 1 file changed, 1 insertion(+), 1 deletion(-)
+
 # 3. Verify: no stale reference left in any carrier
 git grep -nF "$OLD" -- pyproject.toml src/torchada/__init__.py \
     src/torchada/csrc/ops.h tests/test_platform.py \
@@ -287,17 +292,22 @@ python -m pytest tests/test_platform.py -q
 
 # 4. Commit only what the bump touched
 git add pyproject.toml src/torchada/__init__.py src/torchada/csrc/ops.h \
-        tests/test_platform.py examples/extension_setup.py README.md README_CN.md
+        tests/test_platform.py examples/extension_setup.py README.md README_CN.md \
+        benchmarks/benchmark_history.json
 git commit -m "chore: bump torchada to $NEW"
 ```
 
-`benchmarks/benchmark_history.json` is **not** a bump carrier. It is written by
-`benchmarks/benchmark_overhead.py --save`, which keys rows on `(version, platform)`:
-it appends a row for a version that has none and replaces the row of the version it
-runs on. Never hand-edit or relabel a row — relabelling asserts that a measurement
-taken on the old release was taken on the new one, and the file's value is that it
-records version, date, and stack together. If you did not run `--save`, the file does
-not change and stays out of the bump commit.
+**One data row follows the bump by hand.** `benchmarks/benchmark_history.json` holds
+one row per measured version, and the newest row stands for the current release. On a
+bump, relabel that row's `version` to `<new version>` and leave its numbers alone — they
+were not re-measured, and nobody reads them as a per-release claim. Older rows keep the
+version they were measured at, so the edit is exactly one changed line, which is also the
+check that nothing else moved. Skip it when no row exists yet.
+
+The numbers themselves come from `benchmarks/benchmark_overhead.py`, which keys rows on
+`(version, platform)`: `--save` appends a row for a version that has none and replaces
+the row of the version it runs on. Prefer `--save` over hand-editing whenever a hot path
+actually changed.
 
 ## Commit Messages
 
@@ -487,6 +497,8 @@ Before claiming a change is ready:
 - [ ] Work commit(s) and one `chore: bump torchada to X` commit, in that order
       (a docs-only PR has no bump commit at all).
 - [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing.
+- [ ] The newest `benchmarks/benchmark_history.json` row carries the new version
+      (`git diff --stat` there: 1 insertion, 1 deletion).
 - [ ] `pre-commit run --all-files` clean (no `--no-verify`).
 - [ ] `pytest tests/ -q` passing, or a named subset plus the reason the rest is not run.
 - [ ] `README.md` **and** `README_CN.md` updated for anything user-visible.
