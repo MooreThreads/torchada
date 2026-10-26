@@ -336,6 +336,32 @@ chore: bump torchada to 0.1.103
   `torch_musa`/`torch` versions involved, the failure that motivated the fix.
 - Reference the issue when one exists (`Fixes #101`).
 
+## Review Comments
+
+Half of answering a review happens on the PR page, not in the diff, and the reader
+there is whoever opens the PR next — often a bot that will not re-read the branch.
+
+- **Resolve the thread you addressed.** A per-line comment that was fixed and left
+  open reads as unfinished work: the next reviewer re-derives a conclusion you already
+  reached, and the unresolved count stops being a signal worth reading. Answer the
+  thread, then mark it resolved (*Resolve conversation*, or the `resolveReviewThread`
+  GraphQL mutation).
+- **Resolved means handled, not agreed.** If you decline the suggestion, say why in
+  the thread and resolve it anyway — the reasoning is the artifact, and the reviewer
+  can reopen it. Never resolve a thread you have not answered, and never bulk-resolve
+  to make the count green: an open thread you cannot answer is information.
+
+Resolving needs write access to the repository. Without it, reply that the fix is in
+and ask the author to resolve. Unresolved threads on the PR you are working on:
+
+```bash
+gh api graphql -f query='
+  query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){
+    reviewThreads(first:100){nodes{id isResolved path line}}}}}
+' -f o=<owner> -f n=<repo> -F p=<number> \
+  --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)|"\(.id) \(.path):\(.line)"'
+```
+
 ## Adding New Patches
 
 1. Add a patch function in `src/torchada/_patch.py`:
@@ -510,5 +536,7 @@ Before claiming a change is ready:
 - [ ] `README.md` **and** `README_CN.md` updated for anything user-visible.
 - [ ] This file updated if a convention, invariant, path, or env var changed.
 - [ ] Benchmarks re-run (with `--save`) when a hot path changed.
+- [ ] Every review thread you addressed is answered and resolved
+      (see [Review Comments](#review-comments)).
 - [ ] Evidence states exact `torch`, `torch_musa`, driver, and hardware versions,
       the commands run, and the observed output.

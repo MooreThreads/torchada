@@ -9,6 +9,7 @@ Thank you for your interest in contributing to torchada! This guide will help yo
 - [Version Bumps](#version-bumps) — every PR ends with its own bump commit
 - [Adding New Patches](#adding-new-patches)
 - [Critical Constraints](#critical-constraints)
+- [Review Comments](#review-comments) — resolve the threads you addressed
 - [Submitting Changes](#submitting-changes)
 
 ## Development Setup
@@ -337,6 +338,18 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
 4. **Keep file ownership 1000:1000** when running formatters in Docker
 5. **Version bumps are their own commit** — see [Version Bumps](#version-bumps)
 
+## Review Comments
+
+- **Answer the thread, then resolve it.** Once the fix for a per-line comment is
+  pushed, reply with what changed (and the commit) and click *Resolve conversation*.
+  A thread left open after the fix reads as unfinished work, and the PR's unresolved
+  count stops being a signal.
+- **Resolved means handled, not agreed.** Declining a suggestion is fine — say why and
+  resolve it; the reviewer can reopen it. Do not resolve a thread you have not
+  answered, and do not bulk-resolve just to clear the count.
+- If you cannot resolve it yourself (no write access), say in the thread that the fix
+  is in and ask the author to resolve it.
+
 ## Submitting Changes
 
 1. Fork the repository
@@ -359,3 +372,4 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
 - [ ] `README.md` and `README_CN.md` updated for anything user-visible
 - [ ] Benchmarks re-run (`--save`) if a hot path changed, with the README tables updated
 - [ ] The PR description names the exact `torch`, `torch_musa`, driver, and hardware versions used for validation
+- [ ] Every review thread you addressed is answered and resolved (see [Review Comments](#review-comments))
