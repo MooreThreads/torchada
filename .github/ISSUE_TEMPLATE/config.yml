@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Contributing a change
+    url: https://github.com/MooreThreads/torchada/blob/main/CONTRIBUTING.md
+    about: Development setup, tests, and the two-commit rule (work commit + version bump) every PR must follow.
+  - name: Using torchada in your project
+    url: https://github.com/MooreThreads/torchada/blob/main/README.md
+    about: Install, the import-order requirement, and device detection before filing a bug.

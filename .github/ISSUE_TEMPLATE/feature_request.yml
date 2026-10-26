@@ -1,0 +1,60 @@
+name: Feature request
+description: A CUDA API torchada does not translate, a new opt-in switch, or new MUSA-version support.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If something *crashes or returns wrong results*, use the bug report instead — a
+        missing translation that breaks a run is a bug, not a feature.
+        Feature requests here are usually about widening coverage: a CUDA symbol with
+        no MUSA mapping, a new `torch_musa` release, or an opt-in switch.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can you not do today
+      description: The code you want to run, and the error or gap that stops it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of change
+      options:
+        - New or fixed CUDA-to-MUSA mapping rule (_mappings/)
+        - New patch in _patch.py
+        - Extension build / in-place porting coverage
+        - C++ operator override (csrc/)
+        - Triton MoE support
+        - Support for a newer torch_musa release
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What torchada should do
+      description: The behavior you expect after the change, from the caller's side.
+    validations:
+      required: true
+
+  - type: input
+    id: downstream
+    attributes:
+      label: Downstream project and version
+      description: Which project needs this, and at what version — it is how requests get prioritized.
+      placeholder: vllm-musa 0.10.2, sglang 0.5.2, my own project
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Local workaround, upstream fix, or another tool. "None, it fails outright" is a valid answer.
+    validations:
+      required: false
