@@ -147,10 +147,11 @@ conventions.
 
 ### Documentation-only pull requests are exempt
 
-A diff that touches nothing but Markdown and the issue/PR templates —
-`README.md`, `README_CN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/*.md`,
-`examples/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/` — is a
-**documentation-only** PR. It carries **no bump commit** and **does not change the
+A diff that touches nothing but Markdown, the issue/PR templates, and the checked-in
+benchmark row — `README.md`, `README_CN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/*.md`,
+`examples/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/`,
+`benchmarks/benchmark_history.json` — is a **documentation-only** PR. None of it ships
+(`packages.find` is scoped to `src/`), so realigning it is not a release. It carries **no bump commit** and **does not change the
 version**: the bump marks what ships, and a docs-only change ships nothing. It may still
 be several `docs: ...` commits — a refresh, a correction, a template — normally squashed
 into a single entry when merged.
@@ -226,7 +227,7 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
 # 2b. Relabel the newest benchmark-history row: new "version", same numbers.
 #     The left side is whatever that row currently records -- it may lag $OLD.
 #     Skip when the file has no row yet.
-sed -i 's/"version": "0.1.100"/"version": "0.1.103"/' benchmarks/benchmark_history.json
+sed -i 's/"version": "0.1.102"/"version": "0.1.103"/' benchmarks/benchmark_history.json
 git diff --stat benchmarks/benchmark_history.json   # 1 insertion(+), 1 deletion(-)
 
 # 3. Prove nothing is left behind — scoped to the seven carriers

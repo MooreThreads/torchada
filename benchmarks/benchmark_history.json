@@ -82,7 +82,7 @@
       }
     },
     {
-      "version": "0.1.100",
+      "version": "0.1.102",
       "date": "2026-10-09",
       "platform": "MUSA",
       "pytorch_version": "2.11.0.post2+musa5.2.0",

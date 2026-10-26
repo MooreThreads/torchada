@@ -205,10 +205,12 @@ commits: the work, then the bump.** Reviewers must be able to diff the behavior
 change and the version bump separately. A PR that mixes them in one commit will be
 asked to split.
 
-A **documentation-only PR** — a diff that touches nothing but Markdown and the
-issue/PR templates (`AGENTS.md`, `CONTRIBUTING.md`, `README.md`, `README_CN.md`,
-`docs/`, `examples/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/`)
-— carries **no bump commit** and **does not change the version**. The bump marks what
+A **documentation-only PR** — a diff that touches nothing but Markdown, the issue/PR
+templates and the checked-in benchmark row (`AGENTS.md`, `CONTRIBUTING.md`, `README.md`,
+`README_CN.md`, `docs/`, `examples/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`,
+`.github/ISSUE_TEMPLATE/`, `benchmarks/benchmark_history.json`) — carries **no bump
+commit** and **does not change the version**. None of those ship in the wheel
+(`packages.find` is scoped to `src/`), so realigning them is not a release. The bump marks what
 ships; a docs-only change ships nothing. It may still be several `docs:` commits (a
 refresh, a correction, a template), normally squashed into one entry on merge. Workflows
 under `.github/workflows/` are automation, not documentation, and are **not** exempt.
@@ -279,7 +281,7 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
 
 # 2b. Relabel the newest benchmark-history row: same numbers, new "version".
 #     The left side is whatever that row currently records -- it may lag $OLD.
-sed -i 's/"version": "0.1.100"/"version": "0.1.103"/' benchmarks/benchmark_history.json
+sed -i 's/"version": "0.1.102"/"version": "0.1.103"/' benchmarks/benchmark_history.json
 git diff --stat benchmarks/benchmark_history.json   # 1 file changed, 1 insertion(+), 1 deletion(-)
 
 # 3. Verify: no stale reference left in any carrier
