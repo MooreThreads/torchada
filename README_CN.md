@@ -56,7 +56,7 @@ torch.cuda.synchronize()
 | 同步 | `torch.cuda.synchronize()`, `Stream`, `Event`, `torch.cuda.streams` |
 | 混合精度 | `torch.cuda.amp.autocast()`, `GradScaler()` |
 | CUDA Graphs | `torch.cuda.CUDAGraph`、`torch.cuda.graph()`、深层模型的 graph executable 轮换 |
-| CUDA 运行时 | `torch.cuda.cudart()` → 使用 MUSA 运行时 |
+| CUDA 运行时 | `torch.cuda.cudart()` → 使用 MUSA 运行时，`torch._C._cuda_getCurrentRawStream` 兼容垫片 |
 | 性能分析 | `ProfilerActivity.CUDA` → 使用 PrivateUse1 |
 | 自定义算子 | `Library.impl(..., "CUDA")` → 使用 PrivateUse1 |
 | 分布式训练 | `dist.init_process_group(backend='nccl')` → 使用 MCCL |
@@ -522,7 +522,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.102
+torchada>=0.1.103
 ```
 
 ### 步骤 2：条件导入

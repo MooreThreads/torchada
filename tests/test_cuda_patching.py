@@ -2175,6 +2175,39 @@ class TestCudart:
         assert "cudart" in dir(torch.cuda)
 
 
+class TestCudaGetCurrentRawStream:
+    """Test the torch._C._cuda_getCurrentRawStream compatibility shim."""
+
+    @pytest.mark.gpu
+    def test_raw_stream_matches_current_stream(self):
+        """The shim returns the current MUSA stream's raw pointer."""
+        import torch
+
+        import torchada
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        assert hasattr(torch._C, "_cuda_getCurrentRawStream")
+        device = torch.cuda.current_device()
+        raw = torch._C._cuda_getCurrentRawStream(device)
+        assert raw == torch.cuda.current_stream(device).cuda_stream
+
+    def test_shim_not_installed_off_musa(self):
+        """On platforms with a native binding (or no MUSA), torchada adds nothing."""
+        import torch
+
+        import torchada
+
+        if torchada.is_musa_platform():
+            pytest.skip("Only applicable off MUSA platform")
+        # Whatever the platform provides natively is left untouched; this test
+        # only asserts torchada did not shadow an existing binding with ours.
+        shim = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+        if shim is not None:
+            assert "torchada" not in getattr(shim, "__module__", "")
+
+
 class TestCppExtensionPaths:
     """Test include_paths and library_paths with both old and new signatures."""
 
