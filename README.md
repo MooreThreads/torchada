@@ -56,7 +56,7 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | Synchronization | `torch.cuda.synchronize()`, `Stream`, `Event`, `torch.cuda.streams` |
 | Mixed precision | `torch.cuda.amp.autocast()`, `GradScaler()` |
 | CUDA Graphs | `torch.cuda.CUDAGraph`, `torch.cuda.graph()`, executable rotation for deep models |
-| CUDA Runtime | `torch.cuda.cudart()` → uses MUSA runtime |
+| CUDA Runtime | `torch.cuda.cudart()` → uses MUSA runtime, `torch._C._cuda_getCurrentRawStream` shim |
 | Profiler | `ProfilerActivity.CUDA` → uses PrivateUse1 |
 | Custom Ops | `Library.impl(..., "CUDA")` → uses PrivateUse1 |
 | Distributed | `dist.init_process_group(backend='nccl')` → uses MCCL |
@@ -568,7 +568,7 @@ nvJPEG, libtorch-stable, FlashInfer, cutlass, thrust, ...).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.102
+torchada>=0.1.103
 ```
 
 ### Step 2: Conditional Import
