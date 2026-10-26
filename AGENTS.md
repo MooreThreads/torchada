@@ -5,7 +5,7 @@ imports this file; the workspace-level `../AGENTS.md` adds the multi-repository
 contract on top. Most PRs in this repository are authored by agents, so this file
 is the primary place to record a convention instead of leaving it in a PR comment.
 
-Everything below was verified against `origin/main` at `0.1.102`. Patch files move
+Everything below was verified against `origin/main` at `0.1.103`. Patch files move
 fast: re-verify a version gate, a file path, or an env-var name before relying on
 it, and update this file in the same PR that invalidates it.
 
@@ -223,7 +223,7 @@ chore: bump torchada to <new version>  # exactly the version bump, nothing else
 Rules:
 
 1. **One bump per PR, exactly one patch increment.** Current line is `0.1.N`;
-   `0.1.102` -> `0.1.103`. Never skip a number, never reuse one, and never bump
+   `0.1.103` -> `0.1.104`. Never skip a number, never reuse one, and never bump
    inside a work commit.
 2. **Replace every carrier, never a subset.** Partial bumps have shipped before and
    leave the C++ extension or the docs reporting an older version than the wheel. The
@@ -254,16 +254,18 @@ examples below.
 | `README.md` | `torchada>=<version>` |
 | `README_CN.md` | `torchada>=<version>` |
 
-Only two of those are test-enforced — `test_get_version` pins the string and
-`test_project_version_matches_runtime_version` compares `pyproject.toml` against
-`__version__`. `ops.h`, both READMEs, and `examples/extension_setup.py` are not
-gated, which is exactly how a partial bump survives review.
+Two tests pin three of those carriers: `test_get_version` asserts
+`torchada.__version__` (which covers both `__init__.py` and the literal in
+`tests/test_platform.py`), and `test_project_version_matches_runtime_version`
+compares `pyproject.toml` against it. The remaining four — `ops.h`, both READMEs,
+and `examples/extension_setup.py` — are not gated at all, which is exactly how a
+partial bump survives review.
 
 Bump procedure:
 
 ```bash
-OLD=0.1.102
-NEW=0.1.103
+OLD=0.1.103
+NEW=0.1.104
 
 # 1. Work first: commit the actual change
 git add src/torchada/_patch.py tests/test_thing.py
@@ -280,8 +282,10 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
   README_CN.md
 
 # 2b. Relabel the newest benchmark-history row: same numbers, new "version".
-#     The left side is whatever that row currently records -- it may lag $OLD.
-sed -i 's/"version": "0.1.102"/"version": "0.1.103"/' benchmarks/benchmark_history.json
+#     Read the row's current value rather than assuming it equals $OLD -- the last
+#     entry of "results" is the newest, because --save appends.
+ROW=$(python3 -c "import json;print(json.load(open('benchmarks/benchmark_history.json'))['results'][-1]['version'])")
+sed -i "s/\"version\": \"$ROW\"/\"version\": \"$NEW\"/" benchmarks/benchmark_history.json
 git diff --stat benchmarks/benchmark_history.json   # 1 file changed, 1 insertion(+), 1 deletion(-)
 
 # 3. Verify: no stale reference left in any carrier
@@ -321,7 +325,7 @@ feat(device): register the device factory as the FX device builtin
 perf(moe): tune the Nemotron MTP decode row on S5000
 docs: refresh the READMEs against recent merged PRs
 test: skip the legacy Inductor heuristic copy tests on torch_musa >= 2.11.0.post2
-chore: bump torchada to 0.1.102
+chore: bump torchada to 0.1.103
 ```
 
 - `type(scope):` where scope names the touched module (`_patch`, `_mappings`,
@@ -499,8 +503,8 @@ Before claiming a change is ready:
 - [ ] Work commit(s) and one `chore: bump torchada to X` commit, in that order
       (a docs-only PR has no bump commit at all).
 - [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing.
-- [ ] The newest `benchmarks/benchmark_history.json` row carries the new version
-      (`git diff --stat` there: 1 insertion, 1 deletion).
+- [ ] For a bump PR: the newest `benchmarks/benchmark_history.json` row carries the
+      new version (`git diff --stat` there: 1 insertion, 1 deletion).
 - [ ] `pre-commit run --all-files` clean (no `--no-verify`).
 - [ ] `pytest tests/ -q` passing, or a named subset plus the reason the rest is not run.
 - [ ] `README.md` **and** `README_CN.md` updated for anything user-visible.

@@ -135,7 +135,7 @@ two commits:**
    with the message:
 
    ```
-   chore: bump torchada to 0.1.102
+   chore: bump torchada to 0.1.103
    ```
 
    (substitute the version you are releasing).
@@ -172,8 +172,8 @@ diff mixed in, and a release can be reconstructed from `git log` alone.
 ### The bump must replace **all** carriers
 
 Never upgrade "the ones you remember". The version string lives in seven tracked
-files — `<version>` below is the value currently in `pyproject.toml` — and only two of
-them are covered by tests:
+files — `<version>` below is the value currently in `pyproject.toml` — and two tests
+cover three of them:
 
 | File | Expression |
 |---|---|
@@ -200,15 +200,15 @@ the wheel. That is why the checklist is `git grep`, not memory.
 
 `MAJOR.MINOR.PATCH` with the current line at `0.1.N`. Every PR that changes code,
 tests, or packaged data and merges to `main` raises `N` by exactly one
-(`0.1.102` -> `0.1.103`). Do not skip numbers, do not reuse a number, and do not leave
+(`0.1.103` -> `0.1.104`). Do not skip numbers, do not reuse a number, and do not leave
 a merged PR without a bump — except a documentation-only PR, which ships nothing and
 therefore does not bump.
 
 ### Procedure
 
 ```bash
-OLD=0.1.102
-NEW=0.1.103
+OLD=0.1.103
+NEW=0.1.104
 
 # 1. Finish and commit the work first
 git add src/torchada/_patch.py tests/test_thing.py
@@ -225,9 +225,10 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
   README_CN.md
 
 # 2b. Relabel the newest benchmark-history row: new "version", same numbers.
-#     The left side is whatever that row currently records -- it may lag $OLD.
-#     Skip when the file has no row yet.
-sed -i 's/"version": "0.1.102"/"version": "0.1.103"/' benchmarks/benchmark_history.json
+#     Read the row's current value rather than assuming it equals $OLD; the last
+#     entry of "results" is the newest because --save appends. Skip if no row yet.
+ROW=$(python3 -c "import json;print(json.load(open('benchmarks/benchmark_history.json'))['results'][-1]['version'])")
+sed -i "s/\"version\": \"$ROW\"/\"version\": \"$NEW\"/" benchmarks/benchmark_history.json
 git diff --stat benchmarks/benchmark_history.json   # 1 insertion(+), 1 deletion(-)
 
 # 3. Prove nothing is left behind — scoped to the seven carriers
@@ -269,7 +270,7 @@ squash message:
 ```
 * fix(_patch): ...
 
-* chore: bump torchada to 0.1.103
+* chore: bump torchada to 0.1.104
 ```
 
 ## Commit Messages
@@ -282,7 +283,7 @@ feat(device): register the device factory as the FX device builtin
 perf(moe): tune the Nemotron MTP decode row on S5000
 docs: refresh the READMEs against recent merged PRs
 test: skip the legacy Inductor heuristic copy tests on torch_musa >= 2.11.0.post2
-chore: bump torchada to 0.1.102
+chore: bump torchada to 0.1.103
 ```
 
 - Imperative mood, lowercase after the colon, no trailing period, aim for <= 72 characters.

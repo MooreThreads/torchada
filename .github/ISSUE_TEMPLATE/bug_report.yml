@@ -59,7 +59,7 @@ body:
     attributes:
       label: torchada version
       description: "`python -c 'import torchada; print(torchada.__version__)'`"
-      placeholder: 0.1.102
+      placeholder: 0.1.103
     validations:
       required: true
 
