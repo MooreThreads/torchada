@@ -2021,6 +2021,19 @@ def _patch_torch_c_exports():
         if not hasattr(torch._C, cuda_name) and hasattr(musac, musa_name):
             setattr(torch._C, cuda_name, getattr(musac, musa_name))
 
+    # torch._C._cuda_getCurrentRawStream has no _MUSAC counterpart: the MUSA
+    # torch build drops the binding, and downstream CUDA backends (e.g.
+    # bitsandbytes) read it at import time. Synthesize it from torch_musa's
+    # stream API. Resolve through torch.musa (not torch.cuda) so this patch
+    # does not depend on _patch_torch_cuda_module or _patch_stream_cuda_stream
+    # having run first in the registry.
+    if not hasattr(torch._C, "_cuda_getCurrentRawStream"):
+
+        def _cuda_getCurrentRawStream(device):
+            return torch.musa.current_stream(device).musa_stream
+
+        torch._C._cuda_getCurrentRawStream = _cuda_getCurrentRawStream
+
 
 @patch_function
 @requires_import("torch_musa")
