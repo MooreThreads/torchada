@@ -146,14 +146,18 @@ conventions.
 
 ### Documentation-only pull requests are exempt
 
-A diff that touches nothing but Markdown — `README.md`, `README_CN.md`, `AGENTS.md`,
-`CONTRIBUTING.md`, `docs/*.md`, `examples/*.md` — is a **documentation-only** PR. It
-merges as a single `docs: ...` commit and **does not bump the version**: the bump marks
-what ships, and a docs-only change ships nothing.
+A diff that touches nothing but Markdown and the issue/PR templates —
+`README.md`, `README_CN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/*.md`,
+`examples/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/` — is a
+**documentation-only** PR. It carries **no bump commit** and **does not change the
+version**: the bump marks what ships, and a docs-only change ships nothing. It may still
+be several `docs: ...` commits — a refresh, a correction, a template — normally squashed
+into a single entry when merged.
 
 The exemption ends the moment the same PR also touches source, tests, `pyproject.toml`,
-or a bundled tuning config. Mixed PRs are normal PRs and need both commits, so keep a
-doc fix and a code fix in separate pull requests if you can.
+a bundled tuning config, or a workflow under `.github/workflows/` — workflows are
+automation, not documentation. Mixed PRs are normal PRs and need both commits, so keep
+a doc fix and a code fix in separate pull requests if you can.
 
 ### Why the split is required
 
@@ -326,11 +330,12 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
 5. Ensure all tests pass
 6. Unless this is a documentation-only PR, add the version bump commit
    (`chore: bump torchada to X`) as the final commit
-7. Submit a pull request and fill in the checklist below
+7. Submit a pull request — GitHub pre-fills `.github/PULL_REQUEST_TEMPLATE.md`, which
+   is the checklist below in the place you will actually see it
 
 ### Pull request checklist
 
-- [ ] At least two commits: the work, then `chore: bump torchada to <version>` (documentation-only PR: a single `docs:` commit, no bump)
+- [ ] At least two commits: the work, then `chore: bump torchada to <version>` (documentation-only PR: no bump commit)
 - [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing
 - [ ] `pre-commit run --all-files` passes
 - [ ] Tests pass (`pytest tests/`), or the PR states which subset ran and why

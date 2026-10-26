@@ -1,0 +1,99 @@
+name: Bug report
+description: Something crashes, hangs, returns wrong results, or refuses to build on MUSA.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        torchada is a compatibility shim, so most reports are only triageable with the
+        exact stack. Please fill in the versions and a minimal reproduction — a symptom
+        alone usually cannot be reproduced.
+
+  - type: textarea
+    id: symptom
+    attributes:
+      label: What happens
+      description: The observed behavior. Paste the traceback or the wrong output verbatim.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: On CUDA this works and on MUSA it does not — say which of the two you are comparing against.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        The smallest script that still shows it. Trim until removing one more line
+        makes the bug disappear; that boundary is the bug.
+      render: python
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where the failure surfaces. Pick the closest; we will re-label if needed.
+      options:
+        - torch.cuda.* behavior / a patch
+        - extension build or in-place source porting
+        - C++ operator override (csrc/)
+        - CUDA graph capture
+        - Triton MoE
+        - device or dispatch translation
+        - not sure
+    validations:
+      required: true
+
+  - type: input
+    id: torchada-version
+    attributes:
+      label: torchada version
+      description: "`python -c 'import torchada; print(torchada.__version__)'`"
+      placeholder: 0.1.102
+    validations:
+      required: true
+
+  - type: input
+    id: torch-versions
+    attributes:
+      label: torch / torch_musa versions
+      description: "`python -c 'import torch; print(torch.__version__, torch.musa.__version__)'`"
+      placeholder: 2.7.1 / 2.7.1+mc2.9.0
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: GPU, driver, MUSA SDK
+      description: Model and count, driver version, MUSA SDK version.
+      placeholder: MTT S5000 x8, driver 5.1.0, MUSA SDK 5.2.0
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: preconditions
+    attributes:
+      label: Preconditions
+      description: These two questions resolve the majority of reports.
+      options:
+        - label: "`import torchada` runs **before** `import torch`, `torch_musa`, `vllm`, or `sglang` in my script"
+        - label: The failure also happens without `torchada` imported (meaning it is a `torch_musa` issue, not a shim issue)
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Recent stack change, `TORCHADA_*` variables in use, full log, related issue.
+    validations:
+      required: false

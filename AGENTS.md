@@ -205,10 +205,13 @@ commits: the work, then the bump.** Reviewers must be able to diff the behavior
 change and the version bump separately. A PR that mixes them in one commit will be
 asked to split.
 
-A **documentation-only PR** — a diff that touches nothing but Markdown
-(`AGENTS.md`, `CONTRIBUTING.md`, `README.md`, `README_CN.md`, `docs/`, `examples/*.md`)
-— merges as a single work commit and **does not bump the version**. The bump marks
-what ships; a docs-only change ships nothing.
+A **documentation-only PR** — a diff that touches nothing but Markdown and the
+issue/PR templates (`AGENTS.md`, `CONTRIBUTING.md`, `README.md`, `README_CN.md`,
+`docs/`, `examples/*.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/`)
+— carries **no bump commit** and **does not change the version**. The bump marks what
+ships; a docs-only change ships nothing. It may still be several `docs:` commits (a
+refresh, a correction, a template), normally squashed into one entry on merge. Workflows
+under `.github/workflows/` are automation, not documentation, and are **not** exempt.
 
 ```
 <work commit(s)>                       # feat/fix/perf/docs/test: what the PR is about
@@ -230,9 +233,9 @@ Rules:
 5. **Land the two commits separately.** Prefer rebase/merge over squash so `main`
    keeps the split. If the PR must be squashed, keep both entries in the squash
    body (`* feat(...): ...`, `* chore: bump torchada to X`).
-6. **Documentation-only PRs skip the bump** and merge as a single `docs:` commit.
-   The moment the same PR also touches source, tests, `pyproject.toml`, or a
-   bundled config, it is a normal PR and needs both commits.
+6. **Documentation-only PRs skip the bump** — no `chore:` commit at all.
+   The moment the same PR also touches source, tests, `pyproject.toml`, a bundled
+   training/tuning config, or a workflow, it is a normal PR and needs both commits.
 
 **The bump surface** — seven carriers, with `<version>` standing for the value
 currently in `pyproject.toml`. The placeholders are deliberate: this file and
@@ -482,7 +485,7 @@ platform-check caching (`_is_musa_platform_cached`), string translation caching
 Before claiming a change is ready:
 
 - [ ] Work commit(s) and one `chore: bump torchada to X` commit, in that order
-      (a docs-only PR is one `docs:` commit and no bump).
+      (a docs-only PR has no bump commit at all).
 - [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing.
 - [ ] `pre-commit run --all-files` clean (no `--no-verify`).
 - [ ] `pytest tests/ -q` passing, or a named subset plus the reason the rest is not run.
