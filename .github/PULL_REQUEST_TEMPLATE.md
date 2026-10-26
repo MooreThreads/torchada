@@ -25,7 +25,7 @@ Every PR that changes code, tests, or packaged data carries the work commit(s)
 - [ ] Work commit(s) first, then exactly one `chore: bump torchada to <version>` commit
 - [ ] The bump replaced **all seven carriers**: `git grep -nF '<old version>' -- pyproject.toml src/torchada/__init__.py src/torchada/csrc/ops.h tests/test_platform.py examples/extension_setup.py README.md README_CN.md` prints nothing
 - [ ] The bump commit contains nothing else
-- [ ] Not applicable — documentation/metadata only (no bump commit)
+- [ ] Not applicable — documentation-only as defined in CONTRIBUTING.md (no bump commit)
 
 ## Compatibility impact
 

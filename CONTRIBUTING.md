@@ -28,7 +28,8 @@ Python 3.8 or newer is required (`requires-python = ">=3.8"` in `pyproject.toml`
 We use [pre-commit](https://pre-commit.com/) to automatically check and format code before each commit.
 
 ```bash
-# Install the hooks (one-time setup)
+# Install the hooks (one-time setup). They rewrite staged files, so an agent
+# working in someone else's checkout should get the owner's approval first.
 pre-commit install
 
 # (Optional) Run hooks against all files to verify setup
