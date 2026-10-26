@@ -124,7 +124,8 @@ package metadata lives in `pyproject.toml`.
 - **Python version**: >=3.8
 
 ```bash
-# One-time hook setup
+# One-time hook setup — only with the repository/workspace owner's agreement,
+# since the hooks run formatters that rewrite staged files
 pre-commit install
 
 # Run everything, or one hook
@@ -141,8 +142,9 @@ docker exec -w /ws <container> bash -c "isort src/ tests/ && black src/ tests/ &
 Hooks also run `no-commit-to-branch`, so `main` cannot be committed to directly.
 If a hook rewrites files, the commit aborts: `git add` the result and commit again.
 Never bypass with `--no-verify`. If a formatter only fires while you are making the
-bump commit, amend the reformat into the work commit instead — the bump commit stays
-version-only.
+bump commit, put the reformat in its own commit *ahead of* the bump, or fold it into a
+work commit you are still composing. Never rewrite an existing commit to absorb it, and
+keep the bump version-only.
 
 ## Testing
 
@@ -182,12 +184,15 @@ instead of creating `test_misc.py`:
 | Graphs / rotation | `test_graph_rotation.py` |
 | Triton MoE | `test_triton_patching.py`, `test_triton_descriptor_capability.py`, `test_moe_config_dir.py`, `test_moe_pipeline.py`, `test_tune_moe_recipe.py`, `test_nemotron_moe_config.py` |
 
-**Docker containers for testing**: the MUSA development host keeps pre-built
-torch_musa containers (`yeahdongcn` = torch_musa 2.7.0, `yeahdongcn1` = torch_musa
-2.7.1). They are local to that machine; check `docker ps` before naming one.
+**Docker containers for testing**: run the suite in the container that belongs to
+your own task or GPU lease — `<your-container>` below — never in one you did not
+create. The MUSA development host still carries older `yeahdongcn*` containers from
+earlier sessions; treat them as someone else's: do not run tests in them, do not
+rewrite their files, do not clean them up. For an external checkout, any environment
+carrying the `torch_musa` version you are gating against works.
 
 ```bash
-docker exec -w /ws yeahdongcn1 python -m pytest tests/ --tb=short
+docker exec -w /ws <your-container> python -m pytest tests/ --tb=short
 ```
 
 Primary validation target is the newest `torch_musa` release the code gates
@@ -215,9 +220,9 @@ Rules:
 1. **One bump per PR, exactly one patch increment.** Current line is `0.1.N`;
    `0.1.102` -> `0.1.103`. Never skip a number, never reuse one, and never bump
    inside a work commit.
-2. **Replace *all* occurrences, never a subset.** Partial bumps have shipped
-   before and leave the C++ extension or the docs reporting an older version than
-   the wheel. `git grep` is the gate, not your memory of the file list.
+2. **Replace every carrier, never a subset.** Partial bumps have shipped before and
+   leave the C++ extension or the docs reporting an older version than the wheel. The
+   scoped `git grep` below is the gate, not your memory of the file list.
 3. **The bump commit touches nothing else.** No source fixes, no formatting
    drive-bys, no test changes riding along with it.
 4. **A bump-only PR is not a feature PR.** Release management owns those; do not
@@ -229,18 +234,20 @@ Rules:
    The moment the same PR also touches source, tests, `pyproject.toml`, or a
    bundled config, it is a normal PR and needs both commits.
 
-**The bump surface** (verify with `git grep -nF '<old version>'`):
+**The bump surface** — seven carriers, with `<version>` standing for the value
+currently in `pyproject.toml`. The placeholders are deliberate: this file and
+`CONTRIBUTING.md` are **not** version carriers, so a bump must not rewrite the
+examples below.
 
 | File | Expression |
 |---|---|
-| `pyproject.toml` | `version = "0.1.102"` |
-| `src/torchada/__init__.py` | `__version__ = "0.1.102"` |
-| `src/torchada/csrc/ops.h` | `constexpr const char* VERSION = "0.1.102";` |
-| `tests/test_platform.py` | `assert version == "0.1.102"` (in `test_get_version`) |
-| `examples/extension_setup.py` | `version="0.1.102"` |
-| `README.md` | `torchada>=0.1.102` |
-| `README_CN.md` | `torchada>=0.1.102` |
-| `benchmarks/benchmark_history.json` | *only if the old version appears*: relabel the current-release measurement row |
+| `pyproject.toml` | `version = "<version>"` |
+| `src/torchada/__init__.py` | `__version__ = "<version>"` |
+| `src/torchada/csrc/ops.h` | `constexpr const char* VERSION = "<version>";` |
+| `tests/test_platform.py` | `assert version == "<version>"` (in `test_get_version`) |
+| `examples/extension_setup.py` | `version="<version>"` |
+| `README.md` | `torchada>=<version>` |
+| `README_CN.md` | `torchada>=<version>` |
 
 Only two of those are test-enforced — `test_get_version` pins the string and
 `test_project_version_matches_runtime_version` compares `pyproject.toml` against
@@ -267,8 +274,12 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
   README.md \
   README_CN.md
 
-# 3. Verify: no stale reference left anywhere tracked
-git grep -nF "$OLD"
+# 3. Verify: no stale reference left in any carrier
+git grep -nF "$OLD" -- pyproject.toml src/torchada/__init__.py \
+    src/torchada/csrc/ops.h tests/test_platform.py \
+    examples/extension_setup.py README.md README_CN.md
+# No output expected. Scope matters: this file and CONTRIBUTING.md quote versions as
+# examples, so an unscoped `git grep -nF "$OLD"` always hits them and proves nothing.
 python -m pytest tests/test_platform.py -q
 
 # 4. Commit only what the bump touched
@@ -277,11 +288,13 @@ git add pyproject.toml src/torchada/__init__.py src/torchada/csrc/ops.h \
 git commit -m "chore: bump torchada to $NEW"
 ```
 
-`benchmarks/benchmark_history.json` is conditional: only edit it when the old
-version string actually appears there, and only relabel the row that tracks the
-current release line — never fabricate numbers or add a row for a run that did not
-happen. Run `benchmarks/benchmark_overhead.py --save` (see below) when a patch
-changes a hot path, and let that produce the measurement.
+`benchmarks/benchmark_history.json` is **not** a bump carrier. It is written by
+`benchmarks/benchmark_overhead.py --save`, which keys rows on `(version, platform)`:
+it appends a row for a version that has none and replaces the row of the version it
+runs on. Never hand-edit or relabel a row — relabelling asserts that a measurement
+taken on the old release was taken on the new one, and the file's value is that it
+records version, date, and stack together. If you did not run `--save`, the file does
+not change and stays out of the bump commit.
 
 ## Commit Messages
 
@@ -412,10 +425,10 @@ fast path is a real regression. Numbers are checked in and cited by both READMEs
 
 ```bash
 # Print only
-docker exec -w /ws yeahdongcn1 python benchmarks/benchmark_overhead.py
+docker exec -w /ws <your-container> python benchmarks/benchmark_overhead.py
 
-# Record a row in benchmarks/benchmark_history.json
-docker exec -w /ws yeahdongcn1 python benchmarks/benchmark_overhead.py --save
+# Record a row in benchmarks/benchmark_history.json (appends or updates your version's row)
+docker exec -w /ws <your-container> python benchmarks/benchmark_overhead.py --save
 ```
 
 - Fast operations (<200ns): `torch.cuda.device_count()`, `torch.cuda.Stream`,
@@ -470,7 +483,7 @@ Before claiming a change is ready:
 
 - [ ] Work commit(s) and one `chore: bump torchada to X` commit, in that order
       (a docs-only PR is one `docs:` commit and no bump).
-- [ ] `git grep -nF '<old version>'` returns nothing.
+- [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing.
 - [ ] `pre-commit run --all-files` clean (no `--no-verify`).
 - [ ] `pytest tests/ -q` passing, or a named subset plus the reason the rest is not run.
 - [ ] `README.md` **and** `README_CN.md` updated for anything user-visible.

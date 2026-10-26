@@ -109,12 +109,17 @@ case to the module that owns the area rather than a new catch-all file.
 
 ### Docker Testing
 
-Example development containers on the MUSA host:
+Run the suite in the container that belongs to your own task or GPU lease, never in
+one you did not create:
 
 ```bash
-docker exec -w /ws yeahdongcn python -m pytest tests/ --tb=short   # torch_musa 2.7.0
-docker exec -w /ws yeahdongcn1 python -m pytest tests/ --tb=short  # torch_musa 2.7.1
+docker exec -w /ws <your-container> python -m pytest tests/ --tb=short
 ```
+
+The MUSA development host still carries older `yeahdongcn*` containers from earlier
+sessions; treat them as someone else's — do not run tests in them, rewrite their
+files, or clean them up. Any environment carrying the `torch_musa` version you gate
+against is a valid target.
 
 When a change touches a `torch_musa` version gate, validate both sides of the bound.
 
@@ -158,21 +163,24 @@ mechanical `replace all` that must be verified by a search, not by judgment. Kee
 them apart means a reviewer can see the semantics of the change without a version
 diff mixed in, and a release can be reconstructed from `git log` alone.
 
-### The bump must replace **all** occurrences
+### The bump must replace **all** carriers
 
 Never upgrade "the ones you remember". The version string lives in seven tracked
-files, plus one conditional, and only two of them are covered by tests:
+files — `<version>` below is the value currently in `pyproject.toml` — and only two of
+them are covered by tests:
 
 | File | Expression |
 |---|---|
-| `pyproject.toml` | `version = "0.1.102"` |
-| `src/torchada/__init__.py` | `__version__ = "0.1.102"` |
-| `src/torchada/csrc/ops.h` | `constexpr const char* VERSION = "0.1.102";` |
-| `tests/test_platform.py` | `assert version == "0.1.102"` (`test_get_version`) |
-| `examples/extension_setup.py` | `version="0.1.102"` |
-| `README.md` | `torchada>=0.1.102` |
-| `README_CN.md` | `torchada>=0.1.102` |
-| `benchmarks/benchmark_history.json` | only if the old version appears — relabel the current-release row |
+| `pyproject.toml` | `version = "<version>"` |
+| `src/torchada/__init__.py` | `__version__ = "<version>"` |
+| `src/torchada/csrc/ops.h` | `constexpr const char* VERSION = "<version>";` |
+| `tests/test_platform.py` | `assert version == "<version>"` (`test_get_version`) |
+| `examples/extension_setup.py` | `version="<version>"` |
+| `README.md` | `torchada>=<version>` |
+| `README_CN.md` | `torchada>=<version>` |
+
+This document and `AGENTS.md` deliberately use `<version>` placeholders: they are not
+version carriers, so a bump must not rewrite them.
 
 `test_get_version` and `test_project_version_matches_runtime_version` will fail on a
 partial bump, but they only cover `pyproject.toml`, `__init__.py`, and the test
@@ -210,8 +218,12 @@ sed -i "s/${OLD//./\\.}/$NEW/g" \
   README.md \
   README_CN.md
 
-# 3. Prove nothing is left behind
-git grep -nF "$OLD"
+# 3. Prove nothing is left behind — scoped to the seven carriers
+git grep -nF "$OLD" -- pyproject.toml src/torchada/__init__.py \
+    src/torchada/csrc/ops.h tests/test_platform.py \
+    examples/extension_setup.py README.md README_CN.md
+# No output expected. The scope is required: this file and AGENTS.md quote versions
+# as examples, so an unscoped grep always hits them and proves nothing.
 python -m pytest tests/test_platform.py -q
 
 # 4. Commit the bump on its own
@@ -220,11 +232,14 @@ git add pyproject.toml src/torchada/__init__.py src/torchada/csrc/ops.h \
 git commit -m "chore: bump torchada to $NEW"
 ```
 
-`benchmarks/benchmark_history.json` is conditional: edit it only when the old version
-string appears there, and only relabel the row that tracks the current release line.
-Never invent or hand-edit measurement numbers — a changed hot path should be measured
-with `benchmarks/benchmark_overhead.py --save`, and the new numbers then also need to
-be reflected in the performance tables of both READMEs.
+`benchmarks/benchmark_history.json` is **not** part of the bump. It is written by
+`benchmarks/benchmark_overhead.py --save`, which keys rows on `(version, platform)`:
+it appends a row when the version has none and replaces the row of the version it runs
+on. Never hand-edit or relabel a row — relabelling claims that a measurement taken on
+the old release was taken on the new one, and the file is only useful because it
+records version, date, and stack together. If you did not run `--save`, leave it
+alone; when the recorded numbers do change, update the performance tables in both
+READMEs in the same PR.
 
 ### Keep the split when merging
 
@@ -316,7 +331,7 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
 ### Pull request checklist
 
 - [ ] At least two commits: the work, then `chore: bump torchada to <version>` (documentation-only PR: a single `docs:` commit, no bump)
-- [ ] `git grep -nF '<old version>'` returns nothing
+- [ ] `git grep -nF '<old version>' -- <the seven carriers>` returns nothing
 - [ ] `pre-commit run --all-files` passes
 - [ ] Tests pass (`pytest tests/`), or the PR states which subset ran and why
 - [ ] `README.md` and `README_CN.md` updated for anything user-visible
