@@ -41,6 +41,12 @@ Repository = "https://github.com/MooreThreads/torchada"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# `torchada_build` is a top-level module on purpose: importing it must not run
+# `torchada/__init__`, which imports torch.  A `setup.py` or a PEP 517 backend gets
+# the arch table and the cache tag without a torch install in the build environment.
+[tool.setuptools]
+py-modules = ["torchada_build"]
+
 [tool.setuptools.package-data]
 torchada = [
     "csrc/**/*.h",
