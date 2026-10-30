@@ -521,6 +521,249 @@ def _spec(arch_name):
     return spec
 
 
+class TestArchDetectionDelegation:
+    """``torchada._cpp_ops`` must ask the device, not re-parse ``musaInfo``."""
+
+    def test_device_properties_win_when_nothing_is_pinned(self, fake_device, monkeypatch):
+        from torchada import _cpp_ops
+
+        fake_device(major=3, minor=2)
+        for name in ("MTGPU_TARGET", "VLLM_MUSA_ARCH_LIST", "MATE_MUSA_ARCH_LIST"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", None)
+
+        assert _cpp_ops._detect_musa_arch() == "mp_32"
+
+    def test_the_device_wins_over_a_script_literal(self, fake_device, monkeypatch):
+        """``VLLM_MUSA_ARCH_LIST=31`` in a script must not retarget an mp_22 host.
+
+        The value reaches ``--offload-arch`` for torchada's own ops, and no stamp
+        check covers that build, so the card that is present is the authority.
+        """
+        from torchada import _cpp_ops
+
+        fake_device(major=2, minor=2)
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", None)
+        monkeypatch.setenv("VLLM_MUSA_ARCH_LIST", "31")
+        monkeypatch.setenv("MATE_MUSA_ARCH_LIST", "3.1")
+
+        assert _cpp_ops._detect_musa_arch() == "mp_22"
+
+    def test_the_ops_build_takes_its_flag_from_the_shared_infra(self, monkeypatch):
+        """The ``--offload-arch`` for torchada's own ops is derived, not spelled.
+
+        Spelled by hand it skipped the toolchain floor, so a ``mcc`` too old for the
+        arch reached codegen and failed there instead of before it.
+        """
+        from torchada import _cpp_ops
+
+        seen = {}
+
+        class Module:
+            @staticmethod
+            def _mark_loaded():
+                pass
+
+        def fake_locked_load(loader, **kwargs):
+            seen.update(kwargs)
+            return Module()
+
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", "mp_31")
+        monkeypatch.setattr(_cpp_ops, "_locked_load", fake_locked_load)
+
+        assert _cpp_ops.load_cpp_ops(force_reload=True) is not None
+        # The same list `mcc_arch_flags()` produces, and nothing hand-assembled.
+        assert seen["extra_cuda_cflags"] == build.mcc_arch_flags(["mp_31"])
+        assert seen["extra_cuda_cflags"] == ["--offload-arch=mp_31"]
+
+    def test_the_ops_cache_is_keyed_by_arch_and_compiler(self, monkeypatch):
+        """A copied cache must not hand an mp_22 object to an mp_31 host.
+
+        The build lands in ``<torch extensions>/torchada_cpp_ops/<arch>__mcc<ver>``,
+        which is what `build_cache_tag()` is for; the same call is what the wheel path
+        uses for its cache identity.
+        """
+        from torchada import _cpp_ops
+
+        seen = {}
+
+        class Module:
+            @staticmethod
+            def _mark_loaded():
+                pass
+
+        def fake_locked_load(loader, **kwargs):
+            seen.update(kwargs)
+            return Module()
+
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", "mp_22")
+        monkeypatch.setattr(_cpp_ops, "_locked_load", fake_locked_load)
+
+        assert _cpp_ops.load_cpp_ops(force_reload=True) is not None
+
+        directory = seen["build_directory"]
+        assert os.path.basename(directory) == build.build_cache_tag(["mp_22"])
+        assert os.path.basename(directory).startswith("mp_22__mcc")
+        assert os.path.basename(os.path.dirname(directory)) == "torchada_cpp_ops"
+        # The lock and the build have to agree on the directory, or the lock
+        # guards a path nobody is writing.
+        assert seen["extra_cuda_cflags"] == ["--offload-arch=mp_22"]
+
+    def test_the_override_answers_when_no_device_does(self, monkeypatch):
+        """An image for another card, or CI without one, still builds."""
+        from torchada import _cpp_ops
+
+        def no_properties(device_id):
+            raise RuntimeError("no device")
+
+        class Empty:
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(device, "_get_properties", no_properties)
+        device.clear_device_spec_cache()
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", None)
+        monkeypatch.setattr(_cpp_ops.subprocess, "run", lambda *a, **k: Empty())
+        monkeypatch.setenv("MTGPU_TARGET", "mp_21")
+
+        assert _cpp_ops._detect_musa_arch() == "mp_21"
+
+    def test_the_override_accepts_the_spellings_the_build_uses(self, monkeypatch):
+        """``3.1`` and ``310`` reach this path from MATE and from vllm-musa."""
+        from torchada import _cpp_ops
+
+        def no_properties(device_id):
+            raise RuntimeError("no device")
+
+        class Empty:
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(device, "_get_properties", no_properties)
+        device.clear_device_spec_cache()
+        monkeypatch.setattr(_cpp_ops.subprocess, "run", lambda *a, **k: Empty())
+
+        monkeypatch.setenv("MATE_MUSA_ARCH_LIST", "3.1")
+        monkeypatch.delenv("MTGPU_TARGET", raising=False)
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", None)
+        assert _cpp_ops._detect_musa_arch() == "mp_31"
+
+        monkeypatch.delenv("MATE_MUSA_ARCH_LIST")
+        monkeypatch.setenv("MTGPU_TARGET", "310")
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", None)
+        assert _cpp_ops._detect_musa_arch() == "mp_31"
+
+    def test_the_legacy_fallback_still_answers(self, monkeypatch):
+        """Behaviour is unchanged when the device cannot report properties."""
+        from torchada import _cpp_ops
+
+        def no_properties(device_id):
+            raise RuntimeError("no device")
+
+        class Empty:
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(device, "_get_properties", no_properties)
+        device.clear_device_spec_cache()
+        for name in ("MTGPU_TARGET", "VLLM_MUSA_ARCH_LIST", "MATE_MUSA_ARCH_LIST"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(_cpp_ops, "_musa_arch_cached", None)
+        monkeypatch.setattr(_cpp_ops.subprocess, "run", lambda *a, **k: Empty())
+
+        assert _cpp_ops._detect_musa_arch() == "mp_31"
+
+
+class TestMusaLoaderFallback:
+    """A failed MUSA load must not be mistaken for "torch_musa is missing"."""
+
+    def test_a_load_failure_is_not_swallowed_into_torch_loader(self, monkeypatch):
+        """Container builds with a ``noexec`` dir raise ImportError from the .so.
+
+        Falling back to torch's loader there rebuilds the same sources as CUDA and
+        reports a missing *CUDA* header, hiding the real cause.
+        """
+        import sys
+        import types
+
+        from torchada.utils import cpp_extension
+
+        class Exploding:
+            @staticmethod
+            def load(**kwargs):
+                raise ImportError("failed to map segment from shared object")
+
+        monkeypatch.setitem(sys.modules, "torch_musa.utils.musa_extension", Exploding())
+        monkeypatch.setattr(cpp_extension, "detect_platform", lambda: cpp_extension.Platform.MUSA)
+        monkeypatch.setattr(cpp_extension, "_apply_musa_patches", lambda: None)
+        monkeypatch.setattr(cpp_extension, "_musa_extension_loader", lambda: Exploding())
+
+        def torch_loader(**kwargs):  # the wrong path
+            raise AssertionError("fell back to torch's loader")
+
+        monkeypatch.setitem(
+            sys.modules, "torch.utils.cpp_extension", types.SimpleNamespace(load=torch_loader)
+        )
+
+        with pytest.raises(ImportError, match="failed to map segment"):
+            cpp_extension.load(name="x", sources=["x.mu"])
+
+    def test_the_loader_helper_answers_for_the_real_module(self, monkeypatch):
+        """The split that distinguishes "no torch_musa" from "the module failed".
+
+        The other loader tests substitute ``_musa_extension_loader``; this one runs it,
+        because the whole point of the helper is which exception it catches.
+        """
+        import sys
+        import types
+
+        from torchada.utils import cpp_extension
+
+        # ``import a.b.c`` binds the parent's attribute as well as sys.modules, and
+        # on a host where torch_musa is installed the attribute is already set, so
+        # both have to be replaced for the helper to see the stand-in.
+        def stand_in(module):
+            monkeypatch.setitem(sys.modules, "torch_musa.utils.musa_extension", module)
+            if "torch_musa.utils" in sys.modules:
+                monkeypatch.setattr(
+                    sys.modules["torch_musa.utils"], "musa_extension", module, raising=False
+                )
+
+        module = types.SimpleNamespace(load=lambda **kwargs: "built")
+        stand_in(module)
+        assert cpp_extension._musa_extension_loader() is module
+
+        # No ``load`` attribute: torch_musa installed but nothing to delegate to.
+        stand_in(types.SimpleNamespace())
+        assert cpp_extension._musa_extension_loader() is None
+
+        # Not installed at all: the one case the helper is allowed to swallow.
+        stand_in(None)
+        assert cpp_extension._musa_extension_loader() is None
+
+    def test_a_missing_extension_module_still_falls_back(self, monkeypatch):
+        import sys
+        import types
+
+        from torchada.utils import cpp_extension
+
+        monkeypatch.setattr(cpp_extension, "detect_platform", lambda: cpp_extension.Platform.MUSA)
+        monkeypatch.setattr(cpp_extension, "_apply_musa_patches", lambda: None)
+        monkeypatch.setattr(cpp_extension, "_musa_extension_loader", lambda: None)
+        calls = {}
+
+        def torch_loader(**kwargs):
+            calls["name"] = kwargs["name"]
+            return "torch-module"
+
+        monkeypatch.setitem(
+            sys.modules, "torch.utils.cpp_extension", types.SimpleNamespace(load=torch_loader)
+        )
+
+        assert cpp_extension.load(name="y", sources=["y.cpp"]) == "torch-module"
+        assert calls["name"] == "y"
+
+
 class TestTargetSelection:
     """Which arch(es) a build targets: env, then device, then the default.
 

@@ -16,9 +16,12 @@ Usage:
     load_cpp_ops()
 """
 
+import logging
 import os
 import subprocess
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 _cpp_ops_module: Optional[object] = None
 _graph_rotation_module: Optional[object] = None
@@ -29,19 +32,62 @@ _FLOCK_FILE = ".torchada.flock"
 
 def _detect_musa_arch() -> str:
     """
-    Detect MUSA GPU architecture from compute capability.
+    Detect the MUSA GPU architecture of the device this process is on.
 
-    Uses musaInfo to get compute capability and maps it to architecture:
-    - 2.1 -> mp_21 (MTT S80)
-    - 2.2 -> mp_22 (MTT S4000)
-    - 3.1 -> mp_31 (MTT S5000)
+    Precedence, and each step says which one answered:
+
+    1. the device properties, through ``torchada.musa.device`` -- the card that is
+       actually present is the authority, and no stamp check covers the ops built
+       from this value;
+    2. ``MTGPU_TARGET`` / ``VLLM_MUSA_ARCH_LIST`` / ``MATE_MUSA_ARCH_LIST`` when no
+       device answers -- an image for another card, or CI without one.  Scripts do
+       set those names to literals, which is why they cannot outrank a real card;
+    3. ``musaInfo`` as a text fallback where ``torch.musa`` cannot report;
+    4. ``mp_31`` as the last resort.
 
     Returns:
         Architecture string like "mp_21", "mp_22", or "mp_31".
-        Defaults to "mp_31" if detection fails.
+        Defaults to "mp_31" if everything else fails.
+
+    Note:
+        Step 4 is the only path that picks an arch nobody asked for, and this value
+        is passed to ``--offload-arch``.  A binary built for the wrong arch runs on
+        MUSA without reporting an error and returns wrong results, which is why the
+        build stamp was added: it turns that failure into a refusal at runtime
+        instead of a number that looks plausible.
     """
     global _musa_arch_cached
     if _musa_arch_cached is not None:
+        return _musa_arch_cached
+
+    try:
+        from .musa.device import current_device_spec
+
+        spec = current_device_spec()
+    except Exception:  # noqa: BLE001 - any probe problem falls through to the override
+        spec = None
+    if spec is not None:
+        _musa_arch_cached = spec.arch_name
+        return _musa_arch_cached
+
+    from .musa import build as _musa_build
+
+    for name in _musa_build._TARGET_ENV:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            continue
+        # Through the same parser ``arch_codes()`` uses: the value may be written
+        # ``31``, ``3.1``, ``310`` or a ``;``/``,`` list, and reading it as
+        # whitespace-separated tokens rejected the list form the parser accepts.
+        codes = _musa_build.arch_codes(_musa_build.parse_targets(value))
+        if len(codes) > 1:
+            logger.info(
+                "%s=%s names several arches; torchada's own ops are built for %s only",
+                name,
+                value,
+                "mp_" + codes[0],
+            )
+        _musa_arch_cached = "mp_" + codes[0]
         return _musa_arch_cached
 
     arch = "mp_31"  # Default fallback
@@ -86,15 +132,24 @@ def _jit_loader_module(musa: bool):
     return loader
 
 
-def _locked_load(load, name: str, musa: bool, **kwargs):
-    """Call a JIT ``load`` under a flock that, unlike torch's ``lock`` baton, dies with its holder."""
+def _locked_load(load, name: str, musa: bool, build_directory: Optional[str] = None, **kwargs):
+    """Call a JIT ``load`` under a flock that, unlike torch's ``lock`` baton, dies with its holder.
+
+    ``build_directory`` is the cache identity: the caller owns it when the object
+    depends on something torch's default layout does not encode (the arch, the
+    compiler), and the lock is taken in the same directory the build writes to --
+    locking one directory while compiling into another is no lock at all.
+    """
     import fcntl
     import warnings
 
     loader = _jit_loader_module(musa)
     if not hasattr(loader, "FileBaton"):  # newer torch guards JIT builds with a FileLock itself
+        if build_directory:
+            return load(name=name, build_directory=build_directory, **kwargs)
         return load(name=name, **kwargs)
-    build_dir = loader._get_build_directory(name, False)
+    build_dir = build_directory or loader._get_build_directory(name, False)
+    os.makedirs(build_dir, exist_ok=True)
     with open(os.path.join(build_dir, _FLOCK_FILE), "a") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -174,15 +229,37 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
         # Use MUSA extension loader if we have MUSA sources, otherwise use torch's
         if musa_sources:
             # Use torchada's load which handles MUSA properly
+            from .musa.build import (
+                build_cache_tag,
+                compiler_executable,
+                mcc_arch_flags,
+                mcc_version,
+            )
             from .utils.cpp_extension import load
 
-            # Get MUSA architecture flags
-            # Use MTGPU_TARGET env var if set, otherwise auto-detect from GPU
-            extra_cuda_cflags = []
-            mtgpu_target = os.environ.get("MTGPU_TARGET", "")
-            if not mtgpu_target:
-                mtgpu_target = _detect_musa_arch()
-            extra_cuda_cflags.append(f"--offload-arch={mtgpu_target}")
+            # One compiler identity for the whole build.  `compiler_executable()`
+            # resolves the `mcc` that torch_musa's builder will run ($PYTORCH_MCC,
+            # then $MUSA_HOME/bin/mcc) rather than whatever `mcc` is first on PATH,
+            # so the tag below names the compiler that actually produced the object.
+            compiler = compiler_executable()
+
+            # The cache directory is keyed by arch and compiler, not by the module
+            # name alone: a shared or copied `~/.cache/torch_extensions` would
+            # otherwise hand an mp_22 object to an mp_31 host, which runs and
+            # returns plausible wrong numbers.  This costs one rebuild per machine
+            # per (arch, compiler), which is what the first build costs anyway.
+            build_directory = os.path.join(
+                _jit_loader_module(True)._get_build_directory("torchada_cpp_ops", False),
+                build_cache_tag([_detect_musa_arch()], mcc_version(compiler)),
+            )
+
+            # The flag itself is built by the shared infra rather than spelled here,
+            # so the arch-name spelling is normalised in one place.  The *precedence*
+            # stays in _detect_musa_arch() -- the card that is present wins, an env
+            # literal answers only when nothing does -- because these operators are
+            # compiled on the machine that runs them, so a stamp check has nothing to
+            # add: the build and the device are the same box.
+            extra_cuda_cflags = mcc_arch_flags([_detect_musa_arch()])
 
             _cpp_ops_module = _locked_load(
                 load,
@@ -191,6 +268,7 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
                 sources=all_sources,
                 extra_include_paths=[csrc_dir],
                 extra_cuda_cflags=extra_cuda_cflags,
+                build_directory=build_directory,
                 verbose=verbose,
             )
         else:
