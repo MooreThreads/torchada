@@ -49,6 +49,26 @@ src/torchada/
 ├── _graph_rotation_src/        # C++ source of the graph-rotation aux extension
 ├── _visible_devices.py         # MUSA/CUDA_VISIBLE_DEVICES mirroring, before torch is imported
 ├── _version.py                 # version_of(): infix PEP 440 proxy used by every version gate
+├── musa/                       # Shared MUSA infra: `targets.py` is the per-arch table
+│                               #   (native_fp8 / native_fp4 / s4_sqmma_fp16 /
+│                               #   tested_mcc; stdlib only), `device.py` the probe and
+│                               #   the capability questions, `profiles.py` the recorded
+│                               #   per-arch profile reused across an arch's MP bins with
+│                               #   `verified_mp_counts()` naming the probed ones, for when
+│                               #   no board is attached, `build.py` the build identity
+│                               #   (target resolution, arch flags, cache tag, stamp,
+│                               #   optional toolchain floor, wrong-arch refusal). All three
+│                               #   import nothing outside the stdlib and none imports torch,
+│                               #   so importing one needs no device and cannot pull torch in
+│                               #   ahead of `__init__`'s visible-device sync -- but
+│                               #   `torchada/__init__` does import torch, so a host without
+│                               #   torch uses the `torchada_build` entry point instead.
+│                               #   `_cpp_ops.py` consumes `mcc_arch_flags()` and
+│                               #   `build_cache_tag()` for torchada's own JIT build (flag +
+│                               #   per-arch/per-compiler cache dir).
+├── torchada_build.py          # stdlib-only entry point: imports targets/profiles/build
+│                               #   without running `torchada/__init__`; declared as a
+│                               #   `py-modules` entry, checked by a torch-blocked test.
 ├── csrc/                       # ops.h / ops.cpp / musa_ops.mu / rope.mu + stable_compat/ headers
 ├── cuda/                       # CUDA-compatible submodules: amp, nvtx, random
 ├── utils/cpp_extension.py      # CUDAExtension / BuildExtension / CUDA_HOME + in-place source
@@ -183,6 +203,7 @@ instead of creating `test_misc.py`:
 | Opt-in CUDA availability | `test_cuda_availability_optin.py` |
 | Graphs / rotation | `test_graph_rotation.py` |
 | Triton MoE | `test_triton_patching.py`, `test_triton_descriptor_capability.py`, `test_moe_config_dir.py`, `test_moe_pipeline.py`, `test_tune_moe_recipe.py`, `test_nemotron_moe_config.py` |
+| Shared MUSA infra (arch facts, build stamp, cache tag) | `test_musa_infra.py` |
 
 **Docker containers for testing**: run the suite in the container that belongs to
 your own task or GPU lease — `<your-container>` below — never in one you did not
@@ -460,8 +481,8 @@ sync when a switch is added.
 `TORCHADA_NV_BFLOAT16_ALIASED`, `TORCHADA_HAVE_AOTI_CUDA_STREAM`,
 `TORCHADA_PROBE_LIMIT`, and `TORCHADA_TUNE_USE_GRAPH` are internal probe
 overrides written by build/probe code — do not document them as user knobs.
-`MTGPU_TARGET=mp_XX` overrides the GPU architecture (normally auto-detected via
-`musaInfo`).
+`MTGPU_TARGET=mp_XX` sets the GPU architecture when no device answers; a card that is
+present is the authority (`torchada.musa.build.resolve_targets` holds the precedence).
 
 ## Performance Benchmarking
 

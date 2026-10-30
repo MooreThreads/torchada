@@ -365,6 +365,169 @@ with torch.accelerator.stream(torch.musa.Stream()):
 `torch.musa`。唯一例外是 `2.11.0.post2` 之前的 torch_musa：已知有问题的 accelerator 内存 API
 会被强制转发到 `torch.musa`。从 `2.11.0.post2` 开始，将自动使用已修复的官方实现。
 
+## MUSA 设备事实与构建身份
+
+`torchada.musa` 是"硬件是什么、构建面向什么"的唯一一处答案，各项目不必再各自
+维护一份：per-arch 表、设备探测、没有板子时的记录档案，以及构建身份。
+
+错 arch 的 mubin 在 MUSA 上不会崩：它能加载、能运行，`musaDeviceSynchronize` 返回
+成功，输出 buffer 原样不动。所以构建侧的做法是拒绝，而不是告警。
+
+每个问题都按它给出的答案命名，并且挂在拥有这个事实的对象上——和 vllm 的
+`platform.supports_fp8()` 同一个形状：
+
+```python
+from torchada.musa import device
+
+spec = device.get_device_spec(0)   # 探测不到时返回 None
+spec.arch_name                     # "mp_31"
+spec.arch_code                     # 310，设备代码比较的那个值
+spec.mp_count                      # 这张卡运行时报告的核数
+spec.supports_native_fp8           # 硬件上有没有 FP8 运算
+spec.supports_native_fp4           # 到 MUSA 5.2.0 为止所有 arch 都是 False
+spec.has_s4_sqmma                  # 有没有 FP16 x S4 打包的 SQMMA atom
+spec.bin_profile                   # 这个 arch、这一档的记录行，没有就 None
+
+# 手里是 device id 而不是 spec 时，同样几个问题：
+device.supports_native_fp8(0)
+device.supports_native_fp4(0)
+device.has_s4_sqmma(0)
+```
+
+硬件事实不该回答的两件事。第一，**你的**框架调优过的 kernel 在这个 arch 上验证过没有，
+那是某个实现及其版本的性质，策略留在消费者那边：一个共享标志说不清验证的是哪个
+kernel、哪个版本、什么输入契约。第二，眼前这份目标码**带不带** FP8 kernel，那是构建
+事实（下面的 `BuildTargets.fp8`），不是硬件事实——wheel 没开 `-DENABLE_FP8` 时两者
+本来就不一致。
+
+每个 arch 的事实本身是一张表，"有哪些 arch、各自能干什么"可以直接读，而不必
+顺着比较逻辑推：
+
+```python
+from torchada.musa import targets
+
+targets.get_arch_spec("mp_31")     # MusaArchSpec(arch_name='mp_31', arch_code=310,
+                                   #             native_fp8=True, native_fp4=False,
+                                   #             s4_sqmma_fp16=True, tested_mcc='5.2')
+targets.native_fp8_arch_names()    # ("mp_31",)：回答的是"指令有没有"
+targets.native_fp4_arch_names()    # ()：没有 arch 有 FP4 运算
+targets.s4_sqmma_arch_names()      # ("mp_31",)
+targets.target_names()             # 我们会构建的 arch：mp_21, mp_22, mp_31
+targets.target_mp_counts("mp_31")  # (48, 52, 56, 60)：表里列出的档
+```
+
+4 bit 那个字段按**指令**命名而不是按 dtype 命名：`s4_sqmma_fp16` 说的是有一个打包的
+SQMMA atom 吃有符号 4 bit 的 B 操作数。叫 `int4` 就等于承诺这个 arch 一般意义上具备
+int4 运算，读到"支持 int4"的调用方会去开一堆并不存在的 kernel。其他能力同样是
+"一个问题一个布尔"，理由一样：泛化的 `supports_native(dtype)` 读起来是"这个 arch
+实现了 dtype X"，而这句话只有那个具体 atom 才成立。
+
+机器不在手边时（生成调优表、CI、列出 AOT 变体），同样的数字来自记录下来的画像，
+而不是现场探测：
+
+```python
+from torchada.musa import profiles
+
+profile = profiles.bin_profile("mp_31", 56)  # None 表示这个 arch 或这一档没建模
+profile.shared_memory_per_block_optin        # 196608：kernel 能*申请*到的上限
+profile.shared_memory_per_multiprocessor     # 196608（192 KiB）
+profile.regs_per_multiprocessor              # 131072
+profile.source                               # 这些数字来自哪次探测
+profiles.known_mp_counts("mp_31")            # (48, 52, 56, 60)；没记录过就是 ()
+profiles.verified_mp_counts("mp_31")         # (48, 56, 60)：真探过，不是推的
+profiles.bin_profiles("mp_31")               # 这个 arch 建模的所有档
+profiles.profile_mismatch(spec)              # 现场和记录差在哪儿，一致时 None
+```
+
+一行记录**按 arch** 存放，服务于表里为它列出的每一档。这是一个假设，所以要写明而
+不是隐含：`verified_mp_counts()` 列出真的探测过的档，`source` 指明是哪次探测，而
+里面每一档都与这行逐字段一致。因此 `None` 的含义是"这个 arch 或这一档没有建模"，而不是
+"我没有这个数字"。现场机器与记录不一致时，`get_device_spec()` 按每个档告警一次：
+以探测为准，但不让过期的表被静默使用。
+
+```python
+from torchada.musa import build
+
+build.compiler_executable()                  # 构建真正会跑的那个 mcc
+build.mcc_version()                          # "5.2.0"；解析不出时为 "unknown"
+build.check_toolchain(["mp_31"], "5.1.0")    # 只回报版本，什么都不拒
+build.check_toolchain(["mp_31"], "5.1.0", floor="5.2")   # 抛错：这是策略下限
+build.check_toolchain(["mp_31"], "unknown")  # 这里没有编译器：跳过，不判失败
+build.single_arch_define(targets=["mp_31"])  # "-D__MUSA_ARCH_LIST__=310"
+build.mcc_arch_flags(["mp_22", "mp_31"])     # 每个 target 一个 --offload-arch
+# 三个消费者各用一种写法；一份列表给出三种写法，避免三处手写漂移：
+build.arch_list_forms(["mp_31", "mp_22"])    # {'target': 'mp_22,mp_31',
+                                             #  'torch': '22;31', 'mate': '2.2;3.1'}
+build.build_cache_tag(["mp_22", "mp_31"])    # "mp_22_mp_31__mcc5.2.0"（JIT 缓存目录）
+build.write_build_stamp(package_dir, ["mp_31"], fp8=True)   # 在 setup.py 里调用
+build.assert_build_matches_device(spec, stamp)              # 不匹配即抛错
+build.assert_build_matches_device(                          # 也可以一次调用：读 stamp + 比较
+    spec, module_name="vllm_musa._build_stamp", name="vllm_musa"
+)
+
+# 这次构建该面向哪个 arch？setup.py 和 JIT 共用同一条规则：
+targets = build.resolve_targets(os.environ.get(build.TARGET_ENV), device_arch="mp_31")
+targets.names                 # ("mp_31",)；fat 构建是 ("mp_21", "mp_22")
+targets.fp8                   # 这次构建能不能带 -DENABLE_FP8
+targets.fp4                   # 以及 -DENABLE_FP4（目前没有 arch 有）
+targets.source                # "environment" | "device" | "default"
+build.uniform_native_fp8(targets)            # 需要的话自己选：拒掉 FP8 不一致的组合
+build.compiler_arch_list("31", targets)      # 该用的 TORCH_MUSA_ARCH_LIST
+```
+
+torchada 自己的算子也从这个模块取这两个答案：`load_cpp_ops()` 用 `mcc_arch_flags()`
+生成 `--offload-arch`，并把产物缓存在 `torchada_cpp_ops/<build_cache_tag()>` 下，即按
+arch 和编译器分目录——这正是防止共享缓存把另一张卡的产物递过来的原因。缓存目录里的
+编译器来自 `compiler_executable()`，解析顺序与构建器一致：设了 `$PYTORCH_MCC` 就是
+它，否则是 `<home>/bin/mcc`，其中 `home` 依次取 `$MUSA_HOME`/`$MUSA_PATH`、`PATH` 上
+那个 `mcc` 的上一级、以及 `/usr/local/musa`。这正是 `torch_musa` 的扩展构建器写进
+ninja 文件的那条命令；它可以是带启动器的命令行（`ccache /path/to/mcc`），所以
+`compiler_argv()` 会把它拆成 argv，读版本号时不经过 shell。读 `PATH` 上碰巧排第一的
+`mcc`、或者读 `$MCC`，都会给目录打上一个"一行目标码都不是它编的"版本号。
+
+`torchada.musa.build` 只依赖标准库，因此项目的 `setup.py` 可以在它要构建的包还
+无法 import 的时候就读到 arch 表并写入 stamp：
+
+```python
+import torchada_build            # 不 import torch，也不跑 `torchada/__init__`
+
+torchada_build.targets.get_arch_spec("mp_31").native_fp8   # True
+torchada_build.build.build_cache_tag(["mp_31"], "5.2.0")   # "mp_31__mcc5.2.0"
+```
+
+`import torchada_build` 把 `targets.py`、`profiles.py`、`build.py` 以一个私有包名
+加载，`torchada` 包本身一行都不执行。反过来，`from torchada.musa import build` 即使
+那些模块只用标准库，也**不是**纯构建路径：包的 `__init__` 会 import torch，所以这种
+写法需要装 torch（入口点加载的是同一批源文件，但不是同一批模块对象，别在一个进程里
+混用两种写法）。这个性质是查出来的而不是声称的：有个测试在屏蔽 `torch`、`torch_musa`
+和 `numpy` 的子进程里 import 这个入口点，并断言 `torch` 和 `torchada` 都没有进
+`sys.modules`。
+
+JIT 构建用 `resolve_targets(..., default=None)`：它没有 stamp 可以事后校验，所以问不出
+arch 时必须报错，而不是猜一个然后缓存下来。
+
+几条约定：
+
+- 设备 arch 取自 `get_device_properties().major/minor`，不要用
+  `torch_musa.get_arch_list()`——那报的是**wheel** 编给谁，属于
+  `build.read_build_stamp()` 的职责。
+- `resolve_targets()` 只回答目标集合；FP8 与非 FP8 混编是否允许是**源码布局**的问题，
+  所以是 `uniform_native_fp8(targets)`，只有那些无条件编译 FP8 源码的工程才调它。
+  `-DENABLE_FP8` 是整个编译期一个开关，因此 `targets.fp8` 取各 arch 答案的 `any`。
+- 失败的探测不缓存：设备还没就绪时的一次调用，不能把整个进程钉在通用路径上。
+- 没有 stamp 表示**未知**而非不匹配，所以 editable 安装照常运行；stamp 指向别的
+  arch 才拒绝。
+- `MusaArchSpec.tested_mcc` 记的是这个 arch 真的被构建、验证过的编译器（`mp_31`：
+  5.2）。它是证据，不是下限：它什么都不拒，因为"我们验过 5.2"并不能推出"5.1 编不了
+  这个 arch"。有支持策略的工程自己把那个下限传给 `check_toolchain(floor=...)`；版本
+  为 `"unknown"` 时（这台机器上没有 `mcc`，消费 wheel 时很正常）跳过检查，而不是让
+  一个并不在本机发生的构建失败。
+- 每个入口点用同一套规则归一化 arch，所以 `"21"`、`"2.1"`、`"210"`、`"mp_21"` 到
+  了 flag、缓存目录和 stamp 上完全一致，其他写法一律拒绝而不是按比例换算。名字在
+  `arch_codes()` 里只物化一次，因此传进去的迭代器不会被提前消耗掉——在那里空 flag
+  列表不是错误，是 mcc 自己的多 arch 默认值，也就是这些函数存在的意义所要防的
+  "跑在错 arch 上"的产物。
+
 ## 环境变量
 
 | 环境变量 | 默认值 | 作用 |
@@ -522,7 +685,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.103
+torchada>=0.1.104
 ```
 
 ### 步骤 2：条件导入

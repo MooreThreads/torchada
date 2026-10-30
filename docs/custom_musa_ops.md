@@ -124,7 +124,7 @@ _cuda_releasePool(device, pool_id)
 | `TORCHADA_CPP_OPS_VERBOSE=1` | Show compilation output |
 | `TORCHADA_DEBUG_CPP_OPS=1` | Log operator calls to stdout |
 | `TORCHADA_DISABLE_OP_OVERRIDE_<NAME>=1` | Disable specific operator override |
-| `MTGPU_TARGET=mp_XX` | Override GPU architecture detection |
+| `MTGPU_TARGET=mp_XX` | Architecture when no device answers (the device wins) |
 
 ### Disabling Specific Operators
 
@@ -141,7 +141,9 @@ This check happens at **registration time** (when the extension is loaded), not 
 
 ## GPU Architecture
 
-torchada auto-detects the GPU architecture using `musaInfo`:
+The arch is read from `major.minor` in the device properties, never guessed from a
+product name or from `torch_musa.get_arch_list()` (which reports what the *wheel*
+was built for):
 
 | GPU | Compute Capability | Architecture |
 |-----|-------------------|--------------|
@@ -149,7 +151,30 @@ torchada auto-detects the GPU architecture using `musaInfo`:
 | MTT S4000 | 2.2 | mp_22 |
 | MTT S5000 | 3.1 | mp_31 |
 
-Override with: `export MTGPU_TARGET=mp_22`
+There are two build paths and they read the target in opposite orders, on purpose.
+
+**torchada's own operators** (`torchada/csrc`, compiled on first import by
+`load_cpp_ops()`): the device comes first, and `MTGPU_TARGET` /
+`VLLM_MUSA_ARCH_LIST` / `MATE_MUSA_ARCH_LIST` (then `musaInfo`) answer only when no
+device does. These operators are compiled on the machine that runs them, so the card
+in the box is the authority — a stale literal baked into an image would otherwise
+produce an object that runs on another card and returns plausible wrong numbers.
+
+**A wheel or a project extension** built through `torchada.musa.build.resolve_targets()`
+reads the environment first and the device second. A build host must be able to state
+its target, including when a card of a different class happens to be in the box
+(cross-compiling, a mixed CI fleet). With `default=None` (the JIT form) and nothing
+set and no device, it raises rather than guessing.
+
+On a CPU-only build server nothing is detected, which is the normal case for a wheel:
+the environment is the input, and `MTGPU_TARGET=mp_22` is how you state it.
+
+The built object is cached under
+`<torch extensions>/torchada_cpp_ops/<arch>__mcc<version>/`, keyed by the arch and the
+compiler rather than by the module name alone. That costs one compile per machine per
+(arch, compiler) — the same first build you would pay anyway — and buys the guarantee
+that a copied or shared cache cannot hand an `mp_22` object to an `mp_31` host, where
+it would run and return plausible wrong numbers.
 
 ## Best Practices
 
