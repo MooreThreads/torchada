@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchada"
-version = "0.1.103"
+version = "0.1.104"
 description = "Adapter package for torch_musa to act exactly like PyTorch CUDA"
 readme = "README.md"
 license = {text = "MIT"}
@@ -40,6 +40,12 @@ Repository = "https://github.com/MooreThreads/torchada"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# `torchada_build` is a top-level module on purpose: importing it must not run
+# `torchada/__init__`, which imports torch.  A `setup.py` or a PEP 517 backend gets
+# the arch table and the cache tag without a torch install in the build environment.
+[tool.setuptools]
+py-modules = ["torchada_build"]
 
 [tool.setuptools.package-data]
 torchada = [

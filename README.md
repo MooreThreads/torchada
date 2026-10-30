@@ -403,6 +403,200 @@ missing. The exception is torch_musa releases before `2.11.0.post2`, where
 known-broken accelerator memory APIs are forced through `torch.musa`. Starting
 with `2.11.0.post2`, the fixed official implementations are used automatically.
 
+## MUSA Device Facts and Build Identity
+
+`torchada.musa` is one place to ask what the hardware is and what a build targets,
+instead of every project deriving its own copy: the per-arch table, the device
+probe, the recorded profile for when no board is attached, and the build identity.
+
+A wrong-arch mubin is not a crash on MUSA: it loads, runs, and leaves the output
+buffer untouched while `musaDeviceSynchronize` reports success. That is why the
+build side is a refusal rather than a warning.
+
+Every question is named after the answer it gives, and lives on the object that
+owns the fact -- the same shape `vllm` uses for `platform.supports_fp8()`:
+
+```python
+from torchada.musa import device
+
+spec = device.get_device_spec(0)   # None when the probe cannot answer
+spec.arch_name                     # "mp_31"
+spec.arch_code                     # 310, the value device code compares against
+spec.mp_count                      # the count this card reports at runtime
+spec.supports_native_fp8           # FP8 arithmetic in hardware
+spec.supports_native_fp4           # False on every arch as of MUSA 5.2.0
+spec.has_s4_sqmma                  # the packed FP16 x S4 SQMMA atom
+spec.bin_profile                   # the recorded row for this arch and bin, or None
+
+# The same questions when you hold a device id instead of a spec:
+device.supports_native_fp8(0)
+device.supports_native_fp4(0)
+device.has_s4_sqmma(0)
+```
+
+Two answers a hardware fact must not give. Whether the tuned kernels of *your*
+framework have been validated on this arch is a property of that implementation and
+its version, so the policy stays with the consumer: a shared flag cannot say which
+kernel, which version or which input contract was validated. And whether the object
+code in front of you *carries* the FP8 kernels is a build fact (`BuildTargets.fp8`
+below), not a hardware one -- the two disagree whenever a wheel is built without
+`-DENABLE_FP8`.
+
+The per-arch facts themselves are one table, so "what arches exist and what can
+each do" is a file you can read rather than a comparison to trace:
+
+```python
+from torchada.musa import targets
+
+targets.get_arch_spec("mp_31")     # MusaArchSpec(arch_name='mp_31', arch_code=310,
+                                   #             native_fp8=True, native_fp4=False,
+                                   #             s4_sqmma_fp16=True, tested_mcc='5.2')
+targets.native_fp8_arch_names()    # ("mp_31",): the instructions exist
+targets.native_fp4_arch_names()    # (): no arch has FP4 arithmetic
+targets.s4_sqmma_arch_names()      # ("mp_31",)
+targets.target_names()             # the arches we build for: mp_21, mp_22, mp_31
+targets.target_mp_counts("mp_31")  # (48, 52, 56, 60): the bins the table lists
+```
+
+The 4-bit field is named after the instruction rather than after a dtype:
+`s4_sqmma_fp16` says that one packed SQMMA atom takes a signed 4-bit B operand.
+Calling it `int4` would promise arithmetic the arch does not have in general, and a
+caller reading "int4 support" would enable kernels that do not exist. Every other
+capability is one boolean per question for the same reason: a generic
+`supports_native(dtype)` reads as "this arch implements dtype X", which is exactly
+the claim only the specific atom makes true.
+
+When the card is not in front of you -- a tuning table to generate, a CI job, an
+AOT variant list -- the same facts come from the recorded profile instead of a
+probe:
+
+```python
+from torchada.musa import profiles
+
+profile = profiles.bin_profile("mp_31", 56)  # None: no row for that arch or bin
+profile.shared_memory_per_block_optin        # 196608 -- what a kernel may request
+profile.shared_memory_per_multiprocessor     # 196608 (192 KiB)
+profile.regs_per_multiprocessor              # 131072
+profile.source                               # which probe these numbers came from
+profiles.known_mp_counts("mp_31")            # (48, 52, 56, 60); () when unrecorded
+profiles.verified_mp_counts("mp_31")         # (48, 56, 60): probed, not inferred
+profiles.bin_profiles("mp_31")               # every modelled bin of the arch
+profiles.profile_mismatch(spec)              # how the live board differs, or None
+```
+
+The row is per *arch* and serves every bin the table lists for it. That is an
+assumption, so it is visible rather than implicit: `verified_mp_counts()` names the
+bins that were actually probed, `source` names the probe, and every bin in that list
+agreed field for field. `None` therefore means "this arch, or this bin, is not
+modelled" -- never "a number I did not have". When a live board disagrees with its
+row, `get_device_spec()` warns once per bin with the differing fields: the probe
+wins, and a stale table is not applied silently.
+
+```python
+from torchada.musa import build
+
+build.compiler_executable()                  # the mcc the build will actually run
+build.mcc_version()                          # "5.2.0"; "unknown" when unparsable
+build.check_toolchain(["mp_31"], "5.1.0")     # reports the version, refuses nothing
+build.check_toolchain(["mp_31"], "5.1.0", floor="5.2")   # raises: a policy floor
+build.check_toolchain(["mp_31"], "unknown")   # no compiler here: skipped, not failed
+build.single_arch_define(targets=["mp_31"])   # "-D__MUSA_ARCH_LIST__=310"
+build.mcc_arch_flags(["mp_22", "mp_31"])      # ["--offload-arch=mp_22", "--offload-arch=mp_31"]
+build.build_cache_tag(["mp_22", "mp_31"])     # "mp_22_mp_31__mcc5.2.0" (JIT cache dir)
+build.write_build_stamp(package_dir, ["mp_31"], fp8=True)   # from setup.py
+build.assert_build_matches_device(spec, stamp)              # raises on mismatch
+build.assert_build_matches_device(                          # or one call: read + compare
+    spec, module_name="vllm_musa._build_stamp", name="vllm_musa"
+)
+
+# Which arch(es) should this build target?  One rule, shared by setup.py and JIT:
+targets = build.resolve_targets(os.environ.get(build.TARGET_ENV), device_arch="mp_31")
+targets.names                 # ("mp_31",) or ("mp_21", "mp_22") for a fat build
+targets.fp8                   # may this build carry -DENABLE_FP8?
+targets.fp4                   # ... and -DENABLE_FP4 (no arch has it yet)
+targets.source                # "environment" | "device" | "default"
+build.uniform_native_fp8(targets)   # opt in: refuse a set whose arches disagree
+build.compiler_arch_list("31", targets)      # the TORCH_MUSA_ARCH_LIST value to build with
+
+# Three consumers read the target, each in its own spelling.  One list, three forms:
+build.arch_list_forms(["mp_31", "mp_22"])
+# {'target': 'mp_22,mp_31', 'torch': '22;31', 'mate': '2.2;3.1'}
+```
+
+torchada's own operators take the same two answers from this module: `load_cpp_ops()`
+builds `--offload-arch` with `mcc_arch_flags()` and caches the object under
+`torchada_cpp_ops/<build_cache_tag()>`, i.e. per arch and compiler, which is what
+stops a shared cache from serving another card's object. The tag's compiler comes
+from `compiler_executable()`, which resolves like the builder does: `$PYTORCH_MCC` when
+set, otherwise `<home>/bin/mcc` where `home` is `$MUSA_HOME`/`$MUSA_PATH`, then the
+`mcc` on `PATH`, then `/usr/local/musa`. That is the command `torch_musa`'s extension
+builder actually writes into its ninja file, and it may carry a launcher
+(`ccache /path/to/mcc`), so `compiler_argv()` splits it into an argv and the version is
+read without a shell. Reading whichever `mcc` happens to be first on `PATH`, or `$MCC`,
+would tag a directory with a version that produced none of its object code.
+
+`torchada.musa.build` imports only the standard library, so a project's `setup.py`
+can read the arch table and write a stamp before the package it builds is
+importable:
+
+```python
+import torchada_build            # no torch, no `torchada/__init__`
+
+torchada_build.targets.get_arch_spec("mp_31").native_fp8   # True
+torchada_build.build.build_cache_tag(["mp_31"], "5.2.0")   # "mp_31__mcc5.2.0"
+```
+
+`import torchada_build` loads `targets.py`, `profiles.py` and `build.py` under a
+private package name, so nothing under `torchada` is executed. A plain
+`from torchada.musa import build` is *not* a build-only path even though those
+modules are stdlib-only: the package `__init__` imports torch, so that spelling
+needs a torch install. (The modules loaded by the entry point are the same source
+files but not the same module objects, so do not mix the two spellings in one
+process.) The property is checked rather than promised: a test imports the entry
+point with `torch`, `torch_musa` and `numpy` blocked and asserts that neither
+`torch` nor `torchada` ends up in `sys.modules`.
+
+`resolve_targets(..., default=None)` is the variant a JIT build uses: with no
+stamp to check later, an unanswerable arch has to raise rather than be guessed and
+cached.
+
+Rules worth knowing:
+- A fat build is a set, not a bigger number: `arch_codes()`, `mcc_arch_flags()`,
+  `build_cache_tag()` and the stamp all take several targets (`mcc` bundles repeated
+  `--offload-arch` into one `__CLANG_OFFLOAD_BUNDLE__`). `single_arch_define()`
+  cannot, because the template macro is compared against a single `__MUSA_ARCH__`;
+  a fat template branches on `__MUSA_ARCH__` instead.
+- `resolve_targets()` answers the target set; whether a *mixed* FP8/non-FP8 set is
+  legal is a source-layout question, so it is `uniform_native_fp8(targets)` and only
+  the projects whose layout compiles those sources unconditionally call it.
+  `-DENABLE_FP8` is one flag for the whole compilation, so `targets.fp8` is `any`
+  over the arch answers.
+- No MUSA arch has FP4 arithmetic today, so `NATIVE_FP4_ARCHS` is empty and every
+  arch answers `False`. That is a statement about instructions, not about FP4
+  checkpoints, which run through dequantisation.
+- `MusaArchSpec.tested_mcc` records the compiler the arch has actually been built
+  and validated with (`mp_31`: 5.2). It is evidence, not a floor: it refuses
+  nothing, because "we tested 5.2" does not establish that 5.1 cannot build the same
+  arch. A project with a support policy passes that minimum to
+  `check_toolchain(floor=...)` itself, and a version of `"unknown"` (no `mcc` on
+  this host, normal when consuming a wheel) skips the check rather than failing a
+  build that is not happening here.
+- Every entry point normalises the arch the same way, so `"21"`, `"2.1"`, `"210"` and
+  `"mp_21"` reach the flags, the cache tag and the stamp identically; anything else
+  is refused rather than scaled. The names are materialised once inside
+  `arch_codes()`, so an iterator argument cannot be spent before the flags are
+  produced, and an empty selection -- `[]`, `()`, `iter(())`, a spent generator --
+  raises rather than returning no flags at all: no `--offload-arch` is mcc's own
+  multi-arch default, i.e. the wrong-arch binary these functions exist to prevent.
+
+- The arch of a device comes from `get_device_properties().major/minor`, never
+  from `torch_musa.get_arch_list()` — that reports what the **wheel** was built
+  for, which is `build.read_build_stamp()`'s job.
+- A failed probe is not cached: a probe taken before the device is ready must not
+  pin a process to the generic path for its whole lifetime.
+- An absent stamp means *unknown*, not *mismatch*, so an editable install still
+  runs; a stamp naming another arch is refused.
+
 ## Environment Variables
 
 | Variable | Default | Effect |
@@ -568,7 +762,7 @@ nvJPEG, libtorch-stable, FlashInfer, cutlass, thrust, ...).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.103
+torchada>=0.1.104
 ```
 
 ### Step 2: Conditional Import
