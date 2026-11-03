@@ -2015,6 +2015,10 @@ def _patch_torch_c_exports():
     # counterpart so the import chain keeps working.
     _CUDA_TO_MUSA_C_EXPORTS = {
         "_cuda_CUDAAllocator_AllocatorState": "_musa_MUSAAllocator_AllocatorState",
+        # cuBLAS-named bindings that torch's Python layer calls but this build
+        # only binds under their muBLAS names.
+        "_cuda_clearCublasWorkspaces": "_musa_clearMublasWorkspaces",
+        "_cuda_getCurrentBlasHandle": "_musa_getCurrentBlasHandle",
     }
 
     for cuda_name, musa_name in _CUDA_TO_MUSA_C_EXPORTS.items():

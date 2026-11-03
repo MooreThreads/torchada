@@ -4148,3 +4148,57 @@ class TestStableHeaderBackport:
 
         # Should return immediately (is_musa_platform() guard) without error.
         ce._ensure_stable_headers_patched()
+
+
+_BLAS_C_EXPORTS = (
+    ("_cuda_clearCublasWorkspaces", "_musa_clearMublasWorkspaces"),
+    ("_cuda_getCurrentBlasHandle", "_musa_getCurrentBlasHandle"),
+)
+
+
+class TestCublasToMublasExports:
+    """cuBLAS-named torch._C bindings follow their muBLAS counterparts."""
+
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("cuda_name,musa_name", _BLAS_C_EXPORTS)
+    def test_aliases_to_mublas_counterpart(self, cuda_name, musa_name):
+        """torch's Python layer calls these by their CUDA names."""
+        import torch
+
+        import torchada  # noqa: F401  (apply patches on import)
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        torch_musa = pytest.importorskip("torch_musa")
+        musac = getattr(torch_musa, "_MUSAC", None)
+        if musac is None or not hasattr(musac, musa_name):
+            pytest.skip(f"torch_musa._MUSAC without {musa_name}")
+
+        assert hasattr(torch._C, cuda_name)
+        assert getattr(torch._C, cuda_name) is getattr(musac, musa_name)
+
+    @pytest.mark.gpu
+    def test_current_blas_handle_is_reachable(self):
+        """torch.cuda.current_blas_handle() is the in-tree caller."""
+        import torch
+
+        import torchada  # noqa: F401  (apply patches on import)
+
+        if not torchada.is_musa_platform():
+            pytest.skip("Only applicable on MUSA platform")
+
+        torch_musa = pytest.importorskip("torch_musa")
+        assert torch.cuda.current_blas_handle() == torch_musa._MUSAC._musa_getCurrentBlasHandle()
+
+    def test_existing_binding_is_not_overwritten(self):
+        """Off MUSA torchada adds nothing; a native binding stays untouched."""
+        import torch
+
+        import torchada  # noqa: F401  (apply patches on import)
+
+        if torchada.is_musa_platform():
+            pytest.skip("Only applicable off MUSA platform")
+        shim = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if shim is not None:
+            assert "torch_musa" not in getattr(shim, "__module__", "")
