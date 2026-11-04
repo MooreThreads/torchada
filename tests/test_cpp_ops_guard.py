@@ -5,6 +5,7 @@ import fcntl
 import sys
 import types
 import warnings
+from contextlib import nullcontext
 
 import pytest
 import torch.utils.cpp_extension as cpp_ext
@@ -109,3 +110,37 @@ def test_musa_loader_build_directory_is_used(tmp_path, monkeypatch):
         kwargs = _cpp_ops._locked_load(lambda **kw: kw, name=EXT_NAME, musa=True)
     assert kwargs["build_directory"] == str(musa_dir)
     assert not (musa_dir / "lock").exists()
+
+
+@pytest.mark.musa
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32", "float64"])
+@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("custom_stream", [False, True])
+def test_log_uses_input_device_and_stream(is_musa, dtype_name, inplace, strided, custom_stream):
+    """An input on GPU 1 must not launch the log kernel on the current GPU 0."""
+    import torch
+
+    if not is_musa or torch.musa.device_count() < 2:
+        pytest.skip("Requires two MUSA GPUs")
+
+    dtype = getattr(torch, dtype_name)
+    reference = torch.linspace(0.01, 16, 64, dtype=dtype).reshape(2, 32)
+    stream = torch.musa.Stream(device=1) if custom_stream else torch.musa.default_stream(1)
+    with torch.musa.stream(stream) if custom_stream else nullcontext():
+        tensor = reference.to("musa:1")
+        if strided:
+            tensor = tensor[:, ::2]
+            reference = reference[:, ::2]
+        torch.musa.synchronize(1)
+        with torch.musa.device(0):
+            result = tensor.log_() if inplace else torch.log(tensor)
+            assert torch.musa.current_device() == 0
+        stream.synchronize()
+    # Also surface erroneous launches on GPU 0 before comparing CPU values.
+    torch.musa.synchronize(0)
+    expected = reference.double().log().to(dtype)
+    torch.testing.assert_close(result.cpu(), expected)
+    assert result.device == tensor.device
+    if inplace:
+        assert result.data_ptr() == tensor.data_ptr()
