@@ -16,6 +16,8 @@ torchada 是一个适配器，让 [torch_musa](https://github.com/MooreThreads/t
 
 许多 PyTorch 项目使用 `torch.cuda.*` API 为 NVIDIA GPU 编写。要在摩尔线程 GPU 上运行这些项目，通常需要把每个 `cuda` 引用改成 `musa`。torchada 通过在运行时自动将 CUDA API 调用转换为 MUSA 等效调用来消除这一问题。
 
+MUSA `log` / `log_` 算子使用输入张量所在设备及该设备的当前 stream，即使调用方当前选中另一张 GPU；调用后恢复原来的当前设备。
+
 ## 前置条件
 
 - **torch_musa**：必须安装 [torch_musa](https://github.com/MooreThreads/torch_musa)（提供 PyTorch 的 MUSA 支持）

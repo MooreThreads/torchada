@@ -11,6 +11,7 @@
 #include <ATen/musa/MUSAContext.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_like.h>
+#include <c10/core/DeviceGuard.h>
 #include <c10/core/ScalarType.h>
 #include <c10/util/Optional.h>
 #include <limits>
@@ -285,6 +286,7 @@ __global__ void log_kernel(
 }
 
 at::Tensor log_musa_impl(const at::Tensor& self) {
+    const c10::DeviceGuard device_guard(self.device());
     log_op_call("log");
     TORCH_CHECK(
         at::isFloatingType(self.scalar_type()),

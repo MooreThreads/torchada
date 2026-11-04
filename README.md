@@ -16,6 +16,8 @@ torchada is an adapter that makes [torch_musa](https://github.com/MooreThreads/t
 
 Many PyTorch projects are written for NVIDIA GPUs using `torch.cuda.*` APIs. To run these on Moore Threads GPUs, you would normally need to change every `cuda` reference to `musa`. torchada eliminates this by automatically translating CUDA API calls to MUSA equivalents at runtime.
 
+The MUSA `log` / `log_` overrides use the input tensor's device and its current stream, even when another GPU is current. The caller's current device is restored after dispatch.
+
 ## Prerequisites
 
 - **torch_musa**: You must have [torch_musa](https://github.com/MooreThreads/torch_musa) installed (this provides MUSA support for PyTorch)
