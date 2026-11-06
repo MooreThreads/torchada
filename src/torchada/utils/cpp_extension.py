@@ -1402,6 +1402,20 @@ def _get_build_extension_class():
 BuildExtension = _get_build_extension_class()
 
 
+def _musa_extension_loader():
+    """Return torch_musa's extension module when it provides ``load``, else ``None``.
+
+    Only the import of ``torch_musa.utils.musa_extension`` is guarded: failing it
+    means torch_musa is unavailable. An ImportError raised by ``load`` itself, such
+    as one from importing the module it has just built, must reach the caller.
+    """
+    try:
+        import torch_musa.utils.musa_extension as musa_ext
+    except ImportError:
+        return None
+    return musa_ext if hasattr(musa_ext, "load") else None
+
+
 def load(
     name: str,
     sources: List[str],
@@ -1444,30 +1458,26 @@ def load(
         # Ensure patches are applied
         _apply_musa_patches()
 
-        try:
-            import torch_musa.utils.musa_extension as musa_ext
-
+        musa_ext = _musa_extension_loader()
+        if musa_ext is not None:
             # Use MUSA's load function if available
             # Note: MUSA uses different parameter names:
             #   extra_cuda_cflags -> extra_musa_cflags
             #   with_cuda -> with_musa
-            if hasattr(musa_ext, "load"):
-                return musa_ext.load(
-                    name=name,
-                    sources=sources,
-                    extra_cflags=extra_cflags,
-                    extra_musa_cflags=extra_cuda_cflags,
-                    extra_ldflags=extra_ldflags,
-                    extra_include_paths=extra_include_paths,
-                    build_directory=build_directory,
-                    verbose=verbose,
-                    with_musa=with_cuda,
-                    is_python_module=is_python_module,
-                    is_standalone=is_standalone,
-                    keep_intermediates=keep_intermediates,
-                )
-        except ImportError:
-            pass
+            return musa_ext.load(
+                name=name,
+                sources=sources,
+                extra_cflags=extra_cflags,
+                extra_musa_cflags=extra_cuda_cflags,
+                extra_ldflags=extra_ldflags,
+                extra_include_paths=extra_include_paths,
+                build_directory=build_directory,
+                verbose=verbose,
+                with_musa=with_cuda,
+                is_python_module=is_python_module,
+                is_standalone=is_standalone,
+                keep_intermediates=keep_intermediates,
+            )
 
     # Fallback to torch's load
     from torch.utils.cpp_extension import load as torch_load
