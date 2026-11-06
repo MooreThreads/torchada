@@ -321,6 +321,51 @@ longer makes every later `import torchada` block forever in the JIT loader's
 unavailable (some NFS mounts), torchada warns and falls back to torch's original
 behaviour.
 
+### MUSA Architectures
+
+`torchada.arch` holds the MUSA architecture table and resolves the archs a build
+compiles for. Build scripts that already use `arch` for the CPU architecture import it
+under another name:
+
+```python
+from torchada import arch as musa_arch
+
+archs = musa_arch.target_archs(env=("MTGPU_TARGET", "TORCH_MUSA_ARCH_LIST"))
+musa_arch.arch_flags(archs)       # ["--offload-arch=mp_31"]: mcc flags for JIT builds
+musa_arch.torch_arch_list(archs)  # "31": the TORCH_MUSA_ARCH_LIST value for MUSAExtension
+musa_arch.cache_tag(archs)        # "mp31_mu50200" with torch.version.musa "50200" (MUSA 5.2.0)
+archs[0].fp8                      # True: read from the table row
+```
+
+`musa_arch.ARCHS` is the table: the archs torchada's consumers build for and validate
+against. It has one row, `mp_31` (MTT S5000), with FP8 conversion and FP8 MMA and
+without FP4 conversion or FP4 MMA. A `MusaArch` is identified by its compute capability
+alone, so `MusaArch(3, 1) in ARCHS`; an arch without a row is still a valid compile
+target, with every feature `False`.
+
+`target_archs(env, *, default="mp_31", check_device=False)` returns the archs,
+de-duplicated and sorted:
+
+1. The first variable in `env` with a non-empty value decides, and later ones are not
+   read. Its value is split on `;` and whitespace; each token is `mp_XY`, `mpXY`, `X.Y`
+   or `XY`. A malformed token, or a value with no token, raises `ValueError`.
+2. Otherwise the arch of every visible device: read in process when MUSA is already
+   initialized, else from `musaInfo` (on `PATH`, else in `bin/` of torchada's
+   `CUDA_HOME`: `$MUSA_HOME`, else `/usr/local/musa` or `/opt/musa`), once per process.
+3. Otherwise `default`.
+
+With `check_device=True`, meant for JIT builds, every visible device's arch must be in
+the result, else `RuntimeError`, because a kernel built for another arch does not launch
+there (`musaErrorInvalidDeviceFunction`). The check runs only when MUSA is already
+initialized in the process: it never initializes MUSA and never starts a subprocess.
+
+Each variable keeps its owner's form: `MTGPU_TARGET=mp_31` (one arch),
+`TORCH_MUSA_ARCH_LIST="31;32"` (torch_musa), `MATE_MUSA_ARCH_LIST="3.1 3.2"` (MATE).
+torchada's own operator-override extension resolves with `env=("MTGPU_TARGET",)` and no
+device check, and builds in `torchada_cpp_ops/<cache_tag>/` under torch_musa's
+extension root, so builds for different archs or MUSA toolkits never share a directory.
+The stale-`lock` recovery above runs inside that sub-directory.
+
 ### Custom Ops
 
 ```python
@@ -420,6 +465,8 @@ with `2.11.0.post2`, the fixed official implementations are used automatically.
 | `TORCHADA_CPP_OPS_VERBOSE` | `0` | `1` prints the C++ operator-override build log |
 | `TORCHADA_DEBUG_CPP_OPS` | `0` | `1` logs operator-override calls |
 | `TORCHADA_DISABLE_OP_OVERRIDE_<OP_NAME>` | unset | `1` disables one operator override, e.g. `TORCHADA_DISABLE_OP_OVERRIDE_log=1` |
+| `MTGPU_TARGET` | visible devices, else `mp_31` | One arch, e.g. `mp_31`, for torchada's operator-override build |
+| `TORCH_MUSA_ARCH_LIST` | unset | torch_musa's `MUSAExtension` arch list, e.g. `31;32`; not read by torchada, rendered by `torchada.arch.torch_arch_list()` |
 
 ## Platform Detection
 
@@ -529,6 +576,11 @@ once, when the patches are applied, so set it in the environment (or in
 | `nccl_to_mccl_name(name)` | Convert `ncclXxx` → `mcclXxx` |
 | `cublas_to_mublas_name(name)` | Convert `cublasXxx` → `mublasXxx` |
 | `curand_to_murand_name(name)` | Convert `curandXxx` → `murandXxx` |
+| `arch.target_archs(env)` | MUSA archs to compile for: first set variable in `env`, else visible devices, else `mp_31` |
+| `arch.arch_flags(archs)` | mcc `--offload-arch=mp_XY` flags |
+| `arch.torch_arch_list(archs)` | `TORCH_MUSA_ARCH_LIST` value, e.g. `31;32` |
+| `arch.cache_tag(archs)` | Build-directory component for the archs and MUSA toolkit |
+| `arch.ARCHS` / `arch.MusaArch` | The MUSA arch table and its entries (`name`, `capability`, `fp8`, `fp4`) |
 
 **Note**: `torch.cuda.is_available()` is intentionally NOT redirected by default — it returns `False` on MUSA. This allows proper platform detection. Set `TORCHADA_FORCE_CUDA_AVAILABLE=1` before importing torchada to have it report `torch.musa.is_available()` instead (see [Known Limitation](#known-limitation)). For GPU availability checks, see the `has_gpu()` pattern in [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection).
 

@@ -44,6 +44,8 @@ src/torchada/
 │                               #   cusparse, cutlass, thrust, nccl, nvjpeg, flashinfer,
 │                               #   libtorch_stable, data_types, device
 ├── _runtime.py                 # ctypes symbol translation (cuda_to_musa_name, nccl_to_mccl_name, ...)
+├── arch.py                     # MUSA arch table (ARCHS) + target_archs(), arch_flags(),
+│                               #   torch_arch_list(), cache_tag(); stdlib-only at import
 ├── _cpp_ops.py                 # JIT loader for the ATen-override and graph-rotation aux extensions
 ├── _graph_rotation.py          # transparent CUDA-graph executable rotation (driver caps live execs)
 ├── _graph_rotation_src/        # C++ source of the graph-rotation aux extension
@@ -56,7 +58,7 @@ src/torchada/
 └── triton/                     # vLLM/SGLang Triton-Fused-MoE compat, autotune tooling,
 │                               #   bundled per-shape S5000 configs
 
-tests/       29 test modules, one per feature area (see Testing)
+tests/       30 test modules, one per feature area (see Testing)
 docs/        custom_musa_ops.md, tune_triton_moe.md
 examples/    basic_usage.py, model_training.py, extension_setup.py, profiler_demo.py,
              migrate_existing_project.md
@@ -85,8 +87,11 @@ before `import torch` and new patches inside a `@patch_function`:
 5. **Runtime symbol translation** (`_runtime.py`) — patched `ctypes.CDLL` maps CUDA
    names onto musa* libraries, so `libmusart.so.cudaIpcOpenMemHandle` works.
 6. **C++ operator overrides** (`_cpp_ops.py` + `csrc/`) — `TORCH_LIBRARY_IMPL(aten,
-   PrivateUse1, m)` implementations JIT-built on first use into torch's extension
-   build directory (`TORCH_EXTENSIONS_DIR` respected).
+   PrivateUse1, m)` implementations JIT-built on first use into
+   `torchada_cpp_ops/<arch.cache_tag()>/` under the extension build root
+   (`TORCH_EXTENSIONS_DIR` respected), for `arch.target_archs(env=("MTGPU_TARGET",))`.
+   `arch.py` never initializes MUSA: devices are read in process only when MUSA is
+   already initialized, otherwise through `musaInfo`.
 7. **CUDA-graph rotation** (`_graph_rotation.py`) — the MUSA driver caps live
    `musaGraphExec_t` per process (~2048); rotation keeps every graph *template*
    alive, LRU-caps live *executables* (default 1900) and re-instantiates on replay.
@@ -178,6 +183,7 @@ instead of creating `test_misc.py`:
 | General patching | `test_cuda_patching.py` |
 | Mapping rules / porting | `test_mappings.py`, `test_inplace_porting.py`, `test_stable_abi_mappings.py` |
 | Extensions | `test_cpp_extension.py`, `test_extension_build.py`, `test_cpp_ops_guard.py` |
+| MUSA arch table / build targets | `test_arch.py` |
 | Device translation | `test_device_strings.py`, `test_fx_device_builtin.py`, `test_infer_schema_device.py`, `test_tensor_cuda_torch_function_mode.py` |
 | Version gates / version metadata | `test_version.py`, `test_platform.py` |
 | Opt-in CUDA availability | `test_cuda_availability_optin.py` |
@@ -455,13 +461,17 @@ sync when a switch is added.
 | `TORCHADA_CPP_OPS_VERBOSE` | `0` | `1` prints the C++ operator-override build log |
 | `TORCHADA_DEBUG_CPP_OPS` | `0` | `1` logs operator-override calls |
 | `TORCHADA_DISABLE_OP_OVERRIDE_<OP_NAME>` | unset | `1` disables one override, e.g. `TORCHADA_DISABLE_OP_OVERRIDE_log=1` |
+| `MTGPU_TARGET` | visible devices, else `mp_31` | One arch, e.g. `mp_31`, for torchada's operator-override build |
+| `TORCH_MUSA_ARCH_LIST` | unset | torch_musa's `MUSAExtension` arch list, e.g. `31;32`; not read by torchada, rendered by `arch.torch_arch_list()` |
 
 `TORCHADA_STABLE_ACCESSORS`, `TORCHADA_HAS_NATIVE_STABLE_DEVICE`,
 `TORCHADA_NV_BFLOAT16_ALIASED`, `TORCHADA_HAVE_AOTI_CUDA_STREAM`,
 `TORCHADA_PROBE_LIMIT`, and `TORCHADA_TUNE_USE_GRAPH` are internal probe
 overrides written by build/probe code — do not document them as user knobs.
-`MTGPU_TARGET=mp_XX` overrides the GPU architecture (normally auto-detected via
-`musaInfo`).
+Arch variables keep their owners' forms: `MTGPU_TARGET=mp_31` (one arch),
+`TORCH_MUSA_ARCH_LIST="31;32"` (torch_musa), `MATE_MUSA_ARCH_LIST="3.1 3.2"` (MATE).
+torchada's own build reads only `MTGPU_TARGET`; build scripts pass their own variables
+to `arch.target_archs(env=...)`.
 
 ## Performance Benchmarking
 
@@ -517,7 +527,11 @@ platform-check caching (`_is_musa_platform_cached`), string translation caching
     torchada's own installed config directory, so vLLM's `VLLM_TUNED_CONFIG_FOLDER`
     lookup resolves. Skipped silently when the install location is read-only.
   - JIT-built aux extensions (`torchada_cpp_ops`, `torchada_graph_rotation_ops`)
-    into torch's extension build directory, honoring `TORCH_EXTENSIONS_DIR`.
+    into torch's extension build directory, honoring `TORCH_EXTENSIONS_DIR`;
+    `torchada_cpp_ops` builds in its per-arch sub-directory `torchada_cpp_ops/<tag>/`.
+- With `MTGPU_TARGET` unset, `import torchada` on MUSA runs `musaInfo` at most once
+  per process to read the device archs (not at all when MUSA is already initialized,
+  where the devices are read in process), and never initializes the MUSA runtime.
 - Extension building uses standard torch/setuptools mechanisms; sources are ported
   in place, never mirrored into the user's tree.
 - Do not add telemetry, background threads, or hooks that outlive import.
