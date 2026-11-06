@@ -123,13 +123,11 @@ class TestCUDAExtension:
         from torchada.utils.cpp_extension import _narrow_cuda_header_mapping
 
         rules = dict(
-            _narrow_cuda_header_mapping(
-                [("cudaMalloc", "musaMalloc"), ("cuda.h", "musa.h")]
-            )
+            _narrow_cuda_header_mapping([("cudaMalloc", "musaMalloc"), ("cuda.h", "musa.h")])
         )
 
         assert "cuda.h" not in rules
-        assert rules['#include <cuda.h>'] == '#include <musa.h>'
+        assert rules["#include <cuda.h>"] == "#include <musa.h>"
         assert rules['#include "cuda.h"'] == '#include "musa.h"'
 
     def test_porting_translates_torch_cuda_header(self):

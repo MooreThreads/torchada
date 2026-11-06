@@ -294,9 +294,7 @@ def _is_configured_exclude_dir(path: str) -> bool:
 
 def _path_overlaps_any(path: str, roots: List[str]) -> bool:
     """Return whether ``path`` contains or is contained by a protected root."""
-    return any(
-        _path_is_within(path, root) or _path_is_within(root, path) for root in roots
-    )
+    return any(_path_is_within(path, root) or _path_is_within(root, path) for root in roots)
 
 
 def _validate_portable_symlinks(source_dir: str) -> None:
@@ -366,9 +364,9 @@ def _narrow_cuda_header_mapping(mapping_rule):
     narrowed = [(key, value) for key, value in mapping_rule if key != "cuda.h"]
     narrowed.extend(
         [
-            ('#include <cuda.h>', '#include <musa.h>'),
+            ("#include <cuda.h>", "#include <musa.h>"),
             ('#include "cuda.h"', '#include "musa.h"'),
-            ('#include <torch/cuda.h>', '#include <torch/musa.h>'),
+            ("#include <torch/cuda.h>", "#include <torch/musa.h>"),
             ('#include "torch/cuda.h"', '#include "torch/musa.h"'),
         ]
     )
@@ -405,11 +403,7 @@ def _replace_porting_line(line, mapping_rule):
                 header = line[start:end]
                 if key == "nvjpeg" and header == "nvjpeg.h":
                     header = f"{value}.h"
-                line = (
-                    line[:start].replace(key, value)
-                    + header
-                    + line[end:].replace(key, value)
-                )
+                line = line[:start].replace(key, value) + header + line[end:].replace(key, value)
                 continue
         line = line.replace(key, value)
     return line
@@ -833,8 +827,7 @@ def _port_cuda_source(source_code: str, mapping_rules: Optional[Dict[str, str]] 
     # Sort rules by length (longest first) to avoid partial replacements
     sorted_rules = sorted(mapping_rules.items(), key=lambda x: len(x[0]), reverse=True)
     return "".join(
-        _replace_porting_line(line, sorted_rules)
-        for line in source_code.splitlines(keepends=True)
+        _replace_porting_line(line, sorted_rules) for line in source_code.splitlines(keepends=True)
     )
 
 
@@ -1150,8 +1143,7 @@ def _translate_link_args(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
     if kwargs.get("libraries") is not None:
         new_kwargs["libraries"] = [
-            "mtjpeg" if library == "nvjpeg" else library
-            for library in kwargs["libraries"]
+            "mtjpeg" if library == "nvjpeg" else library for library in kwargs["libraries"]
         ]
 
     if kwargs.get("define_macros") is not None:
