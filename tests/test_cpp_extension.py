@@ -7,7 +7,10 @@ work correctly:
 """
 
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
+
+import pytest
 
 # Import torchada first to apply patches
 import torchada  # noqa: F401
@@ -120,13 +123,11 @@ class TestCUDAExtension:
         from torchada.utils.cpp_extension import _narrow_cuda_header_mapping
 
         rules = dict(
-            _narrow_cuda_header_mapping(
-                [("cudaMalloc", "musaMalloc"), ("cuda.h", "musa.h")]
-            )
+            _narrow_cuda_header_mapping([("cudaMalloc", "musaMalloc"), ("cuda.h", "musa.h")])
         )
 
         assert "cuda.h" not in rules
-        assert rules['#include <cuda.h>'] == '#include <musa.h>'
+        assert rules["#include <cuda.h>"] == "#include <musa.h>"
         assert rules['#include "cuda.h"'] == '#include "musa.h"'
 
     def test_porting_translates_torch_cuda_header(self):
@@ -335,3 +336,102 @@ class TestMusaNinjaLanguagePatch:
             ("positional", ["-O2", "-x", "musa"]),
             ("keyword", ["-g", "-x", "musa"]),
         ]
+
+
+# Non-default values throughout, so a parameter dropped on the way is visible.
+_LOAD_KWARGS = {
+    "name": "ext",
+    "sources": ["ext.cu"],
+    "extra_cflags": ["-O2"],
+    "extra_cuda_cflags": ["--offload-arch=mp_31"],
+    "extra_ldflags": ["-lext"],
+    "extra_include_paths": ["/ext/include"],
+    "build_directory": "/ext/build",
+    "verbose": True,
+    "with_cuda": False,
+    "is_python_module": False,
+    "is_standalone": True,
+    "keep_intermediates": False,
+}
+
+
+def _install_musa_extension(monkeypatch, musa_extension):
+    """Make ``import torch_musa.utils.musa_extension`` resolve to ``musa_extension``."""
+    torch_musa = ModuleType("torch_musa")
+    utils = ModuleType("torch_musa.utils")
+    torch_musa.utils = utils
+    utils.musa_extension = musa_extension
+    monkeypatch.setitem(sys.modules, "torch_musa", torch_musa)
+    monkeypatch.setitem(sys.modules, "torch_musa.utils", utils)
+    monkeypatch.setitem(sys.modules, "torch_musa.utils.musa_extension", musa_extension)
+
+
+@pytest.fixture
+def musa_load(monkeypatch):
+    """torchada's ``load`` on a faked MUSA platform, plus the calls torch's loader got."""
+    from torchada.utils import cpp_extension
+
+    monkeypatch.setattr(cpp_extension, "detect_platform", lambda: cpp_extension.Platform.MUSA)
+    monkeypatch.setattr(cpp_extension, "_apply_musa_patches", lambda: None)
+    torch_calls = []
+
+    def torch_load(**kwargs):
+        torch_calls.append(kwargs)
+        return "torch-module"
+
+    monkeypatch.setattr("torch.utils.cpp_extension.load", torch_load)
+    return cpp_extension.load, torch_calls
+
+
+class TestMusaLoad:
+    """``load`` delegates to torch_musa and falls back only when it is unavailable."""
+
+    def test_import_error_from_built_module_propagates(self, monkeypatch, musa_load):
+        load, torch_calls = musa_load
+        error = ImportError("ext.so: failed to map segment from shared object")
+        musa_extension = ModuleType("torch_musa.utils.musa_extension")
+
+        def failing_load(**kwargs):
+            raise error
+
+        musa_extension.load = failing_load
+        _install_musa_extension(monkeypatch, musa_extension)
+
+        with pytest.raises(ImportError) as excinfo:
+            load(**_LOAD_KWARGS)
+
+        assert excinfo.value is error
+        assert torch_calls == []
+
+    def test_missing_torch_musa_falls_back_to_torch_load(self, monkeypatch, musa_load):
+        load, torch_calls = musa_load
+        monkeypatch.setitem(sys.modules, "torch_musa.utils.musa_extension", None)
+
+        assert load(**_LOAD_KWARGS) == "torch-module"
+        assert torch_calls == [_LOAD_KWARGS]
+
+    def test_musa_extension_without_load_falls_back_to_torch_load(self, monkeypatch, musa_load):
+        load, torch_calls = musa_load
+        _install_musa_extension(monkeypatch, ModuleType("torch_musa.utils.musa_extension"))
+
+        assert load(**_LOAD_KWARGS) == "torch-module"
+        assert torch_calls == [_LOAD_KWARGS]
+
+    def test_parameters_forwarded_to_musa_load(self, monkeypatch, musa_load):
+        load, torch_calls = musa_load
+        musa_calls = []
+        musa_extension = ModuleType("torch_musa.utils.musa_extension")
+
+        def musa_ext_load(**kwargs):
+            musa_calls.append(kwargs)
+            return "musa-module"
+
+        musa_extension.load = musa_ext_load
+        _install_musa_extension(monkeypatch, musa_extension)
+
+        expected = dict(_LOAD_KWARGS)
+        expected["extra_musa_cflags"] = expected.pop("extra_cuda_cflags")
+        expected["with_musa"] = expected.pop("with_cuda")
+        assert load(**_LOAD_KWARGS) == "musa-module"
+        assert musa_calls == [expected]
+        assert torch_calls == []

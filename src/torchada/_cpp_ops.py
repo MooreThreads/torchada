@@ -17,59 +17,14 @@ Usage:
 """
 
 import os
-import subprocess
 from typing import Optional
+
+from . import arch
 
 _cpp_ops_module: Optional[object] = None
 _graph_rotation_module: Optional[object] = None
-_musa_arch_cached: Optional[str] = None
 
 _FLOCK_FILE = ".torchada.flock"
-
-
-def _detect_musa_arch() -> str:
-    """
-    Detect MUSA GPU architecture from compute capability.
-
-    Uses musaInfo to get compute capability and maps it to architecture:
-    - 2.1 -> mp_21 (MTT S80)
-    - 2.2 -> mp_22 (MTT S4000)
-    - 3.1 -> mp_31 (MTT S5000)
-
-    Returns:
-        Architecture string like "mp_21", "mp_22", or "mp_31".
-        Defaults to "mp_31" if detection fails.
-    """
-    global _musa_arch_cached
-    if _musa_arch_cached is not None:
-        return _musa_arch_cached
-
-    arch = "mp_31"  # Default fallback
-    try:
-        result = subprocess.run(
-            ["musaInfo"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for line in result.stdout.splitlines():
-            if "compute capability:" in line.lower():
-                # Parse "compute capability:              2.1"
-                parts = line.split(":")
-                if len(parts) >= 2:
-                    version = parts[1].strip()
-                    # Convert "2.1" -> "mp_21", "3.1" -> "mp_31"
-                    version_parts = version.split(".")
-                    if len(version_parts) >= 2:
-                        major = version_parts[0].strip()
-                        minor = version_parts[1].strip()
-                        arch = f"mp_{major}{minor}"
-                        break
-    except Exception:
-        pass
-
-    _musa_arch_cached = arch
-    return arch
 
 
 def _jit_loader_module(musa: bool):
@@ -86,15 +41,26 @@ def _jit_loader_module(musa: bool):
     return loader
 
 
-def _locked_load(load, name: str, musa: bool, **kwargs):
-    """Call a JIT ``load`` under a flock that, unlike torch's ``lock`` baton, dies with its holder."""
+def _locked_load(load, name: str, musa: bool, subdir: Optional[str] = None, **kwargs):
+    """Call a JIT ``load`` under a flock that, unlike torch's ``lock`` baton, dies with its holder.
+
+    With ``subdir`` the extension builds in that sub-directory of its build directory,
+    and the flock and the stale-baton check live there too.
+    """
     import fcntl
     import warnings
 
     loader = _jit_loader_module(musa)
     if not hasattr(loader, "FileBaton"):  # newer torch guards JIT builds with a FileLock itself
-        return load(name=name, **kwargs)
+        if subdir is None:
+            return load(name=name, **kwargs)
+        build_dir = os.path.join(loader._get_build_directory(name, False), subdir)
+        os.makedirs(build_dir, exist_ok=True)
+        return load(name=name, build_directory=build_dir, **kwargs)
     build_dir = loader._get_build_directory(name, False)
+    if subdir is not None:
+        build_dir = os.path.join(build_dir, subdir)
+    os.makedirs(build_dir, exist_ok=True)
     with open(os.path.join(build_dir, _FLOCK_FILE), "a") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -176,21 +142,16 @@ def load_cpp_ops(force_reload: bool = False) -> Optional[object]:
             # Use torchada's load which handles MUSA properly
             from .utils.cpp_extension import load
 
-            # Get MUSA architecture flags
-            # Use MTGPU_TARGET env var if set, otherwise auto-detect from GPU
-            extra_cuda_cflags = []
-            mtgpu_target = os.environ.get("MTGPU_TARGET", "")
-            if not mtgpu_target:
-                mtgpu_target = _detect_musa_arch()
-            extra_cuda_cflags.append(f"--offload-arch={mtgpu_target}")
-
+            # MTGPU_TARGET overrides; otherwise every visible device's arch, else mp_31.
+            archs = arch.target_archs(env=("MTGPU_TARGET",))
             _cpp_ops_module = _locked_load(
                 load,
                 name="torchada_cpp_ops",
                 musa=True,
+                subdir=arch.cache_tag(archs),
                 sources=all_sources,
                 extra_include_paths=[csrc_dir],
-                extra_cuda_cflags=extra_cuda_cflags,
+                extra_cuda_cflags=arch.arch_flags(archs),
                 verbose=verbose,
             )
         else:

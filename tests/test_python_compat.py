@@ -44,11 +44,12 @@ class TestPython38Compatibility:
     def test_all_modules_importable(self):
         """Test that all torchada modules can be imported."""
         import torchada
-        from torchada import _mapping, _patch, _platform, cuda, utils
+        from torchada import _mapping, _patch, _platform, arch, cuda, utils
         from torchada.utils import cpp_extension
 
         # All imports should succeed
         assert torchada is not None
+        assert arch is not None
         assert _mapping is not None
         assert _patch is not None
         assert _platform is not None

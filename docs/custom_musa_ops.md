@@ -124,7 +124,7 @@ _cuda_releasePool(device, pool_id)
 | `TORCHADA_CPP_OPS_VERBOSE=1` | Show compilation output |
 | `TORCHADA_DEBUG_CPP_OPS=1` | Log operator calls to stdout |
 | `TORCHADA_DISABLE_OP_OVERRIDE_<NAME>=1` | Disable specific operator override |
-| `MTGPU_TARGET=mp_XX` | Override GPU architecture detection |
+| `MTGPU_TARGET=mp_XX` | Build for this one arch instead of the visible devices' |
 
 ### Disabling Specific Operators
 
@@ -141,7 +141,9 @@ This check happens at **registration time** (when the extension is loaded), not 
 
 ## GPU Architecture
 
-torchada auto-detects the GPU architecture using `musaInfo`:
+torchada builds the extension for the arch of every visible device, read with
+`musaInfo` (or in process when MUSA is already initialized), and for `mp_31` when no
+device arch can be read:
 
 | GPU | Compute Capability | Architecture |
 |-----|-------------------|--------------|
@@ -149,7 +151,14 @@ torchada auto-detects the GPU architecture using `musaInfo`:
 | MTT S4000 | 2.2 | mp_22 |
 | MTT S5000 | 3.1 | mp_31 |
 
-Override with: `export MTGPU_TARGET=mp_22`
+Override with one arch: `export MTGPU_TARGET=mp_22`. A malformed value fails the build
+with a warning; `import torchada` still succeeds. torchada's own ops build for any arch
+mcc supports, mp_21 and mp_22 included: `torchada.arch.ARCHS` lists only the archs
+downstream projects build for and validate against.
+
+The extension builds in `torchada_cpp_ops/<tag>/` under the extension root, where
+`<tag>` is `torchada.arch.cache_tag()` of the archs and the MUSA toolkit (for example
+`mp31_mu50200` on MUSA 5.2.0), so builds for different archs never share a directory.
 
 ## Best Practices
 
