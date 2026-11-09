@@ -294,9 +294,7 @@ def _is_configured_exclude_dir(path: str) -> bool:
 
 def _path_overlaps_any(path: str, roots: List[str]) -> bool:
     """Return whether ``path`` contains or is contained by a protected root."""
-    return any(
-        _path_is_within(path, root) or _path_is_within(root, path) for root in roots
-    )
+    return any(_path_is_within(path, root) or _path_is_within(root, path) for root in roots)
 
 
 def _validate_portable_symlinks(source_dir: str) -> None:
@@ -366,9 +364,9 @@ def _narrow_cuda_header_mapping(mapping_rule):
     narrowed = [(key, value) for key, value in mapping_rule if key != "cuda.h"]
     narrowed.extend(
         [
-            ('#include <cuda.h>', '#include <musa.h>'),
+            ("#include <cuda.h>", "#include <musa.h>"),
             ('#include "cuda.h"', '#include "musa.h"'),
-            ('#include <torch/cuda.h>', '#include <torch/musa.h>'),
+            ("#include <torch/cuda.h>", "#include <torch/musa.h>"),
             ('#include "torch/cuda.h"', '#include "torch/musa.h"'),
         ]
     )
@@ -405,11 +403,7 @@ def _replace_porting_line(line, mapping_rule):
                 header = line[start:end]
                 if key == "nvjpeg" and header == "nvjpeg.h":
                     header = f"{value}.h"
-                line = (
-                    line[:start].replace(key, value)
-                    + header
-                    + line[end:].replace(key, value)
-                )
+                line = line[:start].replace(key, value) + header + line[end:].replace(key, value)
                 continue
         line = line.replace(key, value)
     return line
@@ -833,8 +827,7 @@ def _port_cuda_source(source_code: str, mapping_rules: Optional[Dict[str, str]] 
     # Sort rules by length (longest first) to avoid partial replacements
     sorted_rules = sorted(mapping_rules.items(), key=lambda x: len(x[0]), reverse=True)
     return "".join(
-        _replace_porting_line(line, sorted_rules)
-        for line in source_code.splitlines(keepends=True)
+        _replace_porting_line(line, sorted_rules) for line in source_code.splitlines(keepends=True)
     )
 
 
@@ -1150,8 +1143,7 @@ def _translate_link_args(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
     if kwargs.get("libraries") is not None:
         new_kwargs["libraries"] = [
-            "mtjpeg" if library == "nvjpeg" else library
-            for library in kwargs["libraries"]
+            "mtjpeg" if library == "nvjpeg" else library for library in kwargs["libraries"]
         ]
 
     if kwargs.get("define_macros") is not None:
@@ -1402,6 +1394,20 @@ def _get_build_extension_class():
 BuildExtension = _get_build_extension_class()
 
 
+def _musa_extension_loader():
+    """Return torch_musa's extension module when it provides ``load``, else ``None``.
+
+    Only the import of ``torch_musa.utils.musa_extension`` is guarded: failing it
+    means torch_musa is unavailable. An ImportError raised by ``load`` itself, such
+    as one from importing the module it has just built, must reach the caller.
+    """
+    try:
+        import torch_musa.utils.musa_extension as musa_ext
+    except ImportError:
+        return None
+    return musa_ext if hasattr(musa_ext, "load") else None
+
+
 def load(
     name: str,
     sources: List[str],
@@ -1444,30 +1450,26 @@ def load(
         # Ensure patches are applied
         _apply_musa_patches()
 
-        try:
-            import torch_musa.utils.musa_extension as musa_ext
-
+        musa_ext = _musa_extension_loader()
+        if musa_ext is not None:
             # Use MUSA's load function if available
             # Note: MUSA uses different parameter names:
             #   extra_cuda_cflags -> extra_musa_cflags
             #   with_cuda -> with_musa
-            if hasattr(musa_ext, "load"):
-                return musa_ext.load(
-                    name=name,
-                    sources=sources,
-                    extra_cflags=extra_cflags,
-                    extra_musa_cflags=extra_cuda_cflags,
-                    extra_ldflags=extra_ldflags,
-                    extra_include_paths=extra_include_paths,
-                    build_directory=build_directory,
-                    verbose=verbose,
-                    with_musa=with_cuda,
-                    is_python_module=is_python_module,
-                    is_standalone=is_standalone,
-                    keep_intermediates=keep_intermediates,
-                )
-        except ImportError:
-            pass
+            return musa_ext.load(
+                name=name,
+                sources=sources,
+                extra_cflags=extra_cflags,
+                extra_musa_cflags=extra_cuda_cflags,
+                extra_ldflags=extra_ldflags,
+                extra_include_paths=extra_include_paths,
+                build_directory=build_directory,
+                verbose=verbose,
+                with_musa=with_cuda,
+                is_python_module=is_python_module,
+                is_standalone=is_standalone,
+                keep_intermediates=keep_intermediates,
+            )
 
     # Fallback to torch's load
     from torch.utils.cpp_extension import load as torch_load

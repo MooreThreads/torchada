@@ -36,9 +36,9 @@ if _should_sync_visible_devices_env():
 
 import torch
 
-__version__ = "0.1.106"
+__version__ = "0.1.107"
 
-from . import cuda, utils
+from . import arch, cuda, utils
 
 # C++ operator overrides are automatically loaded on MUSA platform
 from ._cpp_ops import load_cpp_ops
@@ -124,6 +124,7 @@ __all__ = [
     "__version__",
     "get_version",
     # Modules
+    "arch",
     "cuda",
     "utils",
     # Platform detection

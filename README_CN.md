@@ -287,6 +287,46 @@ C++ 算子覆盖扩展在首次使用时 JIT 构建。torchada 会在自己的 `
 loader 的 `FileBaton` 上，并发导入也只会编译一次而不再互相竞争。若 `flock` 不可用
 （部分 NFS 挂载），torchada 会给出警告并回退到 torch 的原有行为。
 
+### MUSA 架构
+
+`torchada.arch` 保存 MUSA 架构表，并解析一次构建要编译的架构。已经用 `arch` 表示 CPU
+架构的构建脚本请换个名字导入：
+
+```python
+from torchada import arch as musa_arch
+
+archs = musa_arch.target_archs(env=("MTGPU_TARGET", "TORCH_MUSA_ARCH_LIST"))
+musa_arch.arch_flags(archs)       # ["--offload-arch=mp_31"]：JIT 构建用的 mcc 参数
+musa_arch.torch_arch_list(archs)  # "31"：MUSAExtension 读取的 TORCH_MUSA_ARCH_LIST 值
+musa_arch.cache_tag(archs)        # torch.version.musa 为 "50200"（MUSA 5.2.0）时是 "mp31_mu50200"
+archs[0].fp8                      # True：读自表中的行
+```
+
+`musa_arch.ARCHS` 就是这张表：torchada 的使用方构建并校验的架构。目前只有一行
+`mp_31`（MTT S5000），支持 FP8 转换和 FP8 MMA，不支持 FP4 转换和 FP4 MMA。`MusaArch`
+只以计算能力标识，因此 `MusaArch(3, 1) in ARCHS` 成立；表中没有行的架构仍然可以作为
+编译目标，其所有特性均为 `False`。
+
+`target_archs(env, *, default="mp_31", check_device=False)` 返回去重并排序后的架构：
+
+1. `env` 中第一个值非空的变量决定结果，之后的变量不会被读取。其值按 `;` 和空白分隔，
+   每个 token 为 `mp_XY`、`mpXY`、`X.Y` 或 `XY`。token 格式错误，或值中没有 token，
+   都会抛出 `ValueError`。
+2. 否则取每个可见设备的架构：MUSA 已在进程内初始化时在进程内读取，否则通过 `musaInfo`
+   （先查 `PATH`，再查 torchada 的 `CUDA_HOME`（即 `$MUSA_HOME`，否则 `/usr/local/musa`
+   或 `/opt/musa`）下的 `bin/`）读取，每个进程只读一次。
+3. 否则取 `default`。
+
+`check_device=True` 供 JIT 构建使用：每个可见设备的架构都必须在结果中，否则抛出
+`RuntimeError`，因为为其他架构构建的内核在该设备上不会启动（`musaErrorInvalidDeviceFunction`）。
+该检查只在 MUSA 已在进程内初始化时执行：它从不初始化 MUSA，也从不启动子进程。
+
+每个变量沿用其所属项目的写法：`MTGPU_TARGET=mp_31`（单个架构）、
+`TORCH_MUSA_ARCH_LIST="31;32"`（torch_musa）、`MATE_MUSA_ARCH_LIST="3.1 3.2"`（MATE）。
+torchada 自身的算子覆盖扩展以 `env=("MTGPU_TARGET",)` 解析且不做设备检查，并构建在
+torch_musa 扩展根目录下的 `torchada_cpp_ops/<cache_tag>/` 中，因此不同架构或不同 MUSA
+工具链的构建不会共用同一目录。上文的残留 `lock` 恢复也在该子目录内进行。
+
 ### 自定义算子
 
 ```python
@@ -382,6 +422,8 @@ with torch.accelerator.stream(torch.musa.Stream()):
 | `TORCHADA_CPP_OPS_VERBOSE` | `0` | 设为 `1` 时打印 C++ 算子覆盖扩展的构建日志 |
 | `TORCHADA_DEBUG_CPP_OPS` | `0` | 设为 `1` 时记录算子覆盖调用 |
 | `TORCHADA_DISABLE_OP_OVERRIDE_<OP_NAME>` | 未设置 | 设为 `1` 可禁用单个算子覆盖，例如 `TORCHADA_DISABLE_OP_OVERRIDE_log=1` |
+| `MTGPU_TARGET` | 可见设备，否则 `mp_31` | torchada 算子覆盖扩展的构建架构，单个架构，例如 `mp_31` |
+| `TORCH_MUSA_ARCH_LIST` | 未设置 | torch_musa `MUSAExtension` 的架构列表，例如 `31;32`；torchada 不读取，由 `torchada.arch.torch_arch_list()` 生成 |
 
 ## 平台检测
 
@@ -404,7 +446,7 @@ def is_musa():
 ## 性能
 
 torchada 使用激进的缓存策略来最小化运行时开销。下表的数字取自仓库中已提交的
-`benchmarks/benchmark_history.json`（torchada 0.1.106，2026-10-09，MTT S5000，
+`benchmarks/benchmark_history.json`（torchada 0.1.107，2026-10-09，MTT S5000，
 PyTorch 与 torch_musa `2.11.0.post2+musa5.2.0`），为每次调用的开销中位数：
 
 | 操作 | 开销 |
@@ -484,6 +526,11 @@ device = torch.device("cuda")  # 会被转换为 musa
 | `nccl_to_mccl_name(name)` | 转换 `ncclXxx` → `mcclXxx` |
 | `cublas_to_mublas_name(name)` | 转换 `cublasXxx` → `mublasXxx` |
 | `curand_to_murand_name(name)` | 转换 `curandXxx` → `murandXxx` |
+| `arch.target_archs(env)` | 要编译的 MUSA 架构：`env` 中第一个已设置的变量，否则可见设备，否则 `mp_31` |
+| `arch.arch_flags(archs)` | mcc `--offload-arch=mp_XY` 参数 |
+| `arch.torch_arch_list(archs)` | `TORCH_MUSA_ARCH_LIST` 的值，例如 `31;32` |
+| `arch.cache_tag(archs)` | 对应架构与 MUSA 工具链的构建目录名 |
+| `arch.ARCHS` / `arch.MusaArch` | MUSA 架构表及其条目（`name`、`capability`、`fp8`、`fp4`） |
 
 **注意**：`torch.cuda.is_available()` 默认故意没有重定向 — 在 MUSA 上返回 `False`。这是为了支持正确的平台检测。在导入 torchada 之前设置 `TORCHADA_FORCE_CUDA_AVAILABLE=1`，可让它改为返回 `torch.musa.is_available()`（见[已知限制](#已知限制)）。关于 GPU 可用性检查，请参见 [examples/migrate_existing_project.md](examples/migrate_existing_project.md#important-note-on-gpu-detection) 中的 `has_gpu()` 模式。
 
@@ -524,7 +571,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.106
+torchada>=0.1.107
 ```
 
 ### 步骤 2：条件导入
