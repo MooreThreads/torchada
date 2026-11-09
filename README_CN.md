@@ -172,6 +172,10 @@ compiled_model = torch.compile(model.cuda(), backend='inductor')
 CUDA Graph capture 和 `torch.compile` AOT 缓存保持兼容。打补丁后的
 `torch.device(...)` 也仍可在 TorchScript 中使用。
 
+导入 torchada 后保存的设备元数据也支持通过
+`torch.load(..., weights_only=True)` 恢复：在 PyTorch 提供安全名单 API 时，
+torchada 会注册自身的设备构造器。其他自定义 checkpoint 类仍需单独明确授权。
+
 还有三处补丁保证编译路径端到端可用：
 
 - `torch.cuda._get_device_index` 会映射到 MUSA 对应实现，TorchDynamo 正是通过它来建模

@@ -185,6 +185,11 @@ explicit CUDA devices to MUSA. The factory wrappers remain compatible with
 CUDA Graph capture and `torch.compile` AOT caching. The patched
 `torch.device(...)` also remains usable from TorchScript.
 
+Device metadata saved after importing torchada can also be restored with
+`torch.load(..., weights_only=True)`: torchada registers its device constructor
+with PyTorch's safe-global allowlist when that API is available. Unrelated custom
+checkpoint classes still require their own explicit allowlisting.
+
 Three more patches keep compiled code working end to end:
 
 - `torch.cuda._get_device_index` is mapped to its MUSA counterpart, which is what
