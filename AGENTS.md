@@ -175,6 +175,18 @@ pytest tests/test_platform.py -q
 `conftest.py` imports `torchada` before pytest collects anything, so patches are
 active in every test. Skip by marker, never by deleting a test.
 
+**A test that applies a patch pins what the patch assigns.** `@patch_function`
+bodies write `torch.*` attributes themselves, and `monkeypatch` can only undo an
+assignment it made, so a test that stands in for `torch.mm` and lets the patch
+install `torch.bmm` leaks that wrapper into every test after it. Pin every
+attribute the patch touches (`monkeypatch.setattr(torch, name, getattr(torch, name))`,
+or restore it in a `finally`) and stub `_register_jit_builtin_alias`, which keys
+torch.jit's builtin table on `id(wrapper)`: a dead test wrapper leaves an entry
+behind that whatever later object reuses its id inherits as the aliased op.
+A leak here is invisible where it happens: `tests/test_mm_out_dtype.py` therefore
+carries an autouse fixture that compares the bindings before and after every test
+in the module, and it is the shape to copy.
+
 **Where a new test goes** — one module per feature area already exists; add to it
 instead of creating `test_misc.py`:
 

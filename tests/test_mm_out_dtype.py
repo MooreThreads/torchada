@@ -51,6 +51,28 @@ def _computing_op(calls):
     return op
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_bindings():
+    """Fail the test that leaves the backport's bindings behind.
+
+    Autouse fixtures are set up before ``monkeypatch``, so this teardown runs
+    after its undo and sees what the next test inherits. A leak is invisible
+    where it happens and lethal later: with ``_original_torch_mm`` back to
+    ``None``, the next promoted ``out_dtype`` call sends the probe into the
+    leaked wrapper, which asks the probe for its verdict again and deadlocks on
+    the non-reentrant ``_MM_OUT_DTYPE_PROBE_LOCK``.
+    """
+    names = ("torch.mm", "torch.bmm", "_original_torch_mm", "_original_torch_bmm")
+
+    def bindings():
+        return (torch.mm, torch.bmm, _patch._original_torch_mm, _patch._original_torch_bmm)
+
+    before = bindings()
+    yield
+    leaked = [name for name, was, now in zip(names, before, bindings()) if was is not now]
+    assert not leaked, f"left behind for the next test: {', '.join(leaked)}"
+
+
 class TestMMOutDtypeGating:
     """The backport must stay a no-op unless the probe reports a broken op."""
 
@@ -61,6 +83,15 @@ class TestMMOutDtypeGating:
         from types import ModuleType, SimpleNamespace
 
         monkeypatch.setitem(sys.modules, "torch_musa", ModuleType("torch_musa"))
+        # The patch function assigns torch.mm/torch.bmm itself, and monkeypatch
+        # cannot undo an assignment it did not make: pin both so its teardown
+        # restores them even for the ops a test does not stand in for. The alias
+        # registry is stubbed for the same reason - it keys torch.jit's builtin
+        # table on id(wrapper), so a dead test wrapper leaves an entry behind that
+        # whatever later object reuses its id inherits as aten::mm / aten::bmm.
+        for op_name in ("mm", "bmm"):
+            monkeypatch.setattr(torch, op_name, getattr(torch, op_name))
+        monkeypatch.setattr(_patch, "_register_jit_builtin_alias", lambda original, wrapper: None)
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
         monkeypatch.setattr(_patch, "_original_torch_mm", None)
         monkeypatch.setattr(_patch, "_original_torch_bmm", None)
