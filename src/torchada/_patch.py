@@ -918,6 +918,11 @@ def _patch_torch_device():
     # Replace torch.device with our wrapper
     torch.device = DeviceFactoryWrapper
 
+    # Device.__reduce__ resolves the patched torch.device constructor.
+    # Allow its device metadata to load without disabling weights_only.
+    if hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([DeviceFactoryWrapper])
+
     # TorchScript recognizes the original torch.device as an aten builtin.
     # Register the wrapper under the same builtin so importing torchada does
     # not make otherwise scriptable functions fail during compilation.

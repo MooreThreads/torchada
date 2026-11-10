@@ -2,6 +2,9 @@
 Tests for device string patching (cuda -> musa translation).
 """
 
+import io
+import pickle
+
 import pytest
 import torch
 
@@ -427,8 +430,9 @@ class TestDeviceIndexVariants:
 
     def test_wrapped_factory_remains_a_torchscript_builtin(self):
         """Test importing torchada keeps torch factories scriptable."""
-        import torchada
         from torch.jit._builtins import _find_builtin
+
+        import torchada
 
         if not torchada.is_musa_platform():
             pytest.skip("MUSA platform required with patched torch factories")
@@ -664,3 +668,40 @@ class TestDeviceContextManager:
             # A device context must not override a device the caller passed.
             with torch.device("cpu"):
                 assert factory(*args, device="cuda").device.type == "musa"
+
+
+class _UntrustedCheckpointMetadata:
+    """An unrelated checkpoint class that must not be allowlisted."""
+
+
+@pytest.mark.skipif(
+    not hasattr(torch.serialization, "add_safe_globals"),
+    reason="Requires the weights-only safe-global API",
+)
+class TestDeviceSerialization:
+    """Device metadata should round-trip without allowing arbitrary globals."""
+
+    @pytest.mark.parametrize(
+        "spec", ["cpu", "cuda:0", pytest.param("musa:0", marks=pytest.mark.musa)]
+    )
+    def test_weights_only_device_metadata_round_trip(self, spec):
+        device = torch.device(spec)
+        value = torch.arange(4, dtype=torch.float32, device="cpu")
+        checkpoint = {"model": {"weight": value}, "metadata": {"device": device}}
+        stream = io.BytesIO()
+        torch.save(checkpoint, stream)
+        stream.seek(0)
+
+        restored = torch.load(stream, map_location="cpu", weights_only=True)
+
+        assert restored["metadata"]["device"] == device
+        assert restored["model"]["weight"].device.type == "cpu"
+        assert torch.equal(restored["model"]["weight"], value)
+
+    def test_weights_only_still_rejects_unrelated_globals(self):
+        stream = io.BytesIO()
+        torch.save({"metadata": _UntrustedCheckpointMetadata()}, stream)
+        stream.seek(0)
+
+        with pytest.raises(pickle.UnpicklingError, match="_UntrustedCheckpointMetadata"):
+            torch.load(stream, weights_only=True)

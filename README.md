@@ -185,6 +185,11 @@ explicit CUDA devices to MUSA. The factory wrappers remain compatible with
 CUDA Graph capture and `torch.compile` AOT caching. The patched
 `torch.device(...)` also remains usable from TorchScript.
 
+Device metadata saved after importing torchada can also be restored with
+`torch.load(..., weights_only=True)`: torchada registers its device constructor
+with PyTorch's safe-global allowlist when that API is available. Unrelated custom
+checkpoint classes still require their own explicit allowlisting.
+
 Three more patches keep compiled code working end to end:
 
 - `torch.cuda._get_device_index` is mapped to its MUSA counterpart, which is what
@@ -489,7 +494,7 @@ def is_musa():
 ## Performance
 
 torchada uses aggressive caching to minimize runtime overhead. The numbers below are
-the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.107
+the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.108
 (2026-10-09, MTT S5000, PyTorch and torch_musa `2.11.0.post2+musa5.2.0`), as median
 per-call overhead:
 
@@ -622,7 +627,7 @@ nvJPEG, libtorch-stable, FlashInfer, cutlass, thrust, ...).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.107
+torchada>=0.1.108
 ```
 
 ### Step 2: Conditional Import

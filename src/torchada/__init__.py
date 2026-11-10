@@ -36,7 +36,7 @@ if _should_sync_visible_devices_env():
 
 import torch
 
-__version__ = "0.1.107"
+__version__ = "0.1.108"
 
 from . import arch, cuda, utils
 

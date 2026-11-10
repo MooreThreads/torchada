@@ -172,6 +172,10 @@ compiled_model = torch.compile(model.cuda(), backend='inductor')
 CUDA Graph capture 和 `torch.compile` AOT 缓存保持兼容。打补丁后的
 `torch.device(...)` 也仍可在 TorchScript 中使用。
 
+导入 torchada 后保存的设备元数据也支持通过
+`torch.load(..., weights_only=True)` 恢复：在 PyTorch 提供安全名单 API 时，
+torchada 会注册自身的设备构造器。其他自定义 checkpoint 类仍需单独明确授权。
+
 还有三处补丁保证编译路径端到端可用：
 
 - `torch.cuda._get_device_index` 会映射到 MUSA 对应实现，TorchDynamo 正是通过它来建模
@@ -446,7 +450,7 @@ def is_musa():
 ## 性能
 
 torchada 使用激进的缓存策略来最小化运行时开销。下表的数字取自仓库中已提交的
-`benchmarks/benchmark_history.json`（torchada 0.1.107，2026-10-09，MTT S5000，
+`benchmarks/benchmark_history.json`（torchada 0.1.108，2026-10-09，MTT S5000，
 PyTorch 与 torch_musa `2.11.0.post2+musa5.2.0`），为每次调用的开销中位数：
 
 | 操作 | 开销 |
@@ -571,7 +575,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.107
+torchada>=0.1.108
 ```
 
 ### 步骤 2：条件导入
