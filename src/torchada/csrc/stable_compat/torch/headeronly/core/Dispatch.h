@@ -1,21 +1,13 @@
 #pragma once
 // torchada stable-ABI compat: torch/headeronly/core/Dispatch.h
 //
-// libtorch-stable kernels (e.g. vLLM, SGLang) need the THO_DISPATCH_* macros
-// from PyTorch's torch/headeronly/core/Dispatch.h, which postdates torch_musa
-// 2.9.0. We ship
-// the macros (verbatim from upstream) plus the two symbols they reference that
-// torch_musa lacks (torch::headeronly::impl::ScalarTypeToCPPTypeT, toString),
-// aliased to the c10 equivalents that DO exist on torch_musa.
-//
-// torch_musa 2.11+ does ship the real header, so defer to it whenever the
-// search path still holds one: the stand-in below pulls <torch/version.h> and
-// <c10/core/ScalarType.h>, which the native header does not and which hard
-// -#error under the stable ABI's own TORCH_STABLE_ONLY / TORCH_TARGET_VERSION
-// flags. Without this forward the directory's position would decide whether a
-// stable TU compiles, and an extension passing stable_compat_include_dir() in
-// include_dirs puts it first. Keep #pragma once: the fallback body defines an
-// inline function, so it must land at most once per TU.
+// Resolves to torch_musa's own Dispatch.h wherever the search path holds one
+// (torch 2.11+), so the position of this directory does not matter. The
+// fallback supplies the THO_DISPATCH_* macros that libtorch-stable kernels
+// (vLLM, SGLang) need on torch_musa 2.9, verbatim from upstream, plus the two
+// symbols they reference that it lacks
+// (torch::headeronly::impl::ScalarTypeToCPPTypeT, toString), aliased to the c10
+// equivalents.
 #if defined(__has_include_next)
 #if __has_include_next(<torch/headeronly/core/Dispatch.h>)
 #include_next <torch/headeronly/core/Dispatch.h>
@@ -30,9 +22,8 @@
 #include <torch/version.h>
 #include <c10/core/ScalarType.h>
 
-// torch 2.11+ provides these through ScalarType.h, and only the dispatch macros
-// below are still needed there -- reached when a torch 2.11+ include tree omits
-// Dispatch.h itself, since a tree that ships it is taken by the forward above.
+// torch 2.11+ provides these through ScalarType.h; reached only when such a
+// tree omits Dispatch.h itself, since one that ships it is taken above.
 #if TORCH_VERSION_MAJOR < 2 || \
     (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 11)
 namespace torch {
@@ -60,9 +51,9 @@ inline const char* toString(torch::headeronly::ScalarType t) {
 #define THO_DISPATCH_CASE_TMPL(CASE_TYPE_USING_HINT, enum_type, ...) \
   CASE_TYPE_USING_HINT(enum_type, scalar_t, __VA_ARGS__)
 
-// Own namespace: torch_musa's ATen/Dispatch.h already defines ::detail::scalar_type
-// for the same type (torch::headeronly::ScalarType aliases at::ScalarType), so a
-// global ::detail one would be a redefinition when both headers land in one TU.
+// Own namespace: torch_musa's ATen/Dispatch.h defines ::detail::scalar_type for
+// the same type (torch::headeronly::ScalarType aliases at::ScalarType), so a
+// global one would be a redefinition when both headers land in one TU.
 namespace torchada_detail {
 inline torch::headeronly::ScalarType scalar_type(torch::headeronly::ScalarType s) {
   return s;

@@ -903,9 +903,8 @@ def include_paths(
 
         # Auto-append torchada's libtorch-stable ABI compat headers so
         # libtorch-stable kernels (vLLM, SGLang, ...) resolve
-        # <torch/headeronly/core/Dispatch.h> on MUSA. Position does not decide
-        # which copy wins: every stand-in that newer torch_musa also ships defers
-        # to the native header with #include_next (see stable_compat_include_dir).
+        # <torch/headeronly/core/Dispatch.h> on MUSA. Order-independent: see
+        # stable_compat_include_dir.
         if include_device:
             paths.append(stable_compat_include_dir())
         if not torch_include_dirs:
@@ -938,15 +937,13 @@ def stable_compat_include_dir() -> str:
 
     Add to an extension's ``include_dirs`` so libtorch-stable
     ``csrc/libtorch_stable`` kernels (vLLM, SGLang, ...) build on torch_musa: it
-    shadows the (absent) ``torch/headeronly/core/Dispatch.h`` with a THO_DISPATCH
-    shim. Pair with ``stable_compat_box_header`` (force-include) to also get the
-    ``TORCH_BOX`` shim + ``CUDA_VERSION`` define.
+    supplies the ``torch::stable`` surface torch_musa 2.9 lacks. Pair with
+    ``stable_compat_box_header`` (force-include) to also get the ``TORCH_BOX``
+    shim + ``CUDA_VERSION`` define.
 
-    Every header here that newer torch_musa also ships
-    (``torch/csrc/stable/macros.h``, ``torch/csrc/stable/device.h``,
-    ``torch/headeronly/core/Dispatch.h``) defers to torch_musa's own copy through
-    ``#include_next`` (torch 2.11+), so ``include_dirs`` may list this directory
-    before or after torch_musa's include directories.
+    May be listed before or after torch_musa's own include directories: headers
+    here that newer torch_musa also ships resolve to its copy through
+    ``#include_next``.
     """
     return os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

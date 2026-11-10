@@ -3890,13 +3890,12 @@ class TestStableCompatHeaders:
         # torch_musa 2.11+ ships a real macros.h; the forward must defer to it.
         assert "#include_next <torch/csrc/stable/macros.h>" in text
 
-    # Stand-ins for torch_musa's stable headers. torch 2.9 keeps the library
-    # macros in library.h and has no macros.h/device.h; torch 2.11+ ships both,
-    # and from torch 2.13 the library.h chain itself includes macros.h
-    # (stableivalue_conversions.h, tensor_struct.h, accelerator.h, ...), which is
-    # what a shadowing forward breaks. The native-header tree below models 2.13:
-    # on 2.11 and 2.12 nothing includes <torch/csrc/stable/macros.h>, so a shadow
-    # there is latent rather than fatal.
+    # Two shapes of torch include tree. 2.9: the stable library macros live in
+    # library.h, and there is no macros.h/device.h/Dispatch.h of its own. 2.13:
+    # all three present, with library.h's chain including macros.h itself
+    # (stableivalue_conversions.h, tensor_struct.h, accelerator.h, ...). 2.13 is
+    # the shape worth modelling -- 2.11 and 2.12 ship the headers but include
+    # <torch/csrc/stable/macros.h> from nowhere.
     _AOTI_SHIM_STUB = (
         "#pragma once\n"
         "#include <cstdint>\n"
@@ -3985,11 +3984,11 @@ class TestStableCompatHeaders:
             dirs = [torch_dir, compat]
         elif layout == "compat_copy":
             # A second, byte-identical copy (mtime preserved) of the directory.
-            # Listing `compat` itself twice would prove nothing: both compilers
-            # drop a repeated -I ("ignoring duplicate directory"), leaving one
-            # search path. A distinct copy survives that, and GCC's #pragma once
-            # still treats its files as already-included -- which is why the
-            # macros.h forward must not carry one.
+            # Listing `compat` itself twice proves nothing: both compilers drop a
+            # repeated -I ("ignoring duplicate directory"), leaving one search
+            # path. A distinct copy survives that, and GCC's #pragma once still
+            # treats its files as already-included, so this layout is what pins
+            # macros.h to resolving on every inclusion.
             copy = str(tmp_path / "compat_copy")
             shutil.copytree(compat, copy, copy_function=shutil.copy2)
             dirs = [compat, torch_dir, copy]
@@ -4014,9 +4013,9 @@ class TestStableCompatHeaders:
     def test_macros_shim_defers_to_native_macros_in_any_order(self, tmp_path, layout, entry):
         """On torch 2.11+ the native macros.h wins wherever the compat dir sits.
 
-        A compat dir ahead of torch_musa's made the torch 2.9 forward re-enter
-        library.h, so torch 2.13 failed with STABLE_TORCH_ERROR_CODE_CHECK
-        undeclared.
+        library.h's own chain needs the real macros.h on torch 2.13, so a
+        stand-in that wins the search there leaves STABLE_TORCH_ERROR_CODE_CHECK
+        undeclared across the whole stable surface.
         """
         flags = self._search_path(tmp_path, layout, self._TORCH213_STUB)
         self._assert_compiles(
@@ -4076,9 +4075,9 @@ class TestStableCompatHeaders:
     def test_dispatch_shim_defers_to_native_in_any_order(self, tmp_path, layout):
         """On torch 2.11+ the native headeronly Dispatch.h wins wherever we sit.
 
-        The compat body pulls <torch/version.h>, which #errors under the stable
-        ABI's own TORCH_STABLE_ONLY / TORCH_TARGET_VERSION, so shadowing the
-        native header made the include order decide whether a stable TU builds.
+        The fallback body pulls <torch/version.h>, which #errors under the stable
+        ABI's own TORCH_STABLE_ONLY / TORCH_TARGET_VERSION, so a stand-in that
+        wins the search lets the include order decide whether a stable TU builds.
         """
         flags = self._search_path(tmp_path, layout, self._TORCH213_STUB)
         self._assert_compiles(
@@ -4131,15 +4130,14 @@ class TestStableCompatHeaders:
 
         The counterpart to the stub-tree tests above: an extension passing
         stable_compat_include_dir() in include_dirs lands it ahead of torch_musa's
-        own include dirs, where a forward that shadows a native header breaks the
-        whole stable surface.
+        own include dirs, where a stand-in that shadows a native header breaks
+        the whole stable surface.
 
-        The probe body may only touch stable APIs that every torch_musa shipping
-        the native headers declares: STABLE_TORCH_ERROR_CODE_CHECK arrived in torch
-        2.13 (hence the #ifdef) and Device::is_privateuseone() exists in 2.13
-        alone, while index() is stable back to 2.9. Nothing is lost by guarding
-        them -- the shadowing failure surfaces inside torch's own accelerator.h,
-        which uses the macro itself on 2.13.
+        Runs against whatever torch_musa the host carries, so the probe body only
+        names stable APIs every version declares: STABLE_TORCH_ERROR_CODE_CHECK
+        is torch 2.13 and newer (hence the #ifdef) while index() holds back to
+        2.9. The #ifdef hides nothing -- on 2.13 a shadowed macros.h surfaces
+        inside torch's own accelerator.h, which uses the macro itself.
         """
         if _torch_minor_version() < 11:
             pytest.skip("torch_musa ships the native stable headers from torch 2.11")
@@ -4172,9 +4170,9 @@ class TestStableCompatHeaders:
 
         Upstream vLLM compiles its libtorch_stable targets with
         TORCH_TARGET_VERSION defined, and its dispatch_utils.h includes the
-        headeronly Dispatch.h. While the compat copy shadowed the native header it
-        dragged in <torch/version.h>, which #errors under these flags, so the same
-        source compiled with the compat dir last and failed with it first.
+        headeronly Dispatch.h, so this is the shape a real stable-ABI build
+        presents -- and the flags under which the fallback body's
+        <torch/version.h> would #error.
         """
         if _torch_minor_version() < 11:
             pytest.skip("torch_musa ships the native stable headers from torch 2.11")
