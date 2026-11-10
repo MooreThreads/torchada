@@ -3843,6 +3843,8 @@ class TestStableCompatHeaders:
         # torch_musa 2.11+ ships a real one; the stand-in must defer to it.
         assert "#include_next <torch/headeronly/core/Dispatch.h>" in text
         assert "TORCHADA_HAS_NATIVE_THO_DISPATCH" in text
+        # The fallback body guards itself, so re-entering the file is harmless.
+        assert "TORCHADA_THO_DISPATCH_FALLBACK" in text
 
     def test_device_shim_header_present(self):
         """torch/csrc/stable/device.h provides Device / DeviceType."""
@@ -3855,6 +3857,8 @@ class TestStableCompatHeaders:
         text = open(p, encoding="utf-8").read()
         assert "#include_next <torch/csrc/stable/device.h>" in text
         assert "TORCHADA_HAS_NATIVE_STABLE_DEVICE" in text
+        # The fallback body guards itself, so re-entering the file is harmless.
+        assert "TORCHADA_STABLE_DEVICE_FALLBACK" in text
         assert "struct Device" in text
         assert "enum class DeviceType" in text
         # Predicates vLLM stable kernels call on a Device.
@@ -3889,6 +3893,31 @@ class TestStableCompatHeaders:
         assert "library.h" in text
         # torch_musa 2.11+ ships a real macros.h; the forward must defer to it.
         assert "#include_next <torch/csrc/stable/macros.h>" in text
+
+    def test_stand_in_headers_are_re_enterable(self):
+        """None of the three stand-ins carries #pragma once.
+
+        GCC reports a byte-identical copy of a file as already included, so a
+        stand-in that skips re-entry turns its own #include_next into a no-op
+        when a second copy of this directory sits later in the search path, and
+        the TU gets neither the native header nor the fallback. The fallbacks
+        guard their bodies with a TORCHADA_*_FALLBACK marker instead.
+        """
+        import os
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        root = stable_compat_include_dir()
+        for rel in (
+            ("torch", "csrc", "stable", "macros.h"),
+            ("torch", "csrc", "stable", "device.h"),
+            ("torch", "headeronly", "core", "Dispatch.h"),
+        ):
+            path = os.path.join(root, *rel)
+            text = open(path, encoding="utf-8").read()
+            # Directives only: each file explains the absence in a comment.
+            directives = [ln.strip() for ln in text.splitlines() if ln.startswith("#")]
+            assert "#pragma once" not in directives, f"{path} carries #pragma once"
 
     # Two shapes of torch include tree. 2.9: the stable library macros live in
     # library.h, and there is no macros.h/device.h/Dispatch.h of its own. 2.13:
@@ -3983,12 +4012,14 @@ class TestStableCompatHeaders:
         elif layout == "compat_last":
             dirs = [torch_dir, compat]
         elif layout == "compat_copy":
-            # A second, byte-identical copy (mtime preserved) of the directory.
-            # Listing `compat` itself twice proves nothing: both compilers drop a
+            # A second, byte-identical copy (mtime preserved) of the directory,
+            # as two torchada installs on one include path produce. Listing
+            # `compat` itself twice proves nothing: both compilers drop a
             # repeated -I ("ignoring duplicate directory"), leaving one search
-            # path. A distinct copy survives that, and GCC's #pragma once still
-            # treats its files as already-included, so this layout is what pins
-            # macros.h to resolving on every inclusion.
+            # path. A distinct copy survives that, and GCC reports its files as
+            # already included, so this layout is what pins every stand-in to
+            # resolving on each inclusion rather than forwarding into a file the
+            # preprocessor skips.
             copy = str(tmp_path / "compat_copy")
             shutil.copytree(compat, copy, copy_function=shutil.copy2)
             dirs = [compat, torch_dir, copy]
@@ -4043,7 +4074,7 @@ class TestStableCompatHeaders:
             "#endif\n",
         )
 
-    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last", "compat_copy"])
     def test_device_shim_defers_to_native_device_in_any_order(self, tmp_path, layout):
         """On torch 2.11+ the native device.h wins wherever the compat dir sits."""
         flags = self._search_path(tmp_path, layout, self._TORCH213_STUB)
@@ -4053,25 +4084,34 @@ class TestStableCompatHeaders:
             "#include <torch/csrc/stable/device.h>\n"
             "#ifndef STUB_NATIVE_DEVICE\n"
             '#error "native device.h was shadowed"\n'
+            "#endif\n"
+            "#ifdef TORCHADA_STABLE_DEVICE_FALLBACK\n"
+            '#error "fallback compiled next to a native device.h"\n'
             "#endif\n",
         )
 
-    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last", "compat_copy"])
     def test_device_shim_falls_back_without_native_device(self, tmp_path, layout):
         """On torch 2.9 (no native device.h) the shim defines torch::stable::Device."""
         flags = self._search_path(tmp_path, layout, self._TORCH29_STUB)
         self._assert_compiles(
             tmp_path,
             flags,
+            # Twice: the body's own guard, not #pragma once, keeps it to one
+            # definition, so a repeat inclusion must not redefine Device.
+            "#include <torch/csrc/stable/device.h>\n"
             "#include <torch/csrc/stable/device.h>\n"
             "#ifdef TORCHADA_HAS_NATIVE_STABLE_DEVICE\n"
             '#error "no native device.h exists"\n'
+            "#endif\n"
+            "#ifndef TORCHADA_STABLE_DEVICE_FALLBACK\n"
+            '#error "no stand-in in the chain compiled the fallback"\n'
             "#endif\n"
             'static_assert(sizeof(torch::stable::Device) > 0, "");\n'
             "bool f(torch::stable::Device d) { return d.is_privateuseone(); }\n",
         )
 
-    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last", "compat_copy"])
     def test_dispatch_shim_defers_to_native_in_any_order(self, tmp_path, layout):
         """On torch 2.11+ the native headeronly Dispatch.h wins wherever we sit.
 
@@ -4086,10 +4126,13 @@ class TestStableCompatHeaders:
             "#include <torch/headeronly/core/Dispatch.h>\n"
             "#ifndef STUB_NATIVE_THO_DISPATCH\n"
             '#error "native headeronly Dispatch.h was shadowed"\n'
+            "#endif\n"
+            "#ifdef TORCHADA_THO_DISPATCH_FALLBACK\n"
+            '#error "fallback compiled next to a native Dispatch.h"\n'
             "#endif\n",
         )
 
-    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last", "compat_copy"])
     def test_dispatch_shim_falls_back_without_native(self, tmp_path, layout):
         """Without a native Dispatch.h the shim still supplies THO_DISPATCH_*."""
         stub = dict(self._TORCH29_STUB)
@@ -4098,9 +4141,15 @@ class TestStableCompatHeaders:
         self._assert_compiles(
             tmp_path,
             flags,
+            # Twice: the body's own guard, not #pragma once, keeps it to one
+            # definition, so a repeat inclusion must not redefine scalar_type.
+            "#include <torch/headeronly/core/Dispatch.h>\n"
             "#include <torch/headeronly/core/Dispatch.h>\n"
             "#ifdef TORCHADA_HAS_NATIVE_THO_DISPATCH\n"
             '#error "no native Dispatch.h exists"\n'
+            "#endif\n"
+            "#ifndef TORCHADA_THO_DISPATCH_FALLBACK\n"
+            '#error "no stand-in in the chain compiled the fallback"\n'
             "#endif\n"
             "#if !defined(THO_DISPATCH_SWITCH) || !defined(THO_DISPATCH_CASE)\n"
             '#error "shim did not define the dispatch macros"\n'

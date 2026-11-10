@@ -1,4 +1,3 @@
-#pragma once
 // torchada stable-ABI compat: torch/headeronly/core/Dispatch.h
 //
 // Resolves to torch_musa's own Dispatch.h wherever the search path holds one
@@ -8,14 +7,24 @@
 // symbols they reference that it lacks
 // (torch::headeronly::impl::ScalarTypeToCPPTypeT, toString), aliased to the c10
 // equivalents.
+//
+// No #pragma once: a second copy of this directory later in the search path has
+// to be entered, not skipped as already-included, or the forward below resolves
+// to nothing and no THO_DISPATCH_* macro is defined at all.
+// TORCHADA_THO_DISPATCH_FALLBACK keeps the body to one definition instead, and
+// leaves TORCHADA_HAS_NATIVE_THO_DISPATCH meaning what it says.
 #if defined(__has_include_next)
 #if __has_include_next(<torch/headeronly/core/Dispatch.h>)
 #include_next <torch/headeronly/core/Dispatch.h>
+#ifndef TORCHADA_THO_DISPATCH_FALLBACK
 #define TORCHADA_HAS_NATIVE_THO_DISPATCH 1
 #endif
 #endif
+#endif
 
-#ifndef TORCHADA_HAS_NATIVE_THO_DISPATCH
+#if !defined(TORCHADA_HAS_NATIVE_THO_DISPATCH) && \
+    !defined(TORCHADA_THO_DISPATCH_FALLBACK)
+#define TORCHADA_THO_DISPATCH_FALLBACK 1
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/Exception.h>  // STD_TORCH_CHECK
@@ -89,4 +98,4 @@ inline torch::headeronly::ScalarType scalar_type(torch::headeronly::ScalarType s
 #define THO_DISPATCH_CASE(enum_type, ...) \
   THO_DISPATCH_CASE_TMPL(THO_PRIVATE_CASE_TYPE_USING_HINT, enum_type, __VA_ARGS__)
 
-#endif  // TORCHADA_HAS_NATIVE_THO_DISPATCH
+#endif  // TORCHADA_THO_DISPATCH_FALLBACK

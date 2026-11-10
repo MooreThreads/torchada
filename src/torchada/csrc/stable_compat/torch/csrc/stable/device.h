@@ -1,4 +1,3 @@
-#pragma once
 // torch_musa 2.9 has no torch/csrc/stable/device.h; newer libtorch-stable kernels
 // include it for torch::stable::Device / DeviceType. Provide them on the AOTI
 // C-shim. The force-included box header pulls this in before <tensor.h> so the
@@ -8,14 +7,24 @@
 // directory in the search path. Forward to that complete wrapper (including
 // device_inl.h), rather than including device_struct.h alone and silently
 // dropping inline definitions such as the string constructor.
+//
+// No #pragma once: a second copy of this directory later in the search path has
+// to be entered, not skipped as already-included, or the forward below resolves
+// to nothing and torch::stable::Device goes undefined.
+// TORCHADA_STABLE_DEVICE_FALLBACK keeps the body to one definition instead, and
+// leaves TORCHADA_HAS_NATIVE_STABLE_DEVICE meaning what it says.
 #if defined(__has_include_next)
 #if __has_include_next(<torch/csrc/stable/device.h>)
 #include_next <torch/csrc/stable/device.h>
+#ifndef TORCHADA_STABLE_DEVICE_FALLBACK
 #define TORCHADA_HAS_NATIVE_STABLE_DEVICE 1
 #endif
 #endif
+#endif
 
-#ifndef TORCHADA_HAS_NATIVE_STABLE_DEVICE
+#if !defined(TORCHADA_HAS_NATIVE_STABLE_DEVICE) && \
+    !defined(TORCHADA_STABLE_DEVICE_FALLBACK)
+#define TORCHADA_STABLE_DEVICE_FALLBACK 1
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <cstdint>
 namespace torch {
@@ -53,4 +62,4 @@ struct Device {
 };
 }  // namespace stable
 }  // namespace torch
-#endif  // TORCHADA_HAS_NATIVE_STABLE_DEVICE
+#endif  // TORCHADA_STABLE_DEVICE_FALLBACK

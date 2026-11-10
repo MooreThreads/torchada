@@ -457,17 +457,20 @@ Before adding a header here, check whether the supported torch_musa versions
 ship it (`find <torch_musa>/share/generated_cuda_compatible/include -name <h>`);
 if any does, it needs the forward.
 
-`macros.h` carries no `#pragma once`: it defines nothing itself, so every
-inclusion has to keep walking the search path. `device.h` and `Dispatch.h` do
-define fallbacks, so they keep a guard and a `TORCHADA_HAS_NATIVE_*` marker, and
-work while the compat directory appears once — enough for every real build,
-since the duplicate case needs two separate torchada installs on one include
-path.
+None of the three carries `#pragma once`, and a new stand-in must not either.
+GCC reports a byte-identical copy of a file as already included, so a second
+copy of this directory later in the search path (two torchada installs feeding
+one `-I` list) turns the `#include_next` into a no-op: with `#pragma once` the
+TU then gets neither the native header nor the fallback, and `torch::stable`
+goes undefined with no diagnostic pointing here. A stand-in that defines
+something guards its body with a `TORCHADA_*_FALLBACK` marker instead, and
+claims `TORCHADA_HAS_NATIVE_*` only when that marker is still unset, so both
+markers keep meaning what they say wherever the directory sits.
 
-`TestStableCompatHeaders` compiles all three stand-ins in both orders against
+`TestStableCompatHeaders` compiles all three stand-ins in every order against
 stub torch 2.9 and 2.13 header trees, and against torch_musa's real headers.
-Do not add a "compat dir listed twice" layout: both compilers drop a repeated
-`-I`, so it is the same search path as listing it once.
+The `compat_copy` layout is the duplicate case above; listing the *same* dir
+twice instead proves nothing, since both compilers drop a repeated `-I`.
 
 The real-header probe compiles against whatever torch_musa the host carries, so
 its body may only touch stable APIs **every** supported version declares.
@@ -501,7 +504,8 @@ sync when a switch is added.
 | `TORCH_MUSA_ARCH_LIST` | unset | torch_musa's `MUSAExtension` arch list, e.g. `31;32`; not read by torchada, rendered by `arch.torch_arch_list()` |
 
 `TORCHADA_STABLE_ACCESSORS`, `TORCHADA_HAS_NATIVE_STABLE_DEVICE`,
-`TORCHADA_HAS_NATIVE_THO_DISPATCH`,
+`TORCHADA_HAS_NATIVE_THO_DISPATCH`, `TORCHADA_STABLE_DEVICE_FALLBACK`,
+`TORCHADA_THO_DISPATCH_FALLBACK`,
 `TORCHADA_NV_BFLOAT16_ALIASED`, `TORCHADA_HAVE_AOTI_CUDA_STREAM`,
 `TORCHADA_PROBE_LIMIT`, and `TORCHADA_TUNE_USE_GRAPH` are internal probe
 overrides written by build/probe code — do not document them as user knobs.
