@@ -903,8 +903,9 @@ def include_paths(
 
         # Auto-append torchada's libtorch-stable ABI compat headers so
         # libtorch-stable kernels (vLLM, SGLang, ...) resolve
-        # <torch/headeronly/core/Dispatch.h> on MUSA. Appended LAST so a future
-        # torch_musa shipping the real header wins.
+        # <torch/headeronly/core/Dispatch.h> on MUSA. Position does not decide
+        # which copy wins: every stand-in that newer torch_musa also ships defers
+        # to the native header with #include_next (see stable_compat_include_dir).
         if include_device:
             paths.append(stable_compat_include_dir())
         if not torch_include_dirs:

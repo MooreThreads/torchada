@@ -3892,8 +3892,11 @@ class TestStableCompatHeaders:
 
     # Stand-ins for torch_musa's stable headers. torch 2.9 keeps the library
     # macros in library.h and has no macros.h/device.h; torch 2.11+ ships both,
-    # and includes macros.h from inside library.h (stableivalue_conversions.h,
-    # tensor_struct.h, ...), which is what a shadowing forward breaks.
+    # and from torch 2.13 the library.h chain itself includes macros.h
+    # (stableivalue_conversions.h, tensor_struct.h, accelerator.h, ...), which is
+    # what a shadowing forward breaks. The native-header tree below models 2.13:
+    # on 2.11 and 2.12 nothing includes <torch/csrc/stable/macros.h>, so a shadow
+    # there is latent rather than fatal.
     _AOTI_SHIM_STUB = (
         "#pragma once\n"
         "#include <cstdint>\n"
@@ -3936,7 +3939,7 @@ class TestStableCompatHeaders:
             "} }\n"
         ),
     }
-    _TORCH211_STUB = {
+    _TORCH213_STUB = {
         "torch/csrc/stable/macros.h": "#pragma once\n#define STUB_NATIVE_MACROS 1\n",
         "torch/csrc/stable/library.h": (
             "#pragma once\n"
@@ -4015,7 +4018,7 @@ class TestStableCompatHeaders:
         library.h, so torch 2.13 failed with STABLE_TORCH_ERROR_CODE_CHECK
         undeclared.
         """
-        flags = self._search_path(tmp_path, layout, self._TORCH211_STUB)
+        flags = self._search_path(tmp_path, layout, self._TORCH213_STUB)
         self._assert_compiles(
             tmp_path,
             flags,
@@ -4044,7 +4047,7 @@ class TestStableCompatHeaders:
     @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
     def test_device_shim_defers_to_native_device_in_any_order(self, tmp_path, layout):
         """On torch 2.11+ the native device.h wins wherever the compat dir sits."""
-        flags = self._search_path(tmp_path, layout, self._TORCH211_STUB)
+        flags = self._search_path(tmp_path, layout, self._TORCH213_STUB)
         self._assert_compiles(
             tmp_path,
             flags,
@@ -4077,7 +4080,7 @@ class TestStableCompatHeaders:
         ABI's own TORCH_STABLE_ONLY / TORCH_TARGET_VERSION, so shadowing the
         native header made the include order decide whether a stable TU builds.
         """
-        flags = self._search_path(tmp_path, layout, self._TORCH211_STUB)
+        flags = self._search_path(tmp_path, layout, self._TORCH213_STUB)
         self._assert_compiles(
             tmp_path,
             flags,
@@ -4130,6 +4133,13 @@ class TestStableCompatHeaders:
         stable_compat_include_dir() in include_dirs lands it ahead of torch_musa's
         own include dirs, where a forward that shadows a native header breaks the
         whole stable surface.
+
+        The probe body may only touch stable APIs that every torch_musa shipping
+        the native headers declares: STABLE_TORCH_ERROR_CODE_CHECK arrived in torch
+        2.13 (hence the #ifdef) and Device::is_privateuseone() exists in 2.13
+        alone, while index() is stable back to 2.9. Nothing is lost by guarding
+        them -- the shadowing failure surfaces inside torch's own accelerator.h,
+        which uses the macro itself on 2.13.
         """
         if _torch_minor_version() < 11:
             pytest.skip("torch_musa ships the native stable headers from torch 2.11")
@@ -4144,9 +4154,11 @@ class TestStableCompatHeaders:
             "#include <torch/csrc/stable/macros.h>\n"
             "#include <torch/csrc/stable/device.h>\n"
             "void probe() {\n"
+            "#ifdef STABLE_TORCH_ERROR_CODE_CHECK\n"
             "  STABLE_TORCH_ERROR_CODE_CHECK(AOTITorchError(0));\n"
+            "#endif\n"
             "  torch::stable::Device d(torch::stable::DeviceType::PrivateUse1, 0);\n"
-            "  (void)d.is_privateuseone();\n"
+            "  (void)d.index();\n"
             "}\n",
         )
 

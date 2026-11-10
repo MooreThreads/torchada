@@ -465,9 +465,19 @@ since the duplicate case needs two separate torchada installs on one include
 path.
 
 `TestStableCompatHeaders` compiles all three stand-ins in both orders against
-stub torch 2.9 and 2.11+ header trees, and against torch_musa's real headers.
+stub torch 2.9 and 2.13 header trees, and against torch_musa's real headers.
 Do not add a "compat dir listed twice" layout: both compilers drop a repeated
 `-I`, so it is the same search path as listing it once.
+
+The real-header probe compiles against whatever torch_musa the host carries, so
+its body may only touch stable APIs **every** supported version declares.
+`STABLE_TORCH_ERROR_CODE_CHECK` arrived in torch 2.13 and
+`Device::is_privateuseone()` exists in 2.13 alone, so a probe naming them
+unguarded is an unconditional red `pytest` on the documented 2.11 stack — guard
+the macro with `#ifdef` and prefer a member documented "Minimum compatible
+version: PyTorch 2.9" (`index()`, `type()`). Guarding costs nothing: on 2.13 the
+shadowed-forward failure surfaces inside torch's own `accelerator.h`, which uses
+the macro itself.
 
 ## Environment Variables
 
