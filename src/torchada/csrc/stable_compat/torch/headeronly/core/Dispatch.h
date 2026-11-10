@@ -6,17 +6,33 @@
 // 2.9.0. We ship
 // the macros (verbatim from upstream) plus the two symbols they reference that
 // torch_musa lacks (torch::headeronly::impl::ScalarTypeToCPPTypeT, toString),
-// aliased to the c10 equivalents that DO exist on torch_musa. torchada exposes
-// this directory via include_paths() so it shadows the (absent) torch header.
+// aliased to the c10 equivalents that DO exist on torch_musa.
+//
+// torch_musa 2.11+ does ship the real header, so defer to it whenever the
+// search path still holds one: the stand-in below pulls <torch/version.h> and
+// <c10/core/ScalarType.h>, which the native header does not and which hard
+// -#error under the stable ABI's own TORCH_STABLE_ONLY / TORCH_TARGET_VERSION
+// flags. Without this forward the directory's position would decide whether a
+// stable TU compiles, and an extension passing stable_compat_include_dir() in
+// include_dirs puts it first. Keep #pragma once: the fallback body defines an
+// inline function, so it must land at most once per TU.
+#if defined(__has_include_next)
+#if __has_include_next(<torch/headeronly/core/Dispatch.h>)
+#include_next <torch/headeronly/core/Dispatch.h>
+#define TORCHADA_HAS_NATIVE_THO_DISPATCH 1
+#endif
+#endif
+
+#ifndef TORCHADA_HAS_NATIVE_THO_DISPATCH
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/Exception.h>  // STD_TORCH_CHECK
 #include <torch/version.h>
 #include <c10/core/ScalarType.h>
 
-// torch 2.11+ provides these through ScalarType.h. Keep only the dispatch
-// macros below on that version: torch_musa's generated compatible include tree
-// may still omit Dispatch.h itself.
+// torch 2.11+ provides these through ScalarType.h, and only the dispatch macros
+// below are still needed there -- reached when a torch 2.11+ include tree omits
+// Dispatch.h itself, since a tree that ships it is taken by the forward above.
 #if TORCH_VERSION_MAJOR < 2 || \
     (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 11)
 namespace torch {
@@ -81,3 +97,5 @@ inline torch::headeronly::ScalarType scalar_type(torch::headeronly::ScalarType s
 
 #define THO_DISPATCH_CASE(enum_type, ...) \
   THO_DISPATCH_CASE_TMPL(THO_PRIVATE_CASE_TYPE_USING_HINT, enum_type, __VA_ARGS__)
+
+#endif  // TORCHADA_HAS_NATIVE_THO_DISPATCH

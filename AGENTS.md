@@ -443,6 +443,32 @@ Stable-ABI shims live in `src/torchada/csrc/stable_compat/` and must stay
 header-only additions; they exist so kernels built against `libtorch_stable`
 compile on MUSA without patching the dependency headers in place.
 
+A stand-in for a header that newer torch_musa also ships must defer to the real
+one with `#include_next`, guarded by `__has_include_next`. Three do today:
+`torch/csrc/stable/macros.h`, `torch/csrc/stable/device.h` and
+`torch/headeronly/core/Dispatch.h`. The directory's search-path position is not
+under torchada's control: `include_paths()` appends it last, but an extension's
+`include_dirs` puts it *ahead* of torch_musa's own directories, and a stand-in
+that wins there silently replaces a newer native header — for `macros.h` that
+resolves back into a `library.h` which `#pragma once` already skipped, and the
+whole stable surface fails to compile.
+
+Before adding a header here, check whether the supported torch_musa versions
+ship it (`find <torch_musa>/share/generated_cuda_compatible/include -name <h>`);
+if any does, it needs the forward.
+
+`macros.h` carries no `#pragma once`: it defines nothing itself, so every
+inclusion has to keep walking the search path. `device.h` and `Dispatch.h` do
+define fallbacks, so they keep a guard and a `TORCHADA_HAS_NATIVE_*` marker, and
+work while the compat directory appears once — enough for every real build,
+since the duplicate case needs two separate torchada installs on one include
+path.
+
+`TestStableCompatHeaders` compiles all three stand-ins in both orders against
+stub torch 2.9 and 2.11+ header trees, and against torch_musa's real headers.
+Do not add a "compat dir listed twice" layout: both compilers drop a repeated
+`-I`, so it is the same search path as listing it once.
+
 ## Environment Variables
 
 `README.md#environment-variables` is the canonical table; keep it and this list in
@@ -465,6 +491,7 @@ sync when a switch is added.
 | `TORCH_MUSA_ARCH_LIST` | unset | torch_musa's `MUSAExtension` arch list, e.g. `31;32`; not read by torchada, rendered by `arch.torch_arch_list()` |
 
 `TORCHADA_STABLE_ACCESSORS`, `TORCHADA_HAS_NATIVE_STABLE_DEVICE`,
+`TORCHADA_HAS_NATIVE_THO_DISPATCH`,
 `TORCHADA_NV_BFLOAT16_ALIASED`, `TORCHADA_HAVE_AOTI_CUDA_STREAM`,
 `TORCHADA_PROBE_LIMIT`, and `TORCHADA_TUNE_USE_GRAPH` are internal probe
 overrides written by build/probe code — do not document them as user knobs.

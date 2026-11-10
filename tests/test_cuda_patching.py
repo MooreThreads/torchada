@@ -11,6 +11,13 @@ import os
 import pytest
 
 
+def _torch_minor_version() -> int:
+    """torch's minor version, e.g. 13 for '2.13.0.post1+musa5.2.0'."""
+    import torch
+
+    return int(torch.__version__.split(".")[1])
+
+
 class TestTorchCudaModule:
     """Test torch.cuda module patching."""
 
@@ -3833,6 +3840,9 @@ class TestStableCompatHeaders:
         assert "THO_DISPATCH_SWITCH" in text
         assert "THO_DISPATCH_CASE" in text
         assert "ScalarTypeToCPPTypeT" in text
+        # torch_musa 2.11+ ships a real one; the stand-in must defer to it.
+        assert "#include_next <torch/headeronly/core/Dispatch.h>" in text
+        assert "TORCHADA_HAS_NATIVE_THO_DISPATCH" in text
 
     def test_device_shim_header_present(self):
         """torch/csrc/stable/device.h provides Device / DeviceType."""
@@ -3875,7 +3885,302 @@ class TestStableCompatHeaders:
 
         p = os.path.join(stable_compat_include_dir(), "torch", "csrc", "stable", "macros.h")
         assert os.path.isfile(p), f"macros.h shim missing: {p}"
-        assert "library.h" in open(p, encoding="utf-8").read()
+        text = open(p, encoding="utf-8").read()
+        assert "library.h" in text
+        # torch_musa 2.11+ ships a real macros.h; the forward must defer to it.
+        assert "#include_next <torch/csrc/stable/macros.h>" in text
+
+    # Stand-ins for torch_musa's stable headers. torch 2.9 keeps the library
+    # macros in library.h and has no macros.h/device.h; torch 2.11+ ships both,
+    # and includes macros.h from inside library.h (stableivalue_conversions.h,
+    # tensor_struct.h, ...), which is what a shadowing forward breaks.
+    _AOTI_SHIM_STUB = (
+        "#pragma once\n"
+        "#include <cstdint>\n"
+        "inline int32_t aoti_torch_device_type_cpu() { return 0; }\n"
+        "inline int32_t aoti_torch_device_type_cuda() { return 1; }\n"
+        "inline int32_t aoti_torch_device_type_privateuse1() { return 20; }\n"
+    )
+    _TORCH29_STUB = {
+        "torch/csrc/stable/library.h": "#pragma once\n#define STUB_LIBRARY_MACROS 1\n",
+        "torch/csrc/inductor/aoti_torch/c/shim.h": _AOTI_SHIM_STUB,
+    }
+    # What the Dispatch.h fallback body itself includes. Only needed by the
+    # no-native-header case, which actually compiles that body.
+    _THO_DEPS_STUB = {
+        "torch/version.h": (
+            "#pragma once\n#define TORCH_VERSION_MAJOR 2\n#define TORCH_VERSION_MINOR 9\n"
+        ),
+        "torch/headeronly/core/ScalarType.h": (
+            "#pragma once\n"
+            "namespace torch { namespace headeronly {\n"
+            "enum class ScalarType : signed char { Float = 6, Half = 5, BFloat16 = 15 };\n"
+            "} }\n"
+        ),
+        "torch/headeronly/macros/Macros.h": (
+            "#pragma once\n"
+            "#define C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED(x)\n"
+            "#define C10_DIAGNOSTIC_POP()\n"
+        ),
+        "torch/headeronly/util/Exception.h": (
+            "#pragma once\n#define STD_TORCH_CHECK(cond, ...) ((void)(cond))\n"
+        ),
+        "c10/core/ScalarType.h": (
+            "#pragma once\n"
+            "#include <torch/headeronly/core/ScalarType.h>\n"
+            "namespace c10 {\n"
+            "using ScalarType = torch::headeronly::ScalarType;\n"
+            'inline const char* toString(ScalarType) { return "stub"; }\n'
+            "namespace impl {\n"
+            "template <ScalarType N> struct ScalarTypeToCPPType { using type = float; };\n"
+            "} }\n"
+        ),
+    }
+    _TORCH211_STUB = {
+        "torch/csrc/stable/macros.h": "#pragma once\n#define STUB_NATIVE_MACROS 1\n",
+        "torch/csrc/stable/library.h": (
+            "#pragma once\n"
+            "#include <torch/csrc/stable/macros.h>\n"
+            "#ifndef STUB_NATIVE_MACROS\n"
+            '#error "torchada macros.h shadowed the native macros.h"\n'
+            "#endif\n"
+            "#define STUB_LIBRARY_MACROS 1\n"
+        ),
+        "torch/csrc/stable/device.h": "#pragma once\n#define STUB_NATIVE_DEVICE 1\n",
+        "torch/headeronly/core/Dispatch.h": ("#pragma once\n#define STUB_NATIVE_THO_DISPATCH 1\n"),
+    }
+
+    @staticmethod
+    def _host_cxx():
+        import shutil
+
+        for name in ("c++", "g++", "clang++"):
+            path = shutil.which(name)
+            if path:
+                return path
+        pytest.skip("requires a host C++ compiler")
+
+    @staticmethod
+    def _write_tree(root, files):
+        for rel, text in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return str(root)
+
+    def _search_path(self, tmp_path, layout, stub):
+        """Return -I flags for torchada's compat dir and a stub torch tree."""
+        import shutil
+
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        compat = stable_compat_include_dir()
+        torch_dir = self._write_tree(tmp_path / "torch_include", stub)
+        if layout == "compat_first":
+            dirs = [compat, torch_dir]
+        elif layout == "compat_last":
+            dirs = [torch_dir, compat]
+        elif layout == "compat_copy":
+            # A second, byte-identical copy (mtime preserved) of the directory.
+            # Listing `compat` itself twice would prove nothing: both compilers
+            # drop a repeated -I ("ignoring duplicate directory"), leaving one
+            # search path. A distinct copy survives that, and GCC's #pragma once
+            # still treats its files as already-included -- which is why the
+            # macros.h forward must not carry one.
+            copy = str(tmp_path / "compat_copy")
+            shutil.copytree(compat, copy, copy_function=shutil.copy2)
+            dirs = [compat, torch_dir, copy]
+        else:
+            raise AssertionError(layout)
+        return [f"-I{d}" for d in dirs]
+
+    def _assert_compiles(self, tmp_path, flags, source):
+        import subprocess
+
+        tu = tmp_path / "tu.cpp"
+        tu.write_text(source, encoding="utf-8")
+        result = subprocess.run(
+            [self._host_cxx(), "-std=c++17", "-fsyntax-only", *flags, str(tu)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    @pytest.mark.parametrize("entry", ["library.h", "macros.h"])
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last", "compat_copy"])
+    def test_macros_shim_defers_to_native_macros_in_any_order(self, tmp_path, layout, entry):
+        """On torch 2.11+ the native macros.h wins wherever the compat dir sits.
+
+        A compat dir ahead of torch_musa's made the torch 2.9 forward re-enter
+        library.h, so torch 2.13 failed with STABLE_TORCH_ERROR_CODE_CHECK
+        undeclared.
+        """
+        flags = self._search_path(tmp_path, layout, self._TORCH211_STUB)
+        self._assert_compiles(
+            tmp_path,
+            flags,
+            f"#include <torch/csrc/stable/{entry}>\n"
+            "#include <torch/csrc/stable/macros.h>\n"
+            "#include <torch/csrc/stable/library.h>\n"
+            "#if !defined(STUB_NATIVE_MACROS) || !defined(STUB_LIBRARY_MACROS)\n"
+            '#error "native stable macros missing"\n'
+            "#endif\n",
+        )
+
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last", "compat_copy"])
+    def test_macros_shim_falls_back_to_library_without_native_macros(self, tmp_path, layout):
+        """On torch 2.9 (no native macros.h) the forward still reaches library.h."""
+        flags = self._search_path(tmp_path, layout, self._TORCH29_STUB)
+        self._assert_compiles(
+            tmp_path,
+            flags,
+            "#include <torch/csrc/stable/macros.h>\n"
+            "#include <torch/csrc/stable/macros.h>\n"
+            "#ifndef STUB_LIBRARY_MACROS\n"
+            '#error "macros.h did not forward to library.h"\n'
+            "#endif\n",
+        )
+
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    def test_device_shim_defers_to_native_device_in_any_order(self, tmp_path, layout):
+        """On torch 2.11+ the native device.h wins wherever the compat dir sits."""
+        flags = self._search_path(tmp_path, layout, self._TORCH211_STUB)
+        self._assert_compiles(
+            tmp_path,
+            flags,
+            "#include <torch/csrc/stable/device.h>\n"
+            "#ifndef STUB_NATIVE_DEVICE\n"
+            '#error "native device.h was shadowed"\n'
+            "#endif\n",
+        )
+
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    def test_device_shim_falls_back_without_native_device(self, tmp_path, layout):
+        """On torch 2.9 (no native device.h) the shim defines torch::stable::Device."""
+        flags = self._search_path(tmp_path, layout, self._TORCH29_STUB)
+        self._assert_compiles(
+            tmp_path,
+            flags,
+            "#include <torch/csrc/stable/device.h>\n"
+            "#ifdef TORCHADA_HAS_NATIVE_STABLE_DEVICE\n"
+            '#error "no native device.h exists"\n'
+            "#endif\n"
+            'static_assert(sizeof(torch::stable::Device) > 0, "");\n'
+            "bool f(torch::stable::Device d) { return d.is_privateuseone(); }\n",
+        )
+
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    def test_dispatch_shim_defers_to_native_in_any_order(self, tmp_path, layout):
+        """On torch 2.11+ the native headeronly Dispatch.h wins wherever we sit.
+
+        The compat body pulls <torch/version.h>, which #errors under the stable
+        ABI's own TORCH_STABLE_ONLY / TORCH_TARGET_VERSION, so shadowing the
+        native header made the include order decide whether a stable TU builds.
+        """
+        flags = self._search_path(tmp_path, layout, self._TORCH211_STUB)
+        self._assert_compiles(
+            tmp_path,
+            flags,
+            "#include <torch/headeronly/core/Dispatch.h>\n"
+            "#ifndef STUB_NATIVE_THO_DISPATCH\n"
+            '#error "native headeronly Dispatch.h was shadowed"\n'
+            "#endif\n",
+        )
+
+    @pytest.mark.parametrize("layout", ["compat_first", "compat_last"])
+    def test_dispatch_shim_falls_back_without_native(self, tmp_path, layout):
+        """Without a native Dispatch.h the shim still supplies THO_DISPATCH_*."""
+        stub = dict(self._TORCH29_STUB)
+        stub.update(self._THO_DEPS_STUB)
+        flags = self._search_path(tmp_path, layout, stub)
+        self._assert_compiles(
+            tmp_path,
+            flags,
+            "#include <torch/headeronly/core/Dispatch.h>\n"
+            "#ifdef TORCHADA_HAS_NATIVE_THO_DISPATCH\n"
+            '#error "no native Dispatch.h exists"\n'
+            "#endif\n"
+            "#if !defined(THO_DISPATCH_SWITCH) || !defined(THO_DISPATCH_CASE)\n"
+            '#error "shim did not define the dispatch macros"\n'
+            "#endif\n"
+            "int probe(torch::headeronly::ScalarType s) {\n"
+            "  int n = 0;\n"
+            '  THO_DISPATCH_SWITCH(s, "probe",\n'
+            "      THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float,\n"
+            "                        [&] { n = sizeof(scalar_t); }));\n"
+            "  return n;\n"
+            "}\n",
+        )
+
+    def _real_header_flags(self, compat_first=True):
+        """-I flags pairing the compat dir with torch_musa's real include dirs."""
+        from torchada.utils.cpp_extension import include_paths, stable_compat_include_dir
+
+        compat = stable_compat_include_dir()
+        others = [p for p in include_paths(device_type="cuda") if p != compat]
+        dirs = [compat] + others if compat_first else others + [compat]
+        return [f"-I{d}" for d in dirs]
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize("compat_first", [True, False])
+    def test_stable_headers_compile_against_real_torch_musa(self, tmp_path, compat_first):
+        """torch_musa's real stable headers compile with the compat dir either side.
+
+        The counterpart to the stub-tree tests above: an extension passing
+        stable_compat_include_dir() in include_dirs lands it ahead of torch_musa's
+        own include dirs, where a forward that shadows a native header breaks the
+        whole stable surface.
+        """
+        if _torch_minor_version() < 11:
+            pytest.skip("torch_musa ships the native stable headers from torch 2.11")
+
+        self._assert_compiles(
+            tmp_path,
+            self._real_header_flags(compat_first),
+            "#include <torch/csrc/stable/library.h>\n"
+            "#include <torch/csrc/stable/tensor.h>\n"
+            "#include <torch/csrc/stable/ops.h>\n"
+            "#include <torch/csrc/stable/accelerator.h>\n"
+            "#include <torch/csrc/stable/macros.h>\n"
+            "#include <torch/csrc/stable/device.h>\n"
+            "void probe() {\n"
+            "  STABLE_TORCH_ERROR_CODE_CHECK(AOTITorchError(0));\n"
+            "  torch::stable::Device d(torch::stable::DeviceType::PrivateUse1, 0);\n"
+            "  (void)d.is_privateuseone();\n"
+            "}\n",
+        )
+
+    @pytest.mark.musa
+    @pytest.mark.parametrize("compat_first", [True, False])
+    @pytest.mark.parametrize(
+        "flag", ["-DTORCH_STABLE_ONLY", "-DTORCH_TARGET_VERSION=0x020B000000000000ULL"]
+    )
+    def test_tho_dispatch_compiles_under_stable_only_flags(self, tmp_path, flag, compat_first):
+        """A THO_DISPATCH TU builds under the stable-only flags, either order.
+
+        Upstream vLLM compiles its libtorch_stable targets with
+        TORCH_TARGET_VERSION defined, and its dispatch_utils.h includes the
+        headeronly Dispatch.h. While the compat copy shadowed the native header it
+        dragged in <torch/version.h>, which #errors under these flags, so the same
+        source compiled with the compat dir last and failed with it first.
+        """
+        if _torch_minor_version() < 11:
+            pytest.skip("torch_musa ships the native stable headers from torch 2.11")
+
+        self._assert_compiles(
+            tmp_path,
+            self._real_header_flags(compat_first) + [flag],
+            # STD_TORCH_CHECK, as the native header expects its callers to provide.
+            "#include <torch/headeronly/util/Exception.h>\n"
+            "#include <torch/headeronly/core/Dispatch.h>\n"
+            "int probe(torch::headeronly::ScalarType s) {\n"
+            "  int n = 0;\n"
+            '  THO_DISPATCH_SWITCH(s, "probe",\n'
+            "      THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float,\n"
+            "                        [&] { n = sizeof(scalar_t); }));\n"
+            "  return n;\n"
+            "}\n",
+        )
 
     def test_box_header_defines_torch_box(self):
         """The force-include header defines TORCH_BOX for STABLE_TORCH_LIBRARY_IMPL."""

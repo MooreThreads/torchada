@@ -288,7 +288,11 @@ torch_musa 2.9. The patched `torch.utils.cpp_extension.include_paths()` exposes
 the compatibility include directory on MUSA. Custom stable-ABI builds should
 add `stable_compat_include_dir()` explicitly, and kernels that use `TORCH_BOX`
 must force-include the path returned by `stable_compat_box_header()`. Both
-helpers are available from `torchada.utils.cpp_extension`. The torch_musa 2.9
+helpers are available from `torchada.utils.cpp_extension`. Every header in that
+directory that newer torch_musa also ships (`torch/csrc/stable/macros.h`,
+`torch/csrc/stable/device.h`, `torch/headeronly/core/Dispatch.h`) defers to
+torch_musa's own copy on torch 2.11 and newer, so the directory may come before
+or after torch_musa's include directories. The torch_musa 2.9
 header backport runs lazily and best-effort at MUSA extension
 build time on torch 2.9; read-only headers are left unchanged. Torch 2.11 and
 newer provide the stable ABI directly, so the backport is skipped. A plain

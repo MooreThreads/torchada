@@ -940,6 +940,12 @@ def stable_compat_include_dir() -> str:
     shadows the (absent) ``torch/headeronly/core/Dispatch.h`` with a THO_DISPATCH
     shim. Pair with ``stable_compat_box_header`` (force-include) to also get the
     ``TORCH_BOX`` shim + ``CUDA_VERSION`` define.
+
+    Every header here that newer torch_musa also ships
+    (``torch/csrc/stable/macros.h``, ``torch/csrc/stable/device.h``,
+    ``torch/headeronly/core/Dispatch.h``) defers to torch_musa's own copy through
+    ``#include_next`` (torch 2.11+), so ``include_dirs`` may list this directory
+    before or after torch_musa's include directories.
     """
     return os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
