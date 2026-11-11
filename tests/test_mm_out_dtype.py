@@ -51,28 +51,6 @@ def _computing_op(calls):
     return op
 
 
-@pytest.fixture(autouse=True)
-def _no_leaked_bindings():
-    """Fail the test that leaves the backport's bindings behind.
-
-    Autouse fixtures are set up before ``monkeypatch``, so this teardown runs
-    after its undo and sees what the next test inherits. A leak is invisible
-    where it happens and lethal later: with ``_original_torch_mm`` back to
-    ``None``, the next promoted ``out_dtype`` call sends the probe into the
-    leaked wrapper, which asks the probe for its verdict again and deadlocks on
-    the non-reentrant ``_MM_OUT_DTYPE_PROBE_LOCK``.
-    """
-    names = ("torch.mm", "torch.bmm", "_original_torch_mm", "_original_torch_bmm")
-
-    def bindings():
-        return (torch.mm, torch.bmm, _patch._original_torch_mm, _patch._original_torch_bmm)
-
-    before = bindings()
-    yield
-    leaked = [name for name, was, now in zip(names, before, bindings()) if was is not now]
-    assert not leaked, f"left behind for the next test: {', '.join(leaked)}"
-
-
 class TestMMOutDtypeGating:
     """The backport must stay a no-op unless the probe reports a broken op."""
 

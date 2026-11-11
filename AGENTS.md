@@ -183,9 +183,12 @@ attribute the patch touches (`monkeypatch.setattr(torch, name, getattr(torch, na
 or restore it in a `finally`) and stub `_register_jit_builtin_alias`, which keys
 torch.jit's builtin table on `id(wrapper)`: a dead test wrapper leaves an entry
 behind that whatever later object reuses its id inherits as the aliased op.
-A leak here is invisible where it happens: `tests/test_mm_out_dtype.py` therefore
-carries an autouse fixture that compares the bindings before and after every test
-in the module, and it is the shape to copy.
+A leak here is invisible where it happens, so the check does not live with the tests
+that arm the patch: `tests/conftest.py` carries an autouse fixture comparing
+`torch.mm`, `torch.bmm` and both `_original_torch_*` globals before and after **every**
+test in the suite. Extend that fixture rather than writing a module-local one when a new
+patch's wrappers become leakable — a module-local check only guards the module that
+already knows about the problem.
 
 **Where a new test goes** — one module per feature area already exists; add to it
 instead of creating `test_misc.py`:
