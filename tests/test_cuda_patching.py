@@ -1107,6 +1107,29 @@ class TestTensorIsCuda:
 class TestVisibleDevicesEnv:
     """Test CUDA_VISIBLE_DEVICES and MUSA_VISIBLE_DEVICES fallback."""
 
+    @pytest.fixture(autouse=True)
+    def _monkeypatch_owns_both_masks(self, monkeypatch):
+        """Hand both masks to ``monkeypatch`` before the patch under test writes one.
+
+        ``_patch_visible_devices_env()`` assigns ``os.environ`` itself, and
+        ``monkeypatch`` only undoes a key it already owns.  ``delenv(raising=False)``
+        on a *missing* key records nothing at all (``MonkeyPatch.delitem`` appends to
+        its undo list only in the ``else`` branch), so the two tests that delete
+        ``MUSA_VISIBLE_DEVICES`` and then let the patch recreate it used to leave the
+        mask set for the rest of the session - ``1,3`` from the first of them.  Every
+        subprocess a later test spawns inherits that, which hides the GPU on any host
+        without a device 3.  Assigning each name through ``monkeypatch`` first makes
+        it own the key whether or not the environment already had it, so teardown
+        restores the exact prior state.
+
+        Requesting ``monkeypatch`` here is deliberate: this fixture becomes its
+        dependent, so ``monkeypatch`` is set up first and torn down last, after the
+        pins are in place.  The suite-wide check in ``conftest.py`` must stay
+        argument-free for the opposite reason - see its docstring.
+        """
+        for name in ("MUSA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+            monkeypatch.setenv(name, os.environ.get(name, ""))
+
     def test_musa_visible_devices_syncs_to_cuda_visible_devices(self, monkeypatch):
         """Test CUDA_VISIBLE_DEVICES mirrors MUSA_VISIBLE_DEVICES."""
         from torchada import _patch

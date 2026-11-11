@@ -183,6 +183,16 @@ attribute the patch touches (`monkeypatch.setattr(torch, name, getattr(torch, na
 or restore it in a `finally`) and stub `_register_jit_builtin_alias`, which keys
 torch.jit's builtin table on `id(wrapper)`: a dead test wrapper leaves an entry
 behind that whatever later object reuses its id inherits as the aliased op.
+
+The environment is the same hazard with a sharper edge. `monkeypatch.delenv(name,
+raising=False)` records **nothing** when the name is not set, so a test that deletes
+`MUSA_VISIBLE_DEVICES` and then lets `_patch_visible_devices_env()` recreate it leaks
+the mask for the rest of the session — and every subprocess a later test spawns
+inherits it, which hides the GPU on a host that does not have the devices it names.
+Hand the key to `monkeypatch` first (`monkeypatch.setenv(name, os.environ.get(name,
+""))`), then set or delete it; that owns the key whether or not the environment
+already had it.
+
 A leak here is invisible where it happens, so the check does not live with the tests
 that arm the patch: `tests/conftest.py` carries an autouse fixture comparing
 `torch.mm`, `torch.bmm` and both `_original_torch_*` globals before and after **every**
