@@ -2,10 +2,15 @@
 Pytest configuration and fixtures for torchada tests.
 """
 
+import os
+
 import pytest
 
 # Ensure torchada is imported first to apply patches
 import torchada
+
+_ABSENT = object()
+_WATCHED_ENV = ("MUSA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 
 def pytest_configure(config):
@@ -17,37 +22,53 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _no_leaked_patch_bindings():
-    """Fail the test that leaves torchada's ``out_dtype`` backport bindings behind.
+def _no_leaked_patch_state():
+    """Fail the test that leaves state a torchada patch wrote behind for the next one.
 
-    ``@patch_function`` bodies assign ``torch.*`` attributes themselves and
-    ``monkeypatch`` can only undo an assignment it made, so a test that arms
-    ``_patch._patch_mm_out_dtype()`` leaks a wrapper unless it pins every op the
-    patch touches.  The leak is invisible in the test that causes it and lethal
-    later: with ``_original_torch_mm`` back to ``None``, the next promoted
-    ``out_dtype`` call sends the probe into the leaked wrapper, which asks the
-    probe for its verdict again and deadlocks on the non-reentrant
-    ``_MM_OUT_DTYPE_PROBE_LOCK``.  Hence a suite-wide check rather than one
-    module's: autouse fixtures are set up before ``monkeypatch``, so this
-    teardown runs after its undo and sees what the next test inherits.
+    ``@patch_function`` bodies assign ``torch.*`` attributes and ``os.environ``
+    entries themselves, and ``monkeypatch`` can only undo a binding it owns, so a
+    test that arms a patch leaks whatever it did not pin.  The leak is invisible
+    where it happens and only bites some later test, which is why the check is
+    suite-wide rather than module-local.  Two have cost real debugging time:
 
-    Keep it argument-free.  Requesting ``monkeypatch`` here would make this a
-    dependent of it, so pytest would set ``monkeypatch`` up first and finalize it
-    last - the comparison would then run *before* the undo and flag every test
-    that pins a binding.
+    * ``torch.mm`` / ``torch.bmm``.  With ``_original_torch_mm`` back to ``None``,
+      the next promoted ``out_dtype`` call sends ``_probe_out_dtype_broken_ops()``
+      into the leaked wrapper, which asks the probe for its verdict again and
+      deadlocks on the non-reentrant ``_MM_OUT_DTYPE_PROBE_LOCK``.
+    * ``MUSA_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES``.  A leaked mask is
+      inherited by every subprocess a later test spawns, so tests that compile or
+      probe in a child process stop seeing the GPU.
+
+    Autouse fixtures are set up before ``monkeypatch``, so this teardown runs after
+    its undo and sees exactly what the next test inherits.  Keep it argument-free:
+    requesting ``monkeypatch`` would make this a dependent of it, pytest would then
+    set ``monkeypatch`` up first and finalize it last, and the comparison would run
+    *before* the undo and flag every test that pins anything.
+
+    Compare the env half by value, not identity - ``os.environ`` decodes a fresh
+    ``str`` on every lookup, so ``is`` reports a leak for any mask that is merely
+    present.
     """
     import torch
 
     from torchada import _patch
 
-    names = ("torch.mm", "torch.bmm", "_original_torch_mm", "_original_torch_bmm")
-
     def bindings():
-        return (torch.mm, torch.bmm, _patch._original_torch_mm, _patch._original_torch_bmm)
+        return {
+            "torch.mm": torch.mm,
+            "torch.bmm": torch.bmm,
+            "_original_torch_mm": _patch._original_torch_mm,
+            "_original_torch_bmm": _patch._original_torch_bmm,
+        }
 
-    before = bindings()
+    def masks():
+        return {name: os.environ.get(name, _ABSENT) for name in _WATCHED_ENV}
+
+    bindings_before, masks_before = bindings(), masks()
     yield
-    leaked = [name for name, was, now in zip(names, before, bindings()) if was is not now]
+    bindings_after, masks_after = bindings(), masks()
+    leaked = [name for name, was in bindings_before.items() if bindings_after[name] is not was]
+    leaked += [name for name, was in masks_before.items() if masks_after[name] != was]
     assert not leaked, f"left behind for the next test: {', '.join(leaked)}"
 
 

@@ -193,12 +193,14 @@ Hand the key to `monkeypatch` first (`monkeypatch.setenv(name, os.environ.get(na
 ""))`), then set or delete it; that owns the key whether or not the environment
 already had it.
 
-A leak here is invisible where it happens, so the check does not live with the tests
-that arm the patch: `tests/conftest.py` carries an autouse fixture comparing
-`torch.mm`, `torch.bmm` and both `_original_torch_*` globals before and after **every**
-test in the suite. Extend that fixture rather than writing a module-local one when a new
-patch's wrappers become leakable — a module-local check only guards the module that
-already knows about the problem.
+A leak of either kind is invisible where it happens, so the check does not live with
+the tests that arm the patch: `tests/conftest.py` carries an autouse fixture comparing
+`torch.mm`, `torch.bmm`, both `_original_torch_*` globals and both `*_VISIBLE_DEVICES`
+masks before and after **every** test in the suite. Extend that fixture rather than
+writing a module-local one when a new patch's writes become leakable — a module-local
+check only guards the module that already knows about the problem. Compare process
+state the way the state itself compares: identity for a patched callable, value for an
+environment variable (`os.environ` decodes a fresh `str` on every lookup).
 
 **Where a new test goes** — one module per feature area already exists; add to it
 instead of creating `test_misc.py`:
