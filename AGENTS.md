@@ -356,6 +356,16 @@ chore: bump torchada to 0.1.103
 - The body carries the *why* and the evidence: measured numbers, the
   `torch_musa`/`torch` versions involved, the failure that motivated the fix.
 - Reference the issue when one exists (`Fixes #101`).
+- **Sign off every commit** (`git commit -s`, i.e. `Signed-off-by: <you>`). Nothing
+  enforces it — no DCO bot, no commit-msg hook, and `web_commit_signoff_required` is
+  false — but it is the maintainer's standing instruction and what nearly every recent
+  commit on `main` carries.
+- **No AI co-author trailers** on anything that reaches a PR here. Squash merge is
+  enabled with `squash_merge_commit_message: COMMIT_MESSAGES`, so a trailer on a branch
+  commit lands in `main`'s history verbatim, while a PR-body footer never reaches `main`
+  at all. Disclose AI assistance in the **PR body** as one prose line
+  (`AI assistance: ...`, the shape #146 merged with), never as a generated-by footer —
+  no merged PR body carries one.
 
 ## Review Comments
 
