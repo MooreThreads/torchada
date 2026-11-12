@@ -93,6 +93,16 @@ static inline AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_i
 #define TORCH_UTILS_CHECK STD_TORCH_CHECK
 #endif
 
+// A libtorch-stable kernel ported to MUSA may call ATen's TORCH_CHECK, and may
+// stream a ScalarType into a check message (the operator<< lives in
+// <c10/core/ScalarType.h>; a TU that gets ScalarType from a lighter header does
+// not have it). Neither is declared by the stable headers such a TU includes,
+// so both come from here, which every stable TU force-includes. A stand-in for
+// a header torch_musa also ships cannot carry them: it defers to the native
+// copy, which declares neither.
+#include <c10/core/ScalarType.h>
+#include <c10/util/Exception.h>
+
 // --- torch < 2.11 backport: boxer, Device, stable free functions ---
 // PyTorch 2.11+ already provides the boxer, Device, HeaderOnlyArrayRef and the
 // stable free functions below, so compiling the backport there would redefine
@@ -140,14 +150,6 @@ using HeaderOnlyArrayRef = c10::ArrayRef<T>;
 using IntHeaderOnlyArrayRef = c10::ArrayRef<int64_t>;
 }  // namespace headeronly
 }  // namespace torch
-
-// STD_TORCH_CHECK error messages in some libtorch-stable kernels (e.g.
-// selective_scan_fwd's dispatch default case) stream a c10::ScalarType into the
-// ostringstream. The operator<<(ostream&, ScalarType) lives in
-// <c10/core/ScalarType.h>, which those TUs do not transitively include (they
-// get ScalarType from a lighter header). Pull it in here -- the box header is
-// force-included in every stable TU -- so the streaming operator is in scope.
-#include <c10/core/ScalarType.h>
 
 // torch_musa's stable ops.h predates torch::stable::contiguous (used by
 // libtorch_stable/layernorm_kernels.cu when input.stride(-1) != 1). Provide it
