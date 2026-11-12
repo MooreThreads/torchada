@@ -4264,27 +4264,24 @@ class TestStableCompatHeaders:
             "}\n",
         )
 
-    @pytest.mark.musa
-    @pytest.mark.parametrize("compat_first", [True, False])
-    def test_box_header_provides_aten_check_for_ported_kernels(self, tmp_path, compat_first):
-        """A TU that calls ATen's TORCH_CHECK compiles on the box header alone.
+    def test_box_header_declares_the_aten_check_a_ported_kernel_calls(self):
+        """ATen's TORCH_CHECK and ScalarType streaming are in the always-on part.
 
-        The shape a ported stable kernel presents: it calls TORCH_CHECK with a
-        ScalarType in the message and includes no ATen header, so the force-
-        included box header is the only thing that can declare either. The
-        stand-in next to it cannot, since it defers to torch_musa's own
-        Dispatch.h wherever that ships.
+        A ported kernel that calls TORCH_CHECK with a ScalarType in the message
+        includes no ATen header itself, and the stand-in beside this one cannot
+        help: it defers to torch_musa's own Dispatch.h wherever that ships. So
+        both includes have to sit ahead of the torch < 2.11 backport guard,
+        where every supported version reaches them. The build that needs them is
+        in test_stable_abi.py.
         """
         from torchada.utils.cpp_extension import stable_compat_box_header
 
-        self._assert_compiles(
-            tmp_path,
-            self._real_header_flags(compat_first) + ["-include", stable_compat_box_header()],
-            "#include <torch/headeronly/core/Dispatch.h>\n"
-            "void probe(at::ScalarType s) {\n"
-            '  TORCH_CHECK(false, "unsupported input type: ", s);\n'
-            "}\n",
-        )
+        text = open(stable_compat_box_header(), encoding="utf-8").read()
+        backport = text.index("TORCH_VERSION_MINOR < 11")
+        for header in ("<c10/util/Exception.h>", "<c10/core/ScalarType.h>"):
+            at = text.find(f"#include {header}")
+            assert at != -1, f"{header} missing from the box header"
+            assert at < backport, f"{header} is only in the torch < 2.11 backport"
 
     def test_box_header_defines_torch_box(self):
         """The force-include header defines TORCH_BOX for STABLE_TORCH_LIBRARY_IMPL."""
