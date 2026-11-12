@@ -480,6 +480,15 @@ Stable-ABI shims live in `src/torchada/csrc/stable_compat/` and must stay
 header-only additions; they exist so kernels built against `libtorch_stable`
 compile on MUSA without patching the dependency headers in place.
 
+What a ported kernel needs beyond the stable surface belongs in
+`torchada_stable_box.h`, which downstream force-includes in every stable TU, and
+in its always-on part when every supported torch_musa needs it — not in a
+stand-in, which provides nothing wherever it defers to a native header. The ATen
+`TORCH_CHECK` and `ScalarType` streaming that MUSA ports call for are declared
+there for that reason. A TU missing one of them fails on an undeclared name that
+names no file in this directory, so the two includes stay even though no
+torchada source needs them.
+
 A stand-in for a header that newer torch_musa also ships must defer to the real
 one with `#include_next`, guarded by `__has_include_next`. Three do today:
 `torch/csrc/stable/macros.h`, `torch/csrc/stable/device.h` and

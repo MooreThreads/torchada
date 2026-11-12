@@ -4264,6 +4264,28 @@ class TestStableCompatHeaders:
             "}\n",
         )
 
+    @pytest.mark.musa
+    @pytest.mark.parametrize("compat_first", [True, False])
+    def test_box_header_provides_aten_check_for_ported_kernels(self, tmp_path, compat_first):
+        """A TU that calls ATen's TORCH_CHECK compiles on the box header alone.
+
+        The shape a ported stable kernel presents: it calls TORCH_CHECK with a
+        ScalarType in the message and includes no ATen header, so the force-
+        included box header is the only thing that can declare either. The
+        stand-in next to it cannot, since it defers to torch_musa's own
+        Dispatch.h wherever that ships.
+        """
+        from torchada.utils.cpp_extension import stable_compat_box_header
+
+        self._assert_compiles(
+            tmp_path,
+            self._real_header_flags(compat_first) + ["-include", stable_compat_box_header()],
+            "#include <torch/headeronly/core/Dispatch.h>\n"
+            "void probe(at::ScalarType s) {\n"
+            '  TORCH_CHECK(false, "unsupported input type: ", s);\n'
+            "}\n",
+        )
+
     def test_box_header_defines_torch_box(self):
         """The force-include header defines TORCH_BOX for STABLE_TORCH_LIBRARY_IMPL."""
         from torchada.utils.cpp_extension import stable_compat_box_header
