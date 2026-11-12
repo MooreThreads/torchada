@@ -175,6 +175,33 @@ pytest tests/test_platform.py -q
 `conftest.py` imports `torchada` before pytest collects anything, so patches are
 active in every test. Skip by marker, never by deleting a test.
 
+**A test that applies a patch pins what the patch assigns.** `@patch_function`
+bodies write `torch.*` attributes themselves, and `monkeypatch` can only undo an
+assignment it made, so a test that stands in for `torch.mm` and lets the patch
+install `torch.bmm` leaks that wrapper into every test after it. Pin every
+attribute the patch touches (`monkeypatch.setattr(torch, name, getattr(torch, name))`,
+or restore it in a `finally`) and stub `_register_jit_builtin_alias`, which keys
+torch.jit's builtin table on `id(wrapper)`: a dead test wrapper leaves an entry
+behind that whatever later object reuses its id inherits as the aliased op.
+
+The environment is the same hazard with a sharper edge. `monkeypatch.delenv(name,
+raising=False)` records **nothing** when the name is not set, so a test that deletes
+`MUSA_VISIBLE_DEVICES` and then lets `_patch_visible_devices_env()` recreate it leaks
+the mask for the rest of the session — and every subprocess a later test spawns
+inherits it, which hides the GPU on a host that does not have the devices it names.
+Hand the key to `monkeypatch` first (`monkeypatch.setenv(name, os.environ.get(name,
+""))`), then set or delete it; that owns the key whether or not the environment
+already had it.
+
+A leak of either kind is invisible where it happens, so the check does not live with
+the tests that arm the patch: `tests/conftest.py` carries an autouse fixture comparing
+`torch.mm`, `torch.bmm`, both `_original_torch_*` globals and both `*_VISIBLE_DEVICES`
+masks before and after **every** test in the suite. Extend that fixture rather than
+writing a module-local one when a new patch's writes become leakable — a module-local
+check only guards the module that already knows about the problem. Compare process
+state the way the state itself compares: identity for a patched callable, value for an
+environment variable (`os.environ` decodes a fresh `str` on every lookup).
+
 **Where a new test goes** — one module per feature area already exists; add to it
 instead of creating `test_misc.py`:
 
@@ -341,6 +368,16 @@ chore: bump torchada to 0.1.103
 - The body carries the *why* and the evidence: measured numbers, the
   `torch_musa`/`torch` versions involved, the failure that motivated the fix.
 - Reference the issue when one exists (`Fixes #101`).
+- **Sign off every commit** (`git commit -s`, i.e. `Signed-off-by: <you>`). Nothing
+  enforces it — no DCO bot, no commit-msg hook, and `web_commit_signoff_required` is
+  false — but it is the maintainer's standing instruction and what nearly every recent
+  commit on `main` carries.
+- **No AI co-author trailers** on anything that reaches a PR here. Squash merge is
+  enabled with `squash_merge_commit_message: COMMIT_MESSAGES`, so a trailer on a branch
+  commit lands in `main`'s history verbatim, while a PR-body footer never reaches `main`
+  at all. Disclose AI assistance in the **PR body** as one prose line
+  (`AI assistance: ...`, the shape #146 merged with), never as a generated-by footer —
+  no merged PR body carries one.
 
 ## Review Comments
 
@@ -443,6 +480,45 @@ Stable-ABI shims live in `src/torchada/csrc/stable_compat/` and must stay
 header-only additions; they exist so kernels built against `libtorch_stable`
 compile on MUSA without patching the dependency headers in place.
 
+A stand-in for a header that newer torch_musa also ships must defer to the real
+one with `#include_next`, guarded by `__has_include_next`. Three do today:
+`torch/csrc/stable/macros.h`, `torch/csrc/stable/device.h` and
+`torch/headeronly/core/Dispatch.h`. The directory's search-path position is not
+under torchada's control: `include_paths()` appends it last, but an extension's
+`include_dirs` puts it *ahead* of torch_musa's own directories, and a stand-in
+that wins there silently replaces a newer native header — for `macros.h` that
+resolves back into a `library.h` which `#pragma once` already skipped, and the
+whole stable surface fails to compile.
+
+Before adding a header here, check whether the supported torch_musa versions
+ship it (`find <torch_musa>/share/generated_cuda_compatible/include -name <h>`);
+if any does, it needs the forward.
+
+None of the three carries `#pragma once`, and a new stand-in must not either.
+GCC reports a byte-identical copy of a file as already included, so a second
+copy of this directory later in the search path (two torchada installs feeding
+one `-I` list) turns the `#include_next` into a no-op: with `#pragma once` the
+TU then gets neither the native header nor the fallback, and `torch::stable`
+goes undefined with no diagnostic pointing here. A stand-in that defines
+something guards its body with a `TORCHADA_*_FALLBACK` marker instead, and
+claims `TORCHADA_HAS_NATIVE_*` only when that marker is still unset, so both
+markers keep meaning what they say wherever the directory sits.
+
+`TestStableCompatHeaders` compiles all three stand-ins in every order against
+stub torch 2.9 and 2.13 header trees, and against torch_musa's real headers.
+The `compat_copy` layout is the duplicate case above; listing the *same* dir
+twice instead proves nothing, since both compilers drop a repeated `-I`.
+
+The real-header probe compiles against whatever torch_musa the host carries, so
+its body may only touch stable APIs **every** supported version declares.
+`STABLE_TORCH_ERROR_CODE_CHECK` arrived in torch 2.13 and
+`Device::is_privateuseone()` exists in 2.13 alone, so a probe naming them
+unguarded is an unconditional red `pytest` on the documented 2.11 stack — guard
+the macro with `#ifdef` and prefer a member documented "Minimum compatible
+version: PyTorch 2.9" (`index()`, `type()`). Guarding costs nothing: on 2.13 the
+shadowed-forward failure surfaces inside torch's own `accelerator.h`, which uses
+the macro itself.
+
 ## Environment Variables
 
 `README.md#environment-variables` is the canonical table; keep it and this list in
@@ -465,6 +541,8 @@ sync when a switch is added.
 | `TORCH_MUSA_ARCH_LIST` | unset | torch_musa's `MUSAExtension` arch list, e.g. `31;32`; not read by torchada, rendered by `arch.torch_arch_list()` |
 
 `TORCHADA_STABLE_ACCESSORS`, `TORCHADA_HAS_NATIVE_STABLE_DEVICE`,
+`TORCHADA_HAS_NATIVE_THO_DISPATCH`, `TORCHADA_STABLE_DEVICE_FALLBACK`,
+`TORCHADA_THO_DISPATCH_FALLBACK`,
 `TORCHADA_NV_BFLOAT16_ALIASED`, `TORCHADA_HAVE_AOTI_CUDA_STREAM`,
 `TORCHADA_PROBE_LIMIT`, and `TORCHADA_TUNE_USE_GRAPH` are internal probe
 overrides written by build/probe code — do not document them as user knobs.

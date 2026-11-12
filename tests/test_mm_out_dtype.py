@@ -61,6 +61,15 @@ class TestMMOutDtypeGating:
         from types import ModuleType, SimpleNamespace
 
         monkeypatch.setitem(sys.modules, "torch_musa", ModuleType("torch_musa"))
+        # The patch function assigns torch.mm/torch.bmm itself, and monkeypatch
+        # cannot undo an assignment it did not make: pin both so its teardown
+        # restores them even for the ops a test does not stand in for. The alias
+        # registry is stubbed for the same reason - it keys torch.jit's builtin
+        # table on id(wrapper), so a dead test wrapper leaves an entry behind that
+        # whatever later object reuses its id inherits as aten::mm / aten::bmm.
+        for op_name in ("mm", "bmm"):
+            monkeypatch.setattr(torch, op_name, getattr(torch, op_name))
+        monkeypatch.setattr(_patch, "_register_jit_builtin_alias", lambda original, wrapper: None)
         monkeypatch.setattr(_patch, "is_musa_platform", lambda: True)
         monkeypatch.setattr(_patch, "_original_torch_mm", None)
         monkeypatch.setattr(_patch, "_original_torch_bmm", None)
@@ -82,7 +91,9 @@ class TestMMOutDtypeGating:
         probes = []
         self._install_patch(monkeypatch, {"mm": True, "bmm": True})
         monkeypatch.setattr(
-            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+            _patch,
+            "_probe_out_dtype_broken_ops",
+            lambda: probes.append(1) or {"mm": True, "bmm": True},
         )
 
         _patch._patch_mm_out_dtype()
@@ -98,7 +109,11 @@ class TestMMOutDtypeGating:
         self._install_patch(monkeypatch, {"mm": False, "bmm": False})
 
         _patch._patch_mm_out_dtype()
-        result = torch.mm(torch.randn(2, 3, dtype=torch.bfloat16), torch.randn(3, 2, dtype=torch.bfloat16), out_dtype=torch.float32)
+        result = torch.mm(
+            torch.randn(2, 3, dtype=torch.bfloat16),
+            torch.randn(3, 2, dtype=torch.bfloat16),
+            out_dtype=torch.float32,
+        )
 
         assert result == "vendor"
         assert len(calls) == 1 and calls[0][3] == {"out_dtype": torch.float32}
@@ -110,7 +125,9 @@ class TestMMOutDtypeGating:
         monkeypatch.setattr(torch, "mm", _recording_op(calls, result="vendor"))
         self._install_patch(monkeypatch, {"mm": True, "bmm": True})
         monkeypatch.setattr(
-            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+            _patch,
+            "_probe_out_dtype_broken_ops",
+            lambda: probes.append(1) or {"mm": True, "bmm": True},
         )
 
         _patch._patch_mm_out_dtype()
@@ -129,7 +146,9 @@ class TestMMOutDtypeGating:
         monkeypatch.setattr(torch, "mm", _recording_op(calls, result="vendor"))
         self._install_patch(monkeypatch, {"mm": True, "bmm": True})
         monkeypatch.setattr(
-            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+            _patch,
+            "_probe_out_dtype_broken_ops",
+            lambda: probes.append(1) or {"mm": True, "bmm": True},
         )
         _patch._patch_mm_out_dtype()
         a = torch.randn(2, 3, dtype=torch.bfloat16)
@@ -146,7 +165,9 @@ class TestMMOutDtypeGating:
         monkeypatch.setattr(torch, "mm", _recording_op([], result="vendor"))
         self._install_patch(monkeypatch, {"mm": True, "bmm": True})
         monkeypatch.setattr(
-            _patch, "_probe_out_dtype_broken_ops", lambda: probes.append(1) or {"mm": True, "bmm": True}
+            _patch,
+            "_probe_out_dtype_broken_ops",
+            lambda: probes.append(1) or {"mm": True, "bmm": True},
         )
 
         _patch._patch_mm_out_dtype()
@@ -157,9 +178,7 @@ class TestMMOutDtypeGating:
 
         assert len(probes) == 1
 
-    def test_a_failing_probe_keeps_the_backport_and_is_not_cached(
-        self, monkeypatch, caplog
-    ):
+    def test_a_failing_probe_keeps_the_backport_and_is_not_cached(self, monkeypatch, caplog):
         """A probe that cannot decide must never be remembered as "healthy".
 
         The defect this locks: a probe exception used to be read as "nothing to
@@ -197,9 +216,9 @@ class TestMMOutDtypeGating:
             assert torch.allclose(result, expected, atol=1e-5, rtol=1e-5)
         assert [call[3] for call in calls] == [{}, {}], "the vendor kwarg must not be forwarded"
         assert all(call[0].dtype == torch.float32 for call in calls), "the promoted path is used"
-        assert _patch._mm_out_dtype_probe_cache is None, (
-            "an undecidable probe must not be stored as a verdict"
-        )
+        assert (
+            _patch._mm_out_dtype_probe_cache is None
+        ), "an undecidable probe must not be stored as a verdict"
         assert caplog.text.count("probe could not decide") == 1, "the warning is throttled"
 
     def test_a_failing_capture_check_never_probes(self, monkeypatch):
@@ -243,7 +262,9 @@ class TestMMOutDtypeGating:
         assert probes == [], "no probe may run when the capture state is unknown"
         assert [call[3] for call in calls] == [{}], "the vendor kwarg must not be forwarded"
         assert all(call[0].dtype == torch.float32 for call in calls)
-        assert torch.allclose(result, a.to(torch.float32) @ b.to(torch.float32), atol=1e-5, rtol=1e-5)
+        assert torch.allclose(
+            result, a.to(torch.float32) @ b.to(torch.float32), atol=1e-5, rtol=1e-5
+        )
 
     def test_healthy_bmm_probe_is_resolved_on_its_own_op(self, monkeypatch):
         """A broken ``mm`` must not make a healthy ``bmm`` take the backport."""
@@ -608,9 +629,7 @@ class TestMMOutDtypeContract:
         with pytest.raises(RuntimeError, match="out_dtype must be the same as input dtype"):
             torch.mm(a, b, out_dtype=torch.float16)
 
-    def test_capture_before_the_first_eager_call_uses_the_emulation_path(
-        self, monkeypatch, caplog
-    ):
+    def test_capture_before_the_first_eager_call_uses_the_emulation_path(self, monkeypatch, caplog):
         """A capture must not resolve the verdict, so it records the emulation path.
 
         If the first ``out_dtype`` call happens inside a MUSA graph capture, the
@@ -636,9 +655,7 @@ class TestMMOutDtypeContract:
         an earlier test in the session.
         """
         probes = []
-        original = (
-            _patch._original_torch_mm if _patch._original_torch_mm is not None else torch.mm
-        )
+        original = _patch._original_torch_mm if _patch._original_torch_mm is not None else torch.mm
         monkeypatch.setattr(_patch, "_mm_out_dtype_probe_cache", None)
         monkeypatch.setattr(
             _patch,
@@ -684,7 +701,10 @@ class TestMMOutDtypeContract:
         b = torch.randn(3, 2, dtype=torch.bfloat16, device="musa")
         result = torch.mm(a, b, out_dtype=torch.float32)
 
-        assert set(_patch._mm_out_dtype_probe_cache) == {"mm", "bmm"}, "the first call resolves the verdict"
+        assert set(_patch._mm_out_dtype_probe_cache) == {
+            "mm",
+            "bmm",
+        }, "the first call resolves the verdict"
         if _patch._mm_out_dtype_probe_cache["mm"]:
             reference = a.to(torch.float32) @ b.to(torch.float32)
             assert torch.allclose(result.cpu(), reference.cpu(), atol=ATOL, rtol=RTOL)
