@@ -247,8 +247,11 @@ jpeg_ext = CUDAExtension(
 在 MUSA 上，`BuildExtension` 会**原地**移植项目内的 C/C++/CUDA 源码及头文件
 内容。原有 `.cu`/`.cuh` 文件名和路径保持不变，也不会创建 `<dir>_musa` 镜像；
 原生 `.mu`/`.muh` 文件及非源码文件保持不变。由于符合条件的源码会在构建时被
-改写，如果需要保留原始 CUDA 内容，请使用干净或一次性的检出目录进行构建。为
-避免修改项目目录之外的链接目标，移植器会拒绝符号链接形式的可移植源码和头文件。
+改写，如果需要保留原始 CUDA 内容，请使用干净或一次性的检出目录进行构建。只有
+当符号链接解析后落在本次构建移植的所有目录之外时，可移植源码/头文件才会被拒绝，
+因为原地移植改写的正是链接目标，不能触及构建不拥有的文件。若链接指向同一项目
+里的另一个 include 根（例如 SGLang `kernels/jit/include` 中与 AOT 根共享的头
+文件树），则只通过其目标移植一次，并保留链接本身。
 
 移植器会同时转换 CUDA 架构条件及其阈值，并保留那些原本正确、但转换后会坍缩
 为自引用的 CUDA→MUSA 映射宏。它还会将规范形式的 `nvjpeg*`/`NVJPEG*` 符号及
@@ -454,7 +457,7 @@ def is_musa():
 ## 性能
 
 torchada 使用激进的缓存策略来最小化运行时开销。下表的数字取自仓库中已提交的
-`benchmarks/benchmark_history.json`（torchada 0.1.111，2026-10-09，MTT S5000，
+`benchmarks/benchmark_history.json`（torchada 0.1.112，2026-10-09，MTT S5000，
 PyTorch 与 torch_musa `2.11.0.post2+musa5.2.0`），为每次调用的开销中位数：
 
 | 操作 | 开销 |
@@ -579,7 +582,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.111
+torchada>=0.1.112
 ```
 
 ### 步骤 2：条件导入

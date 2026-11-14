@@ -272,8 +272,12 @@ contents **in place**. Original `.cu`/`.cuh` names and paths are preserved and
 no `<dir>_musa` mirror is created; native `.mu`/`.muh` files and non-source
 files are left unchanged. Because eligible source files are rewritten during
 the build, use a clean or disposable checkout when the original CUDA contents
-must be preserved. Symlinked portable sources and headers are rejected to avoid
-modifying a target outside the project tree.
+must be preserved. A symlinked portable source or header is refused only when
+it resolves outside every directory this build ports, since porting rewrites
+the link's target and must not reach a file the build does not own. A link into
+another include root of the same project - a header tree shared between a JIT
+and an AOT root, as in SGLang's `kernels/jit/include` - is ported through its
+target exactly once and the link is kept.
 
 The porter translates CUDA architecture guards together with their thresholds
 and preserves already-correct CUDA-to-MUSA mapping defines that would otherwise
@@ -498,7 +502,7 @@ def is_musa():
 ## Performance
 
 torchada uses aggressive caching to minimize runtime overhead. The numbers below are
-the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.111
+the checked-in `benchmarks/benchmark_history.json` measurement for torchada 0.1.112
 (2026-10-09, MTT S5000, PyTorch and torch_musa `2.11.0.post2+musa5.2.0`), as median
 per-call overhead:
 
@@ -631,7 +635,7 @@ nvJPEG, libtorch-stable, FlashInfer, cutlass, thrust, ...).
 
 ```
 # pyproject.toml or requirements.txt
-torchada>=0.1.111
+torchada>=0.1.112
 ```
 
 ### Step 2: Conditional Import
