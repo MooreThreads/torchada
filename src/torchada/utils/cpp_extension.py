@@ -297,18 +297,36 @@ def _path_overlaps_any(path: str, roots: List[str]) -> bool:
     return any(_path_is_within(path, root) or _path_is_within(root, path) for root in roots)
 
 
-def _validate_portable_symlinks(source_dir: str) -> None:
-    """Reject portable symlink files before upstream ``realpath`` can escape.
+def _validate_portable_symlinks(source_dir: str, allowed_roots=()) -> None:
+    """Reject portable symlinks whose target escapes the in-place port set.
 
-    SimplePorting resolves each filename before writing. Under in-place porting
-    that would modify a symlink target, potentially outside the project tree.
-    Failing explicitly preserves both the link and its target.
+    SimplePorting resolves each filename before writing, so under in-place
+    porting a symlinked source rewrites its *target* and leaves the link in
+    place. That is safe as long as the target is itself inside a directory this
+    build ports -- the file is being rewritten anyway -- which is exactly the
+    layout of a tree that shares one header between several include roots
+    (SGLang's ``kernels/jit/include/sgl_kernel/quantization/gguf/*.cuh`` point
+    into ``kernels/aot/include/...``). A target outside every port root would
+    edit a file the build does not own, so it is still refused before anything
+    is written, preserving both the link and its target.
+
+    ``allowed_roots`` names the sibling roots ported by the same build. Pass
+    the coalesced root set so a link into another include root of the same
+    project is accepted; without it only ``source_dir`` is portable.
     """
+    roots = _coalesce_port_roots([source_dir, *allowed_roots])
     for root, _dirs, files in os.walk(source_dir):
         for name in files:
             path = os.path.join(root, name)
-            if os.path.islink(path) and os.path.splitext(name)[1].lower() in _PORTABLE_SOURCE_EXTS:
-                raise RuntimeError(f"Refusing to port symlinked CUDA/C++ source in place: {path}")
+            if not os.path.islink(path):
+                continue
+            if os.path.splitext(name)[1].lower() not in _PORTABLE_SOURCE_EXTS:
+                continue
+            # ``_path_is_within`` resolves the link, so this compares the
+            # target against the roots the build is allowed to rewrite.
+            if any(_path_is_within(path, allowed) for allowed in roots):
+                continue
+            raise RuntimeError(f"Refusing to port symlinked CUDA/C++ source in place: {path}")
 
 
 def _create_in_place_porter(musa_sp, source_dir: str, mapping_rule):
@@ -490,10 +508,21 @@ def _patch_simple_porting_modify_file(musa_sp):
 
                 shutil.copyfile(cuda_filepath, musa_filepath)
             return
-        if in_place and not _path_is_within(cuda_filepath, self.cuda_dir_path):
+        allowed_roots = getattr(self, "_torchada_port_roots", (self.cuda_dir_path,))
+        if in_place and not any(_path_is_within(cuda_filepath, root) for root in allowed_roots):
             raise RuntimeError(
                 f"Refusing to port CUDA/C++ source outside the in-place root: {cuda_filepath}"
             )
+        # A source reachable through both its own path and an intra-tree symlink
+        # would be rewritten twice -- once per include root's walk. Not every
+        # rule is idempotent (``asm volatile`` -> ``if(0) asm volatile``
+        # compounds), so port each real file once per build and let the other
+        # path read the already-ported content the build command shares with
+        # the porter.
+        real_source = os.path.realpath(os.path.abspath(cuda_filepath))
+        ported_realpaths = getattr(self, "_torchada_ported_realpaths", None)
+        if ported_realpaths is not None and real_source in ported_realpaths:
+            return
         with open(cuda_filepath, encoding="utf-8", errors="surrogateescape") as f:
             source_code = _rekey_stable_library_impl(f.read())
             lines = source_code.splitlines(keepends=True)
@@ -530,6 +559,8 @@ def _patch_simple_porting_modify_file(musa_sp):
 
         with open(musa_filepath, "w", encoding="utf-8", errors="surrogateescape") as f_musa:
             f_musa.writelines(out)
+        if ported_realpaths is not None:
+            ported_realpaths.add(real_source)
 
     musa_sp.SimplePorting.modify_file = modify_file
 
@@ -1254,6 +1285,11 @@ def _get_build_extension_class():
                 """
 
                 _ported_dirs = set()
+                # Per-build set of realpaths already rewritten, shared with the
+                # porter so a header reachable through an intra-tree symlink is
+                # ported once. Reset in run(), created lazily by _port_directory
+                # so direct callers (tests) get the same dedupe.
+                _ported_realpaths = None
 
                 def get_mapping_rule(self):
                     """
@@ -1276,13 +1312,18 @@ def _get_build_extension_class():
                     self.compiler.src_extensions += [".cu", ".cuh"]
                     super().build_extensions()
 
-                def _port_directory(self, source_dir, mapping_rule=None):
+                def _port_directory(self, source_dir, mapping_rule=None, allowed_roots=None):
                     """Port a directory's CUDA sources to MUSA **in place** (no
                     ``<dir>_musa`` mirror): SimplePorting rewrites each file's
                     content and, with the identity extension map, keeps its name.
                     Original ``#include`` paths and source paths therefore stay
                     valid, so nothing downstream needs rewriting. Idempotent per
                     process via ``_ported_dirs``.
+
+                    ``allowed_roots`` are the sibling roots this build also
+                    ports. A symlinked source whose target lives in one of them
+                    is legitimate (shared headers between include roots): the
+                    target is rewritten once, the link is kept.
                     """
                     if mapping_rule is None:
                         mapping_rule = self.get_mapping_rule()
@@ -1291,9 +1332,15 @@ def _get_build_extension_class():
                     if source_dir in self._ported_dirs:
                         return source_dir
 
-                    _validate_portable_symlinks(source_dir)
+                    if self._ported_realpaths is None:
+                        self._ported_realpaths = set()
+                    roots = tuple(_coalesce_port_roots([source_dir, *(allowed_roots or ())]))
+                    _validate_portable_symlinks(source_dir, roots)
                     musa_sp.LOGGER.setLevel(logging.ERROR)
                     sp = _create_in_place_porter(musa_sp, source_dir, mapping_rule)
+                    # Consumed by the patched SimplePorting.modify_file.
+                    sp._torchada_port_roots = roots
+                    sp._torchada_ported_realpaths = self._ported_realpaths
                     sp.run()
 
                     self._ported_dirs.add(source_dir)
@@ -1357,6 +1404,7 @@ def _get_build_extension_class():
                     """
                     mapping_rule = self.get_mapping_rule()
                     self._ported_dirs = set()
+                    self._ported_realpaths = set()
                     candidate_dirs = []
                     for ext in self.extensions:
                         # System filtering applies only to include roots. An
@@ -1376,10 +1424,23 @@ def _get_build_extension_class():
 
                     # Coalesce all extensions at once so a child include root is
                     # never ported and then recursively ported again through a
-                    # later source-parent ancestor.
-                    for root in _coalesce_port_roots(candidate_dirs):
-                        if os.path.isdir(root) and self._dir_has_portable_sources(root):
-                            self._port_directory(root, mapping_rule)
+                    # later source-parent ancestor. The same set is handed to
+                    # every root as its allowed symlink targets: a header shared
+                    # between include roots through a symlink resolves into a
+                    # root that is being ported, so it is rewritten exactly once.
+                    roots = [
+                        root
+                        for root in _coalesce_port_roots(candidate_dirs)
+                        if os.path.isdir(root) and self._dir_has_portable_sources(root)
+                    ]
+                    # Validate every root first: an escaping link in the last
+                    # root must not abort after earlier roots were already
+                    # rewritten, because a retry would re-run the (not fully
+                    # idempotent) substitution over them.
+                    for root in roots:
+                        _validate_portable_symlinks(root, roots)
+                    for root in roots:
+                        self._port_directory(root, mapping_rule, allowed_roots=roots)
 
                     super().run()
 
