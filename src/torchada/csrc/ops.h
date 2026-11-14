@@ -40,7 +40,7 @@
 namespace torchada {
 
 // Version information
-constexpr const char* VERSION = "0.1.111";
+constexpr const char* VERSION = "0.1.112";
 
 // Check if operator override is enabled via environment variable
 inline bool is_override_enabled(const char* op_name) {
