@@ -4372,6 +4372,52 @@ class TestStableCompatHeaders:
             assert os.path.isfile(p), f"{name} shim missing"
             assert needle in open(p, encoding="utf-8").read(), f"{name} !-> {needle}"
 
+    def test_cuda_shims_expose_direct_mcc_aliases(self, tmp_path):
+        """Direct mcc users can compile CUDA runtime and driver aliases."""
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        stub = self._write_tree(
+            tmp_path / "stub",
+            {"musa.h": "#pragma once\n", "musa_runtime.h": "#pragma once\n"},
+        )
+        aliases = (
+            "CUresult",
+            "CUDA_SUCCESS",
+            "cuGetErrorString",
+            "cudaGetLastError",
+            "cudaLaunchConfig_t",
+            "cudaLaunchAttribute",
+            "cudaLaunchKernelEx",
+            "cudaLaunchAttributeProgrammaticStreamSerialization",
+            "cudaLaunchAttributeClusterDimension",
+            "cudaLaunchAttributeCooperative",
+            "cudaMemcpyAsync",
+            "cudaMemcpyHostToDevice",
+            "cudaMemcpyDeviceToHost",
+            "cudaHostGetDevicePointer",
+            "cudaDeviceGetAttribute",
+            "cudaDevAttrComputeCapabilityMajor",
+            "cudaDevAttrComputeCapabilityMinor",
+            "cudaDevAttrMultiProcessorCount",
+            "cudaDevAttrMaxSharedMemoryPerBlockOptin",
+            "cudaDevAttrMaxSharedMemoryPerBlock",
+            "cudaFuncSetAttribute",
+            "cudaFuncAttributeMaxDynamicSharedMemorySize",
+            "cudaFuncAttributePreferredSharedMemoryCarveout",
+            "cudaSharedmemCarveoutMaxL1",
+            "cudaSharedmemCarveoutMaxShared",
+            "cudaSharedmemCarveoutDefault",
+            "cudaRuntimeGetVersion",
+        )
+        source = "#include <cuda.h>\n#include <cuda_runtime.h>\n" + "\n".join(
+            f"#ifndef {name}\n#error {name} is not mapped\n#endif" for name in aliases
+        )
+        self._assert_compiles(
+            tmp_path,
+            [f"-I{stable_compat_include_dir()}", f"-I{stub}"],
+            source,
+        )
+
     def test_cuda_bf16_shim_aliases_nv_types(self):
         """cuda_bf16.h aliases __nv_bfloat16{,2} to the MUSA __mt_bfloat16{,2}."""
         import os
