@@ -88,10 +88,6 @@ SUBWORD_RULES = {"cublas": frozenset({"cublas", "CUBLAS"})}
 #: checkout this was written against; a name that gains a rule must leave this list
 #: (a test says so).
 UNMAPPED_JIT_NAMES = (
-    "cudaDevAttrComputeCapabilityMajor",
-    "cudaDevAttrComputeCapabilityMinor",
-    "cudaDevAttrMaxSharedMemoryPerBlockOptin",
-    "cudaFuncAttributePreferredSharedMemoryCarveout",
     "cudaIpcCloseMemHandle",
     "cudaIpcGetMemHandle",
     "cudaIpcMemHandle_t",
@@ -102,10 +98,6 @@ UNMAPPED_JIT_NAMES = (
     "cudaLaunchKernel",
     "cudaLaunchKernelEx",
     "cudaOccupancyAvailableDynamicSMemPerBlock",
-    "cudaRuntimeGetVersion",
-    "cudaSharedmemCarveoutDefault",
-    "cudaSharedmemCarveoutMaxL1",
-    "cudaSharedmemCarveoutMaxShared",
     "cudaStreamCaptureStatus",
     "cudaStreamCaptureStatusActive",
     "cudaStreamIsCapturing",

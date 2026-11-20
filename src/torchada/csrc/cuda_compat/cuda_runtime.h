@@ -85,6 +85,9 @@
 #ifndef cudaFuncAttributeMaxDynamicSharedMemorySize
 #define cudaFuncAttributeMaxDynamicSharedMemorySize musaFuncAttributeMaxDynamicSharedMemorySize
 #endif
+#ifndef cudaFuncAttributePreferredSharedMemoryCarveout
+#define cudaFuncAttributePreferredSharedMemoryCarveout musaFuncAttributePreferredSharedMemoryCarveout
+#endif
 #ifndef cudaDevAttrMaxThreadsPerBlock
 #define cudaDevAttrMaxThreadsPerBlock musaDevAttrMaxThreadsPerBlock
 #endif
@@ -109,11 +112,20 @@
 #ifndef cudaDevAttrMaxSharedMemoryPerBlock
 #define cudaDevAttrMaxSharedMemoryPerBlock musaDevAttrMaxSharedMemoryPerBlock
 #endif
+#ifndef cudaDevAttrMaxSharedMemoryPerBlockOptin
+#define cudaDevAttrMaxSharedMemoryPerBlockOptin musaDevAttrMaxSharedMemoryPerBlockOptin
+#endif
 #ifndef cudaDevAttrWarpSize
 #define cudaDevAttrWarpSize musaDevAttrWarpSize
 #endif
 #ifndef cudaDevAttrMultiProcessorCount
 #define cudaDevAttrMultiProcessorCount musaDevAttrMultiProcessorCount
+#endif
+#ifndef cudaDevAttrComputeCapabilityMajor
+#define cudaDevAttrComputeCapabilityMajor musaDevAttrComputeCapabilityMajor
+#endif
+#ifndef cudaDevAttrComputeCapabilityMinor
+#define cudaDevAttrComputeCapabilityMinor musaDevAttrComputeCapabilityMinor
 #endif
 #ifndef cudaStreamDefault
 #define cudaStreamDefault musaStreamDefault
@@ -150,6 +162,15 @@
 #endif
 #ifndef cudaMemoryTypeManaged
 #define cudaMemoryTypeManaged musaMemoryTypeManaged
+#endif
+#ifndef cudaSharedmemCarveoutDefault
+#define cudaSharedmemCarveoutDefault musaSharedmemCarveoutDefault
+#endif
+#ifndef cudaSharedmemCarveoutMaxL1
+#define cudaSharedmemCarveoutMaxL1 musaSharedmemCarveoutMaxL1
+#endif
+#ifndef cudaSharedmemCarveoutMaxShared
+#define cudaSharedmemCarveoutMaxShared musaSharedmemCarveoutMaxShared
 #endif
 #ifndef cudaLaunchAttributeProgrammaticStreamSerialization
 #define cudaLaunchAttributeProgrammaticStreamSerialization musaLaunchAttributeIgnore
@@ -226,6 +247,9 @@
 #endif
 #ifndef cudaGetErrorString
 #define cudaGetErrorString musaGetErrorString
+#endif
+#ifndef cudaRuntimeGetVersion
+#define cudaRuntimeGetVersion musaRuntimeGetVersion
 #endif
 #ifndef cudaPeekAtLastError
 #define cudaPeekAtLastError musaPeekAtLastError

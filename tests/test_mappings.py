@@ -1495,3 +1495,25 @@ class TestCudaCompatHeaderParity:
         assert list(UNMAPPED_JIT_NAMES) == sorted(UNMAPPED_JIT_NAMES)
         stale = [name for name in UNMAPPED_JIT_NAMES if name in _MAPPING_RULE]
         assert not stale, f"now mapped, so drop them from UNMAPPED_JIT_NAMES: {stale}"
+
+    def test_sglang_jit_rules_follow_torch_musa_mapping(self):
+        """Keep direct JIT aliases aligned with torch_musa's canonical porting map.
+
+        These are the SGLang JIT names that already had direct MUSA calls in-tree.
+        They were checked against torch_musa/main@e9ad9399. This is a small pinned
+        contract rather than a runtime dependency on the larger source-rewriting
+        table.
+        """
+        from torchada._mapping import _MAPPING_RULE
+
+        expected = {
+            "cudaDevAttrComputeCapabilityMajor": "musaDevAttrComputeCapabilityMajor",
+            "cudaDevAttrComputeCapabilityMinor": "musaDevAttrComputeCapabilityMinor",
+            "cudaDevAttrMaxSharedMemoryPerBlockOptin": "musaDevAttrMaxSharedMemoryPerBlockOptin",
+            "cudaFuncAttributePreferredSharedMemoryCarveout": "musaFuncAttributePreferredSharedMemoryCarveout",
+            "cudaRuntimeGetVersion": "musaRuntimeGetVersion",
+            "cudaSharedmemCarveoutDefault": "musaSharedmemCarveoutDefault",
+            "cudaSharedmemCarveoutMaxL1": "musaSharedmemCarveoutMaxL1",
+            "cudaSharedmemCarveoutMaxShared": "musaSharedmemCarveoutMaxShared",
+        }
+        assert {name: _MAPPING_RULE[name] for name in expected} == expected

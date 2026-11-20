@@ -20,7 +20,7 @@ def test_scan_classifies_mapped_known_and_unclassified_cuda_names(tmp_path):
 // cudaIgnoredFromComment();
 CUTLASS_UNUSED();
 cudaMemcpyAsync(dst, src, size, cudaMemcpyHostToDevice, stream);
-cudaDevAttrComputeCapabilityMajor;
+cudaLaunchKernelEx;
 cuNewUnclassifiedApi(0);
 """,
         encoding="utf-8",
@@ -30,7 +30,7 @@ cuNewUnclassifiedApi(0);
 
     assert report["files"] == 1
     assert report["findings"]["cudaMemcpyAsync"]["status"] == "mapped"
-    assert report["findings"]["cudaDevAttrComputeCapabilityMajor"]["status"] == "known-unmapped"
+    assert report["findings"]["cudaLaunchKernelEx"]["status"] == "known-unmapped"
     assert report["findings"]["cuNewUnclassifiedApi"]["status"] == "unclassified"
     assert "cudaIgnoredFromComment" not in report["findings"]
     assert "CUTLASS_UNUSED" not in report["findings"]
