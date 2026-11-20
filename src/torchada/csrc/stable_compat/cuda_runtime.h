@@ -1,34 +1,14 @@
 #pragma once
-// MUSA: there is no <cuda_runtime.h> on MUSA; libtorch-stable kernels that
-// include it (e.g. torch_utils.h) get the MUSA runtime instead. Resolved ahead
-// of any toolchain header via the stable_compat include dir.
-#include <musa_runtime.h>
-
-// MUSA: libtorch-stable kernels use the CUDA runtime spelling for device
-// query/property APIs; map them to the MUSA runtime so those kernels compile
-// against upstream names. Guarded so an active MCC cuda-porting layer that
-// already provides a name takes precedence.
-#ifndef cudaDeviceProp
-#define cudaDeviceProp musaDeviceProp
-#endif
-#ifndef cudaError_t
-#define cudaError_t musaError_t
-#endif
-#ifndef cudaSuccess
-#define cudaSuccess musaSuccess
-#endif
-#ifndef cudaStream_t
-#define cudaStream_t musaStream_t
-#endif
-#ifndef cudaGetDeviceCount
-#define cudaGetDeviceCount musaGetDeviceCount
-#endif
-#ifndef cudaGetDeviceProperties
-#define cudaGetDeviceProperties musaGetDeviceProperties
-#endif
-#ifndef cudaGetDevice
-#define cudaGetDevice musaGetDevice
-#endif
-#ifndef cudaGetErrorString
-#define cudaGetErrorString musaGetErrorString
-#endif
+// Deprecated forwarder: this header now lives in ../cuda_compat/cuda_runtime.h.
+//
+// The CUDA-named headers are a layer of their own: a JIT that brings its own
+// compiler driver resolves them instead of absent CUDA headers, so that
+// directory has to be FIRST on the include path. This directory keeps working
+// in either position, because its stand-ins defer to a native header through
+// `#include_next`. The two answer to different version drivers and do not share
+// that rule, which is why they are not one directory.
+//
+// Kept so a build that adds only this directory keeps resolving the header. It
+// carries no aliases itself, so the two copies cannot drift. Scheduled for
+// removal with the next major release.
+#include "../cuda_compat/cuda_runtime.h"

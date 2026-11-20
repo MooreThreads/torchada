@@ -297,6 +297,18 @@ def _path_overlaps_any(path: str, roots: List[str]) -> bool:
     return any(_path_is_within(path, root) or _path_is_within(root, path) for root in roots)
 
 
+def _torchada_owned_include_dir(path: str) -> bool:
+    """Whether ``path`` is, contains, or lies inside one of torchada's header layers.
+
+    Porting is in place, so a header layer reached as a project include root would be
+    rewritten *inside the installed package*: ``#define cudaMalloc musaMalloc`` becomes
+    ``#define musaMalloc musaMalloc``, and every later native build fails on a
+    self-recursive declaration. Neither layer is a downstream project source, and the
+    CUDA-named one is the one made almost entirely of CUDA names.
+    """
+    return _path_overlaps_any(path, [cuda_compat_include_dir(), stable_compat_include_dir()])
+
+
 def _validate_portable_symlinks(source_dir: str, allowed_roots=()) -> None:
     """Reject portable symlinks whose target escapes the in-place port set.
 
@@ -963,6 +975,29 @@ def include_paths(
             return torch_include_paths(cuda=include_device)
 
 
+def cuda_compat_include_dir() -> str:
+    """Directory of the CUDA-named headers a non-ported compile resolves instead.
+
+    Place it **first** in an extension's ``include_dirs``. It holds
+    ``cuda_runtime.h``, ``cuda_runtime_api.h``, ``cuda_fp16.h``, ``cuda_bf16.h``,
+    ``cuda_fp8.h`` and ``cublas_v2.h`` for a compile that never reaches this module's
+    in-place source porting: a JIT that carries its own compiler driver (tvm-ffi's
+    ``tvm_ffi.cpp.load_inline``, and anything else that does not call ``load`` /
+    ``load_inline`` from ``torch.utils.cpp_extension``) sees no rewritten source, so
+    the preprocessor is the only place left to translate ``cudaMalloc``. A ported
+    build needs nothing from it -- the porting table rewrites those include lines to
+    ``musa_*`` itself -- and ``include_paths()`` deliberately does not add it.
+
+    First, not last: a ``CUDA_HOME`` left on a build box ships a real
+    ``cuda_runtime.h``, and binding to it compiles against the CUDA runtime. Unlike
+    ``stable_compat_include_dir``, this directory cannot work in either position --
+    its headers have nothing to defer to through ``#include_next``.
+    """
+    from ..cuda_compat import cuda_compat_include_dir as _cuda_compat_include_dir
+
+    return _cuda_compat_include_dir()
+
+
 def stable_compat_include_dir() -> str:
     """Directory holding torchada's libtorch-stable ABI compat headers.
 
@@ -1365,13 +1400,10 @@ def _get_build_extension_class():
 
                 @staticmethod
                 def _is_system_include_dir(path):
-                    # The stable-ABI compatibility headers are torchada-owned
-                    # inputs, not downstream project sources.  This matters for
-                    # editable/source installs where the package lives outside
-                    # site-packages: porting this directory in place rewrites
-                    # the CUDA-named forwarding shims into self-recursive MUSA
-                    # declarations and breaks every subsequent native build.
-                    if _path_overlaps_any(path, [stable_compat_include_dir()]):
+                    # Both header layers are torchada-owned inputs, not downstream
+                    # project sources. This matters for editable/source installs
+                    # where the package lives outside site-packages.
+                    if _torchada_owned_include_dir(path):
                         return True
 
                     is_system_path = (

@@ -63,7 +63,7 @@ torch.cuda.synchronize()
 | 自定义算子 | `Library.impl(..., "CUDA")` → 使用 PrivateUse1 |
 | 分布式训练 | `dist.init_process_group(backend='nccl')` → 使用 MCCL |
 | torch.compile | Inductor、支持 AOT 缓存的张量工厂函数包装器、FX `device` builtin、`torch.cuda._get_device_index` |
-| C++ 扩展 | `CUDAExtension`、`BuildExtension`、源码原地移植、稳定 ABI 兼容层 |
+| C++ 扩展 | `CUDAExtension`、`BuildExtension`、源码原地移植、稳定 ABI 兼容层、给不经过两个钩子的 JIT 用的 CUDA 命名头文件 |
 | FlexAttention | `torch.nn.attention.flex_attention` 支持 MUSA 设备 |
 | C++ nvJPEG 移植 | nvJPEG 源码及构建配置 → MTJPEG |
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
@@ -273,6 +273,20 @@ torch_musa 自带的同名头文件，因此该目录放在 torch_musa include �
 尽力执行；torch 2.11 及更新版本已经原生提供 stable ABI，因此会跳过回补。单纯
 `import torchada` 不会修改 PyTorch 或 torch_musa 头文件。
 
+自带编译驱动器的 JIT 完全不走上面的移植路径。SGLang 的 `jit_kernel` 通过
+`tvm_ffi.cpp.load_inline` 构建，既不调用 `torch.utils.cpp_extension` 的 `load()`
+也不调用 `load_inline()`，因此没有源码被改写，`#include <cuda_runtime.h>` 无处可解：
+`/usr/local/musa/include` 只提供 `musa_*` 头文件。`cuda_compat_include_dir()`
+（位于 `torchada.cuda_compat`，并从 `torchada.utils.cpp_extension` 再导出）返回一个
+CUDA 命名头文件目录——`cuda_runtime.h`、`cuda_runtime_api.h`、`cuda_fp16.h`、
+`cuda_bf16.h`、`cuda_fp8.h`、`cublas_v2.h`——由预处理器完成解析，每条别名与移植表
+一一对应。请把它放在 include 路径的**最前面**，位于任何 `CUDA_HOME` 之前：这些头文件
+直接指向 MUSA 运行时，不做 `#include_next` 让位，让真正的 CUDA 头文件抢先就会编到错误
+的运行时上。它刻意不加入 `include_paths()`：已移植的构建会把 include 行改写成
+`musa_*`，不需要它；而 JIT 需要显式请求该目录。`scripts/probe_cuda_compat_symbols.py`
+用 `mcc` 逐个确认某个 CUDA 名在 MUSA 侧的拼写是否真的存在（只做语法检查，不需要设备或
+GPU）。
+
 原地 CUDA 到 MUSA 的转换会继续按原有规则保护系统 include 目录。可以通过环境变量
 `TORCHADA_EXCLUDE_DIRS` 额外配置要排除的目录；每一项可以是目录路径，也可以是目录
 名称，使用平台路径分隔符，也支持逗号分隔。名称会按完整路径组件匹配，因此
@@ -457,7 +471,7 @@ def is_musa():
 ## 性能
 
 torchada 使用激进的缓存策略来最小化运行时开销。下表的数字取自仓库中已提交的
-`benchmarks/benchmark_history.json`（torchada 0.1.112，2026-10-09，MTT S5000，
+`benchmarks/benchmark_history.json`（torchada 0.1.113，2026-10-09，MTT S5000，
 PyTorch 与 torch_musa `2.11.0.post2+musa5.2.0`），为每次调用的开销中位数：
 
 | 操作 | 开销 |
@@ -582,7 +596,7 @@ libtorch-stable、FlashInfer、cutlass、thrust 等）。
 
 ```
 # pyproject.toml 或 requirements.txt
-torchada>=0.1.112
+torchada>=0.1.113
 ```
 
 ### 步骤 2：条件导入

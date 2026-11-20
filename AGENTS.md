@@ -46,12 +46,15 @@ src/torchada/
 ├── _runtime.py                 # ctypes symbol translation (cuda_to_musa_name, nccl_to_mccl_name, ...)
 ├── arch.py                     # MUSA arch table (ARCHS) + target_archs(), arch_flags(),
 │                               #   torch_arch_list(), cache_tag(); stdlib-only at import
+├── cuda_compat.py              # cuda_compat_include_dir() + the porting domains the
+│                               #   CUDA-named headers mirror; stdlib-only at import
 ├── _cpp_ops.py                 # JIT loader for the ATen-override and graph-rotation aux extensions
 ├── _graph_rotation.py          # transparent CUDA-graph executable rotation (driver caps live execs)
 ├── _graph_rotation_src/        # C++ source of the graph-rotation aux extension
 ├── _visible_devices.py         # MUSA/CUDA_VISIBLE_DEVICES mirroring, before torch is imported
 ├── _version.py                 # version_of(): infix PEP 440 proxy used by every version gate
-├── csrc/                       # ops.h / ops.cpp / musa_ops.mu / rope.mu + stable_compat/ headers
+├── csrc/                       # ops.h / ops.cpp / musa_ops.mu / rope.mu + the
+│                               #   stable_compat/ and cuda_compat/ header layers
 ├── cuda/                       # CUDA-compatible submodules: amp, nvtx, random
 ├── utils/cpp_extension.py      # CUDAExtension / BuildExtension / CUDA_HOME + in-place source
 │                               #   porting via SimplePorting (~1.5k lines)
@@ -452,10 +455,15 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
    length.
 2. Keep CUDA->MUSA `#define`s out of in-place porting when the mapping would
    change compile-time behavior for code that also compiles on CUDA.
-3. Cover it in `tests/test_mappings.py` (or `test_stable_abi_mappings.py` for the
+3. If the rule is a bare identifier whose domain has a header in
+   `src/torchada/csrc/cuda_compat/`, alias it there too and register the header in
+   `DOMAIN_HEADERS` (`src/torchada/cuda_compat.py`). The header is not a second
+   source of truth — `TestCudaCompatHeaderParity` fails until the two agree, which
+   is the point: a JIT that never reaches the porter only has the headers.
+4. Cover it in `tests/test_mappings.py` (or `test_stable_abi_mappings.py` for the
    stable-ABI surface) and, for extension-visible rules, in
    `tests/test_extension_build.py`.
-4. Mention the domain in `README.md` / `README_CN.md` only when the rule set grows
+5. Mention the domain in `README.md` / `README_CN.md` only when the rule set grows
    by a whole new API family.
 
 ## C++ Operator Overrides
@@ -479,6 +487,22 @@ provides CUDA-compatible entry points including the memory-pool functions
 Stable-ABI shims live in `src/torchada/csrc/stable_compat/` and must stay
 header-only additions; they exist so kernels built against `libtorch_stable`
 compile on MUSA without patching the dependency headers in place.
+
+The neighboring `src/torchada/csrc/cuda_compat/` answers a different question — a
+compile that never reaches the in-place porter. A JIT carrying its own compiler
+driver (tvm-ffi's `tvm_ffi.cpp.load_inline`, which recent SGLang `jit_kernel`
+releases use) calls neither `load()` nor `load_inline` from this package, so
+`#include <cuda_runtime.h>` has nothing to resolve against: `/usr/local/musa/include`
+ships `musa_*` headers only. `cuda_compat_include_dir()` returns the layer and the
+caller places it **first**, ahead of any `CUDA_HOME`, because these headers include
+`<musa_runtime.h>` directly and never `#include_next` — a real CUDA header that wins
+compiles against the wrong runtime. Nothing adds it to `include_paths()`: a ported
+build rewrites the include lines to `musa_*`, while a JIT has to ask for the
+directory. The five `cuda_*.h` left in `stable_compat/` are one-line forwarders for
+builds that add only that directory, and they carry no aliases so the copies cannot
+drift. Every alias mirrors a `_mappings/` rule (step 3 under "Adding a Mapping Rule"),
+and `scripts/probe_cuda_compat_symbols.py` is how a name whose MUSA spelling is
+unknown gets measured: `mcc -fsyntax-only`, no device.
 
 What a ported kernel needs beyond the stable surface belongs in
 `torchada_stable_box.h`, which downstream force-includes in every stable TU, and
