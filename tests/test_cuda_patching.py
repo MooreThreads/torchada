@@ -4373,35 +4373,35 @@ class TestStableCompatHeaders:
         # pair is boxed too, not only tuple.
         assert "std::pair" in text
 
-    def test_cuda_family_shim_headers_redirect_to_musa(self):
-        """cuda_bf16/fp16/fp8/runtime + cublas_v2 shims include the MUSA headers."""
+    def test_cuda_family_shim_headers_redirect_to_cuda_compat(self):
+        """stable_compat shims forward to the cuda_compat JIT headers."""
         import os
 
         from torchada.utils.cpp_extension import stable_compat_include_dir
 
         d = stable_compat_include_dir()
-        for name, needle in [
-            ("cuda_bf16.h", "musa_bf16.h"),
-            ("cuda_fp16.h", "musa_fp16.h"),
-            ("cuda_fp8.h", "musa_fp8.h"),
-            ("cuda_runtime.h", "musa_runtime.h"),
-            ("cublas_v2.h", "mublas.h"),
-        ]:
+        for name in (
+            "cuda_bf16.h",
+            "cuda_fp16.h",
+            "cuda_fp8.h",
+            "cuda_runtime.h",
+            "cublas_v2.h",
+        ):
             p = os.path.join(d, name)
             assert os.path.isfile(p), f"{name} shim missing"
-            assert needle in open(p, encoding="utf-8").read(), f"{name} !-> {needle}"
+            assert (
+                f'#include "../cuda_compat/{name}"' in open(p, encoding="utf-8").read()
+            ), f"{name} does not forward to cuda_compat"
 
     def test_cuda_bf16_shim_aliases_nv_types(self):
         """cuda_bf16.h aliases __nv_bfloat16{,2} to the MUSA __mt_bfloat16{,2}."""
         import os
 
-        from torchada.utils.cpp_extension import stable_compat_include_dir
+        from torchada.cuda_compat import cuda_compat_include_dir
 
-        text = open(
-            os.path.join(stable_compat_include_dir(), "cuda_bf16.h"), encoding="utf-8"
-        ).read()
-        assert "__nv_bfloat16 = __mt_bfloat16" in text
-        assert "__nv_bfloat162 = __mt_bfloat162" in text
+        text = open(os.path.join(cuda_compat_include_dir(), "cuda_bf16.h"), encoding="utf-8").read()
+        assert "#define __nv_bfloat16 __mt_bfloat16" in text
+        assert "#define __nv_bfloat162 __mt_bfloat162" in text
 
     def test_include_paths_appends_stable_compat_on_musa(self):
         """include_paths() auto-appends the stable_compat dir for device builds on MUSA."""

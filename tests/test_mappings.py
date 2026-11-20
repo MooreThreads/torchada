@@ -184,15 +184,15 @@ class TestNVJPEGMappings:
         source = (
             '#include "nvjpeg_helpers.h"\n'
             '#include "nvjpeg.h"\n'
-            '#  include <nvjpeg.h>\n'
-            'nvjpegStatus_t status = NVJPEG_STATUS_SUCCESS;\n'
+            "#  include <nvjpeg.h>\n"
+            "nvjpegStatus_t status = NVJPEG_STATUS_SUCCESS;\n"
         )
 
         result = _port_cuda_source(source)
 
         assert '#include "nvjpeg_helpers.h"' in result
         assert '#include "mtjpeg.h"' in result
-        assert '#  include <mtjpeg.h>' in result
+        assert "#  include <mtjpeg.h>" in result
         assert "mtjpegStatus_t status = MTJPEG_STATUS_SUCCESS" in result
 
     def test_cuda_event_header(self):
@@ -1344,8 +1344,12 @@ class TestCudaArchGuardPorting:
         # The bug: the macro is renamed while NVIDIA's threshold survives, so a guard
         # reads e.g. `310 < 800` and is always true. (The `defined(...)` operand is
         # renamed by torch_musa's own general.json, not by these rules.)
-        for nvidia in ("__MUSA_ARCH__ < 800", "__MUSA_ARCH__ >= 800",
-                       "__MUSA_ARCH__ < 900", "__MUSA_ARCH__ >= 900"):
+        for nvidia in (
+            "__MUSA_ARCH__ < 800",
+            "__MUSA_ARCH__ >= 800",
+            "__MUSA_ARCH__ < 900",
+            "__MUSA_ARCH__ >= 900",
+        ):
             assert nvidia not in result
 
     def test_guard_selects_supported_branch_on_mp31(self):
@@ -1417,7 +1421,9 @@ class TestCudaCompatHeaderParity:
         defined = self._defined_macros(headers)
         rules = self._identifier_rules(domain)
         assert rules, f"{domain} has no identifier rules to check"
-        wrong = [(key, value, defined.get(key)) for key, value in rules if defined.get(key) != value]
+        wrong = [
+            (key, value, defined.get(key)) for key, value in rules if defined.get(key) != value
+        ]
         assert not wrong, (
             f"{domain}: {len(wrong)} of {len(rules)} rules are not aliased by {headers}; "
             f"first mismatches (rule, alias target, got): {wrong[:5]}"
@@ -1479,7 +1485,7 @@ class TestCudaCompatHeaderParity:
         assert cpp_extension.cuda_compat_include_dir() == d
         stable = cpp_extension.stable_compat_include_dir()
         assert stable.endswith("stable_compat") and stable != d
-        assert d not in cpp_extension.include_paths()
+        assert d not in cpp_extension.include_paths(device_type="cpu")
 
     def test_unmapped_jit_names_have_no_rule_yet(self):
         """Each name there is a probe input; once a rule lands, the name must leave."""

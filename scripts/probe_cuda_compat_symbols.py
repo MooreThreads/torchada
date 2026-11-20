@@ -156,12 +156,47 @@ def _compile(mcc, header, name, form, tmpdir):
     with open(source, "w") as handle:
         handle.write(_FORMS[form].format(header=header, name=name))
     result = subprocess.run(
-        [mcc, "-x", "musa", "-fsyntax-only", "-std=c++20", source],
+        [
+            mcc,
+            "-x",
+            "musa",
+            "-fsyntax-only",
+            "-std=c++20",
+            "-DUSE_MUSA",
+            source,
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
     return result.returncode == 0, result.stderr
+
+
+def _probe_function(mcc, header, name, tmpdir):
+    source = os.path.join(tmpdir, "probe_function_%s.mu" % abs(hash((header, name))))
+    with open(source, "w") as handle:
+        handle.write("#include <%s>\n" % header)
+    result = subprocess.run(
+        [
+            mcc,
+            "-x",
+            "musa",
+            "-fsyntax-only",
+            "-std=c++20",
+            "-DUSE_MUSA",
+            "-Xclang",
+            "-ast-dump",
+            "-Xclang",
+            "-ast-dump-filter=" + name,
+            source,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return "FunctionDecl" in result.stdout or "FunctionTemplateDecl" in result.stdout
 
 
 def _probe_one(mcc, cuda_name, musa_name, header):
@@ -172,6 +207,13 @@ def _probe_one(mcc, cuda_name, musa_name, header):
             if ok:
                 return {"cuda": cuda_name, "musa": musa_name, "header": header, "kind": form}
             first_error = first_error or stderr
+        if _probe_function(mcc, header, musa_name, tmpdir):
+            return {
+                "cuda": cuda_name,
+                "musa": musa_name,
+                "header": header,
+                "kind": "function",
+            }
         detail = next(
             (line.strip() for line in first_error.splitlines() if "error" in line), "not declared"
         )
