@@ -67,6 +67,109 @@ def test_existing_mirror_sibling_is_preserved(tmp_path):
     assert source.read_text(encoding="utf-8") == f"{PORTED_TOKEN}\n"
 
 
+@pytest.mark.parametrize(
+    "target_root_name,link_root_name",
+    [
+        ("aot", "jit"),  # target root is walked first (the SGLang layout)
+        ("zeta", "alpha"),  # link root is walked first
+    ],
+)
+def test_symlinked_source_into_another_port_root_is_ported_once(
+    tmp_path, monkeypatch, target_root_name, link_root_name
+):
+    """A header shared between include roots by symlink is legitimate.
+
+    SGLang's kernels tree does exactly this: the ``sgl_kernel`` headers under
+    ``python/sglang/kernels/jit/include`` are symlinks into
+    ``python/sglang/kernels/aot/include``, and ``setup_musa.py`` lists both as
+    include roots. Refusing the link aborted the MUSA wheel build; porting it
+    twice would compound the non-idempotent rules, so the target is rewritten
+    exactly once whichever root reaches it first -- the roots are walked in
+    sorted order, so both orders are exercised.
+    """
+    from torchada.utils.cpp_extension import BuildExtension
+
+    target_root = tmp_path / target_root_name / "include"
+    link_root = tmp_path / link_root_name / "include"
+    relative = os.path.join("sgl_kernel", "quantization", "gguf", "quantize_q8_1.cuh")
+    target = target_root / relative
+    link = link_root / relative
+    link_only = link_root / "sgl_kernel" / "jit_only.cuh"
+    for directory in (target.parent, link.parent):
+        directory.mkdir(parents=True)
+    target.write_text(f"{TOKEN}\n", encoding="utf-8")
+    link_only.write_text(f"{TOKEN}\n", encoding="utf-8")
+    link.symlink_to(os.path.relpath(target, link.parent))
+    link_target = os.readlink(link)
+
+    class CustomBuildExtension(BuildExtension):
+        def get_mapping_rule(self):
+            # Deliberately not idempotent: a second pass turns TOKENX into TOKENXX.
+            return {TOKEN: TOKEN + "X"}
+
+    command = CustomBuildExtension(Distribution())
+    command.extensions = [
+        Extension(
+            "test_shared_header",
+            sources=[str(link)],
+            include_dirs=[str(target_root), str(link_root)],
+        )
+    ]
+    monkeypatch.setattr(BuildExtension.__mro__[1], "run", lambda self: None)
+
+    command.run()
+
+    assert target.read_text(encoding="utf-8") == f"{TOKEN}X\n"
+    assert link_only.read_text(encoding="utf-8") == f"{TOKEN}X\n"
+    assert link.is_symlink()
+    assert os.readlink(link) == link_target
+    assert command._ported_dirs == {
+        os.path.realpath(target_root),
+        os.path.realpath(link_root),
+    }
+
+
+def test_later_root_escape_fails_before_any_root_is_ported(tmp_path, monkeypatch):
+    """Every root is validated before the first one is rewritten.
+
+    Without the preflight, an escaping link in the last root aborted after the
+    earlier roots had already been ported, and a retry re-ran the substitution
+    over them -- which is unsafe for the non-idempotent rules.
+    """
+    from torchada.utils.cpp_extension import BuildExtension
+
+    first_root = tmp_path / "aaa" / "include"
+    second_root = tmp_path / "bbb" / "include"
+    first_root.mkdir(parents=True)
+    second_root.mkdir(parents=True)
+    first = first_root / "kernel.cu"
+    first.write_text(f"{TOKEN}\n", encoding="utf-8")
+    outside = tmp_path / "user_owned.h"
+    outside.write_text(f"{TOKEN}\n", encoding="utf-8")
+    (second_root / "linked.h").symlink_to(outside)
+
+    class CustomBuildExtension(BuildExtension):
+        def get_mapping_rule(self):
+            return MAPPING
+
+    command = CustomBuildExtension(Distribution())
+    command.extensions = [
+        Extension(
+            "test_late_escape",
+            sources=[str(first)],
+            include_dirs=[str(first_root), str(second_root)],
+        )
+    ]
+    monkeypatch.setattr(BuildExtension.__mro__[1], "run", lambda self: None)
+
+    with pytest.raises(RuntimeError, match="symlinked CUDA/C\\+\\+ source"):
+        command.run()
+
+    assert first.read_text(encoding="utf-8") == f"{TOKEN}\n"
+    assert outside.read_text(encoding="utf-8") == f"{TOKEN}\n"
+    assert command._ported_dirs == set()
+
+
 def test_portable_symlink_fails_without_modifying_target(tmp_path):
     source_dir = tmp_path / "csrc"
     source_dir.mkdir()
