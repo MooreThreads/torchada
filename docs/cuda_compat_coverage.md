@@ -34,16 +34,10 @@ PYTHONPATH=src python3 scripts/audit_jit_cuda_usage.py \
 
 | Tree | Source files | Unique symbols | Mapped | Known unmapped | Unclassified |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| SGLang JIT | 342 | 83 | 39 | 11 | 33 |
-| vLLM CUDA/AOT source inventory | 383 | 104 | 61 | 12 | 31 |
+| SGLang JIT | 342 | 83 | 31 | 19 | 33 |
+| vLLM CUDA/AOT source inventory | 383 | 104 | 57 | 16 | 31 |
 
 The vLLM row is not a claim that all of `csrc` is a JIT target.
-
-Rules used by the SGLang JIT are checked against
-`torch_musa/torch_musa/utils/mapping/general.json` at
-`e9ad939985557fa1f3fb941e3fb0fafa839ca26a`. Only names with a current JIT
-consumer and a proven MUSA spelling are promoted into `cuda_compat`. The larger
-upstream map remains a source-rewriting tool rather than a runtime dependency.
 
 ## Known gaps
 
