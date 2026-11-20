@@ -63,7 +63,7 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | Custom Ops | `Library.impl(..., "CUDA")` → uses PrivateUse1 |
 | Distributed | `dist.init_process_group(backend='nccl')` → uses MCCL |
 | torch.compile | Inductor, AOT-cacheable factory wrappers, FX `device` builtin, `torch.cuda._get_device_index` |
-| C++ Extensions | `CUDAExtension`, `BuildExtension`, in-place source porting, stable-ABI shims |
+| C++ Extensions | `CUDAExtension`, `BuildExtension`, in-place source porting, stable-ABI shims, CUDA-named headers for a JIT that reaches neither hook |
 | FlexAttention | `torch.nn.attention.flex_attention` works on MUSA |
 | C++ nvJPEG porting | nvJPEG source and build settings → MTJPEG |
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
@@ -297,6 +297,23 @@ header backport runs lazily and best-effort at MUSA extension
 build time on torch 2.9; read-only headers are left unchanged. Torch 2.11 and
 newer provide the stable ABI directly, so the backport is skipped. A plain
 `import torchada` does not modify PyTorch or torch_musa headers.
+
+A JIT that carries its own compiler driver never reaches the porter at all.
+SGLang's `jit_kernel` builds through `tvm_ffi.cpp.load_inline`, which calls neither
+`load()` nor `load_inline` from `torch.utils.cpp_extension`, so no source is
+rewritten and `#include <cuda_runtime.h>` has nothing to resolve against:
+`/usr/local/musa/include` ships `musa_*` headers only. `cuda_compat_include_dir()`
+(in `torchada.cuda_compat`, re-exported from `torchada.utils.cpp_extension`)
+returns a directory of CUDA-named headers — `cuda_runtime.h`,
+`cuda_runtime_api.h`, `cuda_fp16.h`, `cuda_bf16.h`, `cuda_fp8.h`, `cublas_v2.h` —
+that the preprocessor resolves instead, one alias per porting-table rule. Place it
+**first** on the include path, ahead of any `CUDA_HOME`: these headers name the
+MUSA runtime directly and do not defer to a later `#include_next`, so a real CUDA
+header that wins would compile against the wrong runtime. It is deliberately not
+added to `include_paths()` — a ported build rewrites the include lines to `musa_*`
+and needs nothing from it, while a JIT asks for the directory explicitly.
+`scripts/probe_cuda_compat_symbols.py` asks `mcc` which MUSA spelling actually
+exists for a CUDA name (syntax-only, no device or GPU needed).
 
 In-place CUDA-to-MUSA porting protects system include roots by default. Set
 `TORCHADA_EXCLUDE_DIRS` to add excluded roots for your environment. Entries may

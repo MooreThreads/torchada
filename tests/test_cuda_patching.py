@@ -3840,6 +3840,25 @@ class TestStableCompatHeaders:
         assert os.path.isdir(d), f"stable_compat include dir missing: {d}"
         assert d.endswith("stable_compat")
 
+    def test_both_header_layers_are_excluded_from_in_place_porting(self):
+        """Porting a layer in place corrupts it: the porter rewrites the alias target
+        too, so ``#define cudaMalloc musaMalloc`` becomes a self-recursive
+        ``#define musaMalloc musaMalloc`` and every later native build fails."""
+        import os
+        import tempfile
+
+        from torchada.utils.cpp_extension import (
+            _torchada_owned_include_dir,
+            cuda_compat_include_dir,
+            stable_compat_include_dir,
+        )
+
+        for d in (cuda_compat_include_dir(), stable_compat_include_dir()):
+            assert _torchada_owned_include_dir(d), d
+            assert _torchada_owned_include_dir(os.path.join(d, "cuda_runtime.h")), d
+        with tempfile.TemporaryDirectory() as scratch:
+            assert not _torchada_owned_include_dir(scratch)
+
     def test_stable_compat_box_header_exists(self):
         """stable_compat_box_header() points at the force-include header."""
         import os
