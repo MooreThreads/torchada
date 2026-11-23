@@ -16,12 +16,24 @@ torchada is an adapter that makes [torch_musa](https://github.com/MooreThreads/t
 
 Many PyTorch projects are written for NVIDIA GPUs using `torch.cuda.*` APIs. To run these on Moore Threads GPUs, you would normally need to change every `cuda` reference to `musa`. torchada eliminates this by automatically translating CUDA API calls to MUSA equivalents at runtime.
 
-The MUSA `log` / `log_` overrides use the input tensor's device and its current stream, even when another GPU is current. The caller's current device is restored after dispatch.
+On torch_musa releases before `2.11.0.post2`, the `log` / `log_` overrides use the input tensor's device and its current stream, even when another GPU is current; the caller's current device is restored after dispatch. From `2.11.0.post2` on, the vendor kernels provide those operators and torchada installs no override.
 
 ## Prerequisites
 
 - **torch_musa**: You must have [torch_musa](https://github.com/MooreThreads/torch_musa) installed (this provides MUSA support for PyTorch)
 - **Moore Threads GPU**: A Moore Threads GPU with proper driver installed
+
+The reference stack is the MUSA 5.2.0 stack the vLLM-MUSA v0.32.0-dev line pins:
+
+| Component | Version |
+|-----------|---------|
+| PyTorch and torch_musa | `2.13.0.post1+musa5.2.0` |
+| Python | 3.12 — the torch 2.13 MUSA wheels are `cp312` only |
+| MUSA SDK | 5.2.0 |
+| GPU | MTT S5000 (`mp_31`) |
+
+Older torch_musa 2.9 and 2.11 releases are covered by the version gates below;
+each shim installs only on the releases that still need it.
 
 ## Installation
 
@@ -58,9 +70,9 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | Synchronization | `torch.cuda.synchronize()`, `Stream`, `Event`, `torch.cuda.streams` |
 | Mixed precision | `torch.cuda.amp.autocast()`, `GradScaler()` |
 | CUDA Graphs | `torch.cuda.CUDAGraph`, `torch.cuda.graph()`, executable rotation for deep models |
-| CUDA Runtime | `torch.cuda.cudart()` → uses MUSA runtime, `torch._C._cuda_getCurrentRawStream` shim |
+| CUDA Runtime | `torch.cuda.cudart()` → uses MUSA runtime, `torch._C._cuda_getCurrentRawStream` and inductor `_C` shims, `torch.cuda.current_blas_handle()`, pooled-workspace clearing |
 | Profiler | `ProfilerActivity.CUDA` → uses PrivateUse1 |
-| Custom Ops | `Library.impl(..., "CUDA")` → uses PrivateUse1 |
+| Custom Ops | `Library.impl(..., "CUDA")` → PrivateUse1; `torch.library.infer_schema` / `custom_op` accept `torch.device` annotations |
 | Distributed | `dist.init_process_group(backend='nccl')` → uses MCCL |
 | torch.compile | Inductor, AOT-cacheable factory wrappers, FX `device` builtin, `torch.cuda._get_device_index` |
 | C++ Extensions | `CUDAExtension`, `BuildExtension`, in-place source porting, stable-ABI shims |
@@ -69,9 +81,10 @@ That's it! Supported `torch.cuda.*` APIs are automatically redirected to `torch.
 | ctypes Libraries | `ctypes.CDLL` with CUDA function names → MUSA equivalents |
 | Unified Accelerator API | `torch.accelerator.empty_cache()`, `memory_stats()`, `get_memory_info()`, `Stream`, `Event`, ... |
 | FlashAttention providers | `flash_attn_interface` redirection, plus `only_qv` and `_flash_attn_forward` shims |
+| Rotary embedding | `torchada.apply_rope_inplace()` joint in-place RoPE, patched into SGLang-Omni's fused-RoPE provider |
 | Triton CUDA Extra | `tl.extra.cuda` → `tl.extra.musa` compatibility on MUSA |
 | Triton Fused MoE | Triton 3.2.0 MTT S5000 tuning configs for vLLM and SGLang |
-| MUSA-specific operator fixes | float64 in-place `log_`, asynchronous `isfinite`, `mm`/`bmm` `out_dtype=` — see [torch_musa compatibility](#torch_musa-compatibility) |
+| MUSA operator fixes | Asynchronous `isfinite` (always); float64 `log_` and `mm`/`bmm` `out_dtype=` where the vendor release still needs them — see [torch_musa compatibility](#torch_musa-compatibility) |
 
 ## torch_musa Compatibility
 
@@ -80,27 +93,40 @@ or had a broken one. Each of those is version-gated: it installs itself only on 
 releases that need it and steps aside on the release that fixes the problem, so
 nothing has to be configured when the underlying stack moves.
 
-| Shim | Installed when | What it does |
-|------|----------------|--------------|
-| float64 in-place `Tensor.log_` | torch_musa < `2.11.0.post2` | Reuses the supported out-of-place `log` and writes the result back, preserving the in-place contract |
-| Compiled `multinomial` / `log` / `log_` | torch_musa < `2.11.0.post2` | MUSA `PrivateUse1` operator overrides in torchada's JIT-built C++ extension, replay-safe under CUDA graph capture |
-| Inductor MUSA template heuristics | torch_musa < `2.11.0.post2` | Fills the `musa` keys of Inductor's template-heuristic registry from the CUDA entries |
-| `torch.accelerator` memory APIs | torch_musa < `2.11.0.post2` | Routes `empty_cache()` / `memory_stats()` / ... to `torch.musa`, because the pre-release dispatch was broken |
-| `torch.mm` / `torch.bmm` `out_dtype=` | torch_musa < `2.13.0` | Reuses the plain overloads and accumulates in fp32; a runtime probe decides per process whether the native overload is healthy |
-| Asynchronous `torch.isfinite` | Always, on MUSA float tensors | Evaluates `abs() < inf` on float16/bfloat16/float32/float64 tensors, because ATen's composite runs a boolean `mul` that blocks the host until the device queue drains. Other dtypes keep the original operator |
-| libtorch stable-ABI headers | torch < 2.11 on MUSA | Backports the `torch::stable` accessors that torch_musa's 2.9 snapshot omits, so vLLM and SGLang stable kernels build |
-| `torch.cuda.streams` module path | MUSA, whenever `torch_musa.core.stream` is importable | Exposes it as `torch.cuda.streams`, which the PyTorch 2.11 Dynamo guards resolve |
+On the reference stack every release-gated shim is skipped: the four legacy
+`< 2.11.0.post2` overrides, the `out_dtype` wrapper, and the stable-ABI backport that
+torch 2.11 and newer make unnecessary. The installed releases carry the kernel fixes
+(`2.11.0.post2` and `2.13.0`), and the box header's always-on declarations still apply
+to every stable translation unit. The rows marked `Yes` still apply, the
+`torch.cuda.streams` one only when `torch_musa.core.stream` is importable. The legacy
+shims stay in the wheel for stacks pinned to an older torch_musa.
 
-The `out_dtype` backport is armed **below `torch_musa 2.13.0`**, the release torch_musa committed to
-fix the overloads in. That is a vendor release commitment, not a measurement of ours, and trusting it
-is the accepted risk: if `2.13.0` does not actually fix them, a `>= 2.13.0` stack installs no wrapper
-and the silent all-zero result can come back. The gate only decides whether a Python wrapper sits in
-front of `torch.mm`/`torch.bmm`; correctness is decided per process by the runtime probe, which
-forwards to a healthy overload and emulates a broken one - so a fix backported into `2.12.x` is picked
-up automatically. An unknown or unparsable `__version__` ranks lowest and therefore stays armed. Once
-`2.13.0` is released and verified fixed here, the shim is deleted; if the fix slips, the bound moves to
-the newly committed release. The overload was measured broken on `2.11.0.post1+musa5.2.0` (`mm` writes
-zeros, `bmm` writes wrong values).
+| Shim | Installed when | On 2.13 | What it does |
+|------|----------------|----------|--------------|
+| float64 in-place `Tensor.log_` | torch_musa < `2.11.0.post2` | No | Reuses the supported out-of-place `log` and writes the result back, preserving the in-place contract |
+| Compiled `multinomial` / `log` / `log_` | torch_musa < `2.11.0.post2` | No | MUSA `PrivateUse1` operator overrides in torchada's JIT-built C++ extension, replay-safe under CUDA graph capture |
+| Inductor MUSA template heuristics | torch_musa < `2.11.0.post2` | No | Fills the `musa` keys of Inductor's template-heuristic registry from the CUDA entries |
+| `torch.accelerator` memory APIs | torch_musa < `2.11.0.post2` | No | Routes `empty_cache()` / `memory_stats()` / ... to `torch.musa`, because the pre-release dispatch was broken |
+| `torch.mm` / `torch.bmm` `out_dtype=` | torch_musa < `2.13.0` | No | Reuses the plain overloads and accumulates in fp32; a runtime probe decides per process whether the native overload is healthy |
+| Asynchronous `torch.isfinite` | Always, on MUSA float tensors | Yes | Evaluates `abs() < inf` on float16/bfloat16/float32/float64 tensors, because ATen's composite runs a boolean `mul` that blocks the host until the device queue drains. Other dtypes keep the original operator |
+| libtorch stable-ABI headers | torch < 2.11 on MUSA | No | Backports the `torch::stable` accessors that torch_musa's 2.9 snapshot omits, so vLLM and SGLang stable kernels build |
+| `torch.cuda.streams` module path | MUSA, whenever `torch_musa.core.stream` is importable | Yes, if importable | Exposes it as `torch.cuda.streams`, which the PyTorch 2.11 Dynamo guards resolve |
+
+The `out_dtype` wrapper is installed **below `torch_musa 2.13.0`** and nothing is
+installed from `2.13.0` on, so a `2.13.0.post1+musa5.2.0` call reaches the native
+overloads without torchada's runtime probe. The native path was measured on MTT
+S5000 during the vLLM-MUSA v0.32.0-dev upgrade: `torch.mm` and `torch.bmm` with
+`out_dtype=torch.float32` on bf16 and fp16 inputs return non-zero results with a
+maximum relative error of about `1e-7` against the fp32 product. That measurement
+covers those builds and cases. The shim stays for pre-2.13 stacks, where the overload
+was measured broken on `2.11.0.post1+musa5.2.0` (`mm` wrote zeros, `bmm` wrote wrong
+values).
+
+On those older stacks the gate only decides whether a Python wrapper sits in front of
+`torch.mm`/`torch.bmm`; correctness is decided per process by the runtime probe, which
+forwards to a healthy overload and emulates a broken one - so a fix backported into
+`2.12.x` is picked up automatically. An unknown or unparsable `__version__` ranks
+lowest and therefore stays armed.
 
 **Not covered:** builds whose binding has no `*_Dtype` overload keep raising on `out_dtype=`. That is
 the binding's contract, not a defect torchada repairs, so CUDA parity for that case is out of scope.
@@ -246,6 +272,26 @@ the dropout-only auxiliary values the public inference API cannot supply, and fa
 closed if the provider does not return both output and LSE. A provider that ships its
 own `_flash_attn_forward` is left untouched.
 
+### SGLang-Omni Joint RoPE
+
+`torchada.apply_rope_inplace()` applies rotary position embedding to query and key
+tensors in place on MUSA:
+
+```python
+torchada.apply_rope_inplace(query, key, cos_sin_cache, positions, *, is_neox, rope_dim=0)
+```
+
+It reuses each token's cosine and sine values across all query and key heads,
+supports FP16/BF16/FP32 activations and caches, INT32/INT64 positions, NeoX and
+interleaved layouts, partial-rotary views, and MUSA graph replay. Every position must
+be in `[0, cos_sin_cache.size(0))`; `rope_dim` defaults to `cos_sin_cache.size(-1)`.
+
+When SGLang-Omni's fused-RoPE module (`sglang.kernels.ops.attention.rope`) is loaded,
+torchada installs the provider as that module's `apply_rope_inplace`, which is what
+`CUDAOmniPlatform.get_joint_rope_inplace_kernel()` imports. Importing torchada does not
+import SGLang; the hook covers both an already-imported and a later-imported module.
+SGLang core's own `RotaryEmbedding` dispatch is unchanged.
+
 ### Building C++ Extensions
 
 ```python
@@ -301,6 +347,11 @@ header backport runs lazily and best-effort at MUSA extension
 build time on torch 2.9; read-only headers are left unchanged. Torch 2.11 and
 newer provide the stable ABI directly, so the backport is skipped. A plain
 `import torchada` does not modify PyTorch or torch_musa headers.
+
+A ported stable-ABI kernel that calls ATen's `TORCH_CHECK`, or streams a
+`ScalarType` into the message, keeps compiling on torch 2.13, whose stable surface
+exposes neither: the always-on part of `torchada_stable_box.h` declares both, and
+every stable translation unit force-includes it.
 
 In-place CUDA-to-MUSA porting protects system include roots by default. Set
 `TORCHADA_EXCLUDE_DIRS` to add excluded roots for your environment. Entries may
@@ -517,6 +568,10 @@ per-call overhead:
 For comparison, a typical GPU kernel launch takes 5,000-20,000ns, so the patching
 overhead is negligible for real-world applications.
 
+These are the newest checked-in numbers and were measured on the previous
+`2.11.0.post2+musa5.2.0` stack; the `2.13.0.post1` stack reuses the same hot-path
+wrappers and has no checked-in row yet.
+
 Operations with inherent costs (runtime calls, object creation) take 400-600ns and
 cannot be optimized further without changing behavior.
 
@@ -584,6 +639,7 @@ once, when the patches are applied, so set it in the environment (or in
 | `is_musa_platform()` | Returns True if running on MUSA |
 | `is_cuda_platform()` | Returns True if running on CUDA |
 | `is_gpu_device(device)` | Returns True if device is CUDA or MUSA |
+| `apply_rope_inplace(query, key, cos_sin_cache, positions, *, is_neox, rope_dim=0)` | Joint in-place RoPE on MUSA, used by SGLang-Omni's fused-RoPE provider |
 | `CUDA_HOME` | Path to CUDA/MUSA installation |
 | `cuda_to_musa_name(name)` | Convert `cudaXxx` → `musaXxx` |
 | `nccl_to_mccl_name(name)` | Convert `ncclXxx` → `mcclXxx` |
@@ -672,9 +728,10 @@ if is_nvidia() or is_musa():
 
 | Project | Category | Status | Tracking |
 |---------|----------|--------|----------|
-| [SGLang](https://github.com/sgl-project/sglang) | Model Serving | ✅ Merged | — |
+| [SGLang](https://github.com/sgl-project/sglang) | Model Serving | ✅ Merged | [sglang#16565](https://github.com/sgl-project/sglang/issues/16565) |
+| [SGLang-Omni](https://github.com/sgl-project/sglang-omni) | Model Serving (Omni) | ✅ Merged | [sglang-omni#1598](https://github.com/sgl-project/sglang-omni/issues/1598) |
 | [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | Model Serving | ✅ Merged | — |
-| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | ✅ Merged | — |
+| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | Model Serving (Omni) | ✅ Merged | [vllm-omni#2347](https://github.com/vllm-project/vllm-omni/issues/2347) |
 | [Xinference](https://github.com/xorbitsai/inference) | Model Serving | ✅ Merged | — |
 | [LightLLM](https://github.com/ModelTC/LightLLM) | Model Serving | ✅ Merged | — |
 | [LightX2V](https://github.com/ModelTC/LightX2V) | Image/Video Generation | ✅ Merged | — |
@@ -682,6 +739,9 @@ if is_nvidia() or is_musa():
 | [Mooncake](https://github.com/kvcache-ai/Mooncake) | KVCache | ✅ Merged | — |
 | [ms-swift](https://github.com/modelscope/ms-swift) | Training / Fine-tuning | ✅ Merged | — |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | Image/Video Generation | 🚧 In Progress | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
+
+The vLLM-MUSA v0.32.0-dev line runs the current validation stack: PyTorch / torch_musa
+`2.13.0.post1` on Python 3.12, with MATE `0.2.8.post1`.
 
 ## License
 

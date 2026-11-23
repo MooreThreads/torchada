@@ -16,12 +16,23 @@ torchada 是一个适配器，让 [torch_musa](https://github.com/MooreThreads/t
 
 许多 PyTorch 项目使用 `torch.cuda.*` API 为 NVIDIA GPU 编写。要在摩尔线程 GPU 上运行这些项目，通常需要把每个 `cuda` 引用改成 `musa`。torchada 通过在运行时自动将 CUDA API 调用转换为 MUSA 等效调用来消除这一问题。
 
-MUSA `log` / `log_` 算子使用输入张量所在设备及该设备的当前 stream，即使调用方当前选中另一张 GPU；调用后恢复原来的当前设备。
+在 `2.11.0.post2` 之前的 torch_musa 上，MUSA `log` / `log_` 算子使用输入张量所在设备及该设备的当前 stream，即使调用方当前选中另一张 GPU；调用后恢复原来的当前设备。从 `2.11.0.post2` 起，这些算子由 vendor 内核原生提供，torchada 不再安装覆盖。
 
 ## 前置条件
 
 - **torch_musa**：必须安装 [torch_musa](https://github.com/MooreThreads/torch_musa)（提供 PyTorch 的 MUSA 支持）
 - **摩尔线程 GPU**：已安装正确驱动的摩尔线程 GPU
+
+参考栈是 vLLM-MUSA v0.32.0-dev 线所固定的 MUSA 5.2.0 栈：
+
+| 组件 | 版本 |
+|------|------|
+| PyTorch 与 torch_musa | `2.13.0.post1+musa5.2.0` |
+| Python | 3.12 —— torch 2.13 的 MUSA wheel 只提供 `cp312` |
+| MUSA SDK | 5.2.0 |
+| GPU | MTT S5000（`mp_31`） |
+
+更早的 torch_musa 2.9 与 2.11 由下文的版本门控覆盖；每个兼容层只在仍需要它的版本上安装。
 
 ## 安装
 
@@ -58,9 +69,9 @@ torch.cuda.synchronize()
 | 同步 | `torch.cuda.synchronize()`, `Stream`, `Event`, `torch.cuda.streams` |
 | 混合精度 | `torch.cuda.amp.autocast()`, `GradScaler()` |
 | CUDA Graphs | `torch.cuda.CUDAGraph`、`torch.cuda.graph()`、深层模型的 graph executable 轮换 |
-| CUDA 运行时 | `torch.cuda.cudart()` → 使用 MUSA 运行时，`torch._C._cuda_getCurrentRawStream` 兼容垫片 |
+| CUDA 运行时 | `torch.cuda.cudart()` → 使用 MUSA 运行时，`torch._C._cuda_getCurrentRawStream` 与 inductor `_C` 兼容垫片，`torch.cuda.current_blas_handle()`，显存池 workspace 清理 |
 | 性能分析 | `ProfilerActivity.CUDA` → 使用 PrivateUse1 |
-| 自定义算子 | `Library.impl(..., "CUDA")` → 使用 PrivateUse1 |
+| 自定义算子 | `Library.impl(..., "CUDA")` → PrivateUse1；`torch.library.infer_schema` / `custom_op` 接受 `torch.device` 注解 |
 | 分布式训练 | `dist.init_process_group(backend='nccl')` → 使用 MCCL |
 | torch.compile | Inductor、支持 AOT 缓存的张量工厂函数包装器、FX `device` builtin、`torch.cuda._get_device_index` |
 | C++ 扩展 | `CUDAExtension`、`BuildExtension`、源码原地移植、稳定 ABI 兼容层 |
@@ -69,31 +80,44 @@ torch.cuda.synchronize()
 | ctypes 库加载 | `ctypes.CDLL` 使用 CUDA 函数名 → 自动转换为 MUSA |
 | 统一加速器 API | `torch.accelerator.empty_cache()`、`memory_stats()`、`get_memory_info()`、`Stream`、`Event` 等 |
 | FlashAttention 提供方 | `flash_attn_interface` 重定向，以及 `only_qv` 与 `_flash_attn_forward` 兼容层 |
+| 旋转位置编码 | `torchada.apply_rope_inplace()` 联合原地 RoPE，接入 SGLang-Omni 的 fused-RoPE 提供方 |
 | Triton CUDA Extra | MUSA 上的 `tl.extra.cuda` → `tl.extra.musa` 兼容 |
 | Triton 融合 MoE | 面向 vLLM 和 SGLang 的 Triton 3.2.0 MTT S5000 调优配置 |
-| MUSA 算子级修复 | float64 原地 `log_`、异步 `isfinite`、`mm`/`bmm` 的 `out_dtype=` —— 详见 [torch_musa 兼容性](#torch_musa-兼容性) |
+| MUSA 算子修复 | 异步 `isfinite`（始终）；float64 `log_` 与 `mm`/`bmm` 的 `out_dtype=` 仅在 vendor 版本仍需要时启用 —— 详见 [torch_musa 兼容性](#torch_musa-兼容性) |
 
 ## torch_musa 兼容性
 
 有些补丁之所以存在，只是因为某个 torch_musa 版本缺失或写坏了对应的内核。这类补丁都按版本门控：
 只在需要它们的版本上安装，在修好该问题的版本上自动让位，因此底层栈升级时不需要任何配置。
 
-| 兼容层 | 安装条件 | 作用 |
-|--------|----------|------|
-| float64 原地 `Tensor.log_` | torch_musa < `2.11.0.post2` | 复用受支持的非原地 `log` 并把结果写回，保持原地操作契约 |
-| 编译态 `multinomial` / `log` / `log_` | torch_musa < `2.11.0.post2` | torchada JIT 构建的 C++ 扩展中的 MUSA `PrivateUse1` 算子覆盖，在 CUDA graph capture 下可正确重放 |
-| Inductor MUSA 模板启发式 | torch_musa < `2.11.0.post2` | 用 CUDA 条目补齐 Inductor 模板启发式注册表中缺失的 `musa` 键 |
-| `torch.accelerator` 显存 API | torch_musa < `2.11.0.post2` | 把 `empty_cache()` / `memory_stats()` 等转发到 `torch.musa`，因为该版本之前的 dispatch 有问题 |
-| `torch.mm` / `torch.bmm` 的 `out_dtype=` | torch_musa < `2.13.0` | 复用普通重载并以 fp32 累加；运行期探针按进程判断原生重载是否健康 |
-| 异步 `torch.isfinite` | 始终（MUSA 浮点张量） | float16/bfloat16/float32/float64 张量改用 `abs() < inf`：ATen 组合实现里的 bool `mul` 会阻塞主机直到设备队列清空。其他 dtype 仍走原算子 |
-| libtorch 稳定 ABI 头文件 | MUSA 且 torch < 2.11 | 回补 torch_musa 2.9 快照缺失的 `torch::stable` 访问器，使 vLLM 与 SGLang 的稳定 ABI 内核可以构建 |
-| `torch.cuda.streams` 模块路径 | MUSA，且 `torch_musa.core.stream` 可导入 | 将其暴露为 `torch.cuda.streams`，PyTorch 2.11 的 Dynamo guard 会解析该路径 |
+在参考栈上，所有按发布门控的兼容层都会被跳过：四个 `< 2.11.0.post2` 旧兼容层、
+`out_dtype` 包装层，以及 torch 2.11 及更新版本已不需要的稳定 ABI 回补。已安装的版本
+包含对应内核修复（`2.11.0.post2` 与 `2.13.0`），而 `torchada_stable_box.h` 的始终生效
+声明仍作用于每个稳定 ABI 编译单元。标记为 `Yes` 的行仍然生效，其中
+`torch.cuda.streams` 仅在 `torch_musa.core.stream` 可导入时生效。旧兼容层仍保留在
+wheel 中，供固定到更早 torch_musa 的栈使用。
 
-`out_dtype` 兼容层在 **`torch_musa 2.13.0` 以下**武装（该版本是 torch_musa 承诺修复重载的发布）。那是 vendor 的发布承诺、不是我们的实测，
-信任它就是已接受的风险：若 `2.13.0` 实际没修好，`>= 2.13.0` 的栈不安装包装层，静默全零会重新出现。门控只决定是否在 `torch.mm`/`torch.bmm`
-前加一层 Python 包装；正确性由运行期探针按进程裁决（健康则直接转发、损坏才仿真），因此若修复被 backport 到 `2.12.x` 会自动生效。
-`__version__` 无法解析时 rank 最低 ⇒ 仍然武装。待 `2.13.0` 发布并在此**验证修好**后删除该 shim；若承诺延期，则把上界抬到新的承诺版本。
+| 兼容层 | 安装条件 | 在 2.13 上 | 作用 |
+|--------|----------|------------|------|
+| float64 原地 `Tensor.log_` | torch_musa < `2.11.0.post2` | No | 复用受支持的非原地 `log` 并把结果写回，保持原地操作契约 |
+| 编译态 `multinomial` / `log` / `log_` | torch_musa < `2.11.0.post2` | No | torchada JIT 构建的 C++ 扩展中的 MUSA `PrivateUse1` 算子覆盖，在 CUDA graph capture 下可正确重放 |
+| Inductor MUSA 模板启发式 | torch_musa < `2.11.0.post2` | No | 用 CUDA 条目补齐 Inductor 模板启发式注册表中缺失的 `musa` 键 |
+| `torch.accelerator` 显存 API | torch_musa < `2.11.0.post2` | No | 把 `empty_cache()` / `memory_stats()` 等转发到 `torch.musa`，因为该版本之前的 dispatch 有问题 |
+| `torch.mm` / `torch.bmm` 的 `out_dtype=` | torch_musa < `2.13.0` | No | 复用普通重载并以 fp32 累加；运行期探针按进程判断原生重载是否健康 |
+| 异步 `torch.isfinite` | 始终（MUSA 浮点张量） | Yes | float16/bfloat16/float32/float64 张量改用 `abs() < inf`：ATen 组合实现里的 bool `mul` 会阻塞主机直到设备队列清空。其他 dtype 仍走原算子 |
+| libtorch 稳定 ABI 头文件 | MUSA 且 torch < 2.11 | No | 回补 torch_musa 2.9 快照缺失的 `torch::stable` 访问器，使 vLLM 与 SGLang 的稳定 ABI 内核可以构建 |
+| `torch.cuda.streams` 模块路径 | MUSA，且 `torch_musa.core.stream` 可导入 | Yes，可导入时 | 将其暴露为 `torch.cuda.streams`，PyTorch 2.11 的 Dynamo guard 会解析该路径 |
+
+`out_dtype` 包装层在 **`torch_musa 2.13.0` 以下**安装，从 `2.13.0` 起不再安装任何包装，
+因此 `2.13.0.post1+musa5.2.0` 上的调用会直接走原生重载，不经过 torchada 的运行期探针。
+该原生路径已在 vLLM-MUSA v0.32.0-dev 升级过程中于 MTT S5000 上实测：bf16 与 fp16 输入下
+`torch.mm` / `torch.bmm` 使用 `out_dtype=torch.float32` 返回非零结果，相对 fp32 乘积的
+最大相对误差约 `1e-7`。该结论只覆盖这些构建与用例。兼容层仍保留给 2.13 之前的栈；
 该重载实测损坏于 `2.11.0.post1+musa5.2.0`（`mm` 全零、`bmm` 错值）。
+
+在这些更早的栈上，门控只决定是否在 `torch.mm`/`torch.bmm` 前加一层 Python 包装；
+正确性由运行期探针按进程裁决（健康则直接转发、损坏才仿真），因此若修复被 backport 到
+`2.12.x` 会自动生效。`__version__` 无法解析时 rank 最低 ⇒ 仍然武装。
 
 **未覆盖**：binding 本身不含 `*_Dtype` 重载的构建，`out_dtype=` 仍会报错。那是 binding 的契约、不是 torchada 要修的缺陷，
 为该情形做 CUDA 等价支持不在范围内。
@@ -223,6 +247,25 @@ FA3 可用性探测会判定为不可用。该兼容层是对
 dropout 相关辅助返回值一律返回 `None`；若提供方没有同时返回 output 和 LSE 则直接失败。
 提供方自带 `_flash_attn_forward` 时不做任何改动。
 
+### SGLang-Omni 联合 RoPE
+
+`torchada.apply_rope_inplace()` 在 MUSA 上对 query 与 key 原地做旋转位置编码：
+
+```python
+torchada.apply_rope_inplace(query, key, cos_sin_cache, positions, *, is_neox, rope_dim=0)
+```
+
+它会在所有 query/key head 间复用每个 token 的 cos/sin 值，支持 FP16/BF16/FP32 的激活与
+cache、INT32/INT64 positions、NeoX 与交错布局、部分旋转视图，以及 MUSA graph replay。
+每个 position 必须位于 `[0, cos_sin_cache.size(0))`；`rope_dim` 默认取
+`cos_sin_cache.size(-1)`。
+
+当 SGLang-Omni 的 fused-RoPE 模块（`sglang.kernels.ops.attention.rope`）加载时，
+torchada 会把该提供方安装为模块的 `apply_rope_inplace`，即
+`CUDAOmniPlatform.get_joint_rope_inplace_kernel()` 所导入的实现。导入 torchada 不会导入
+SGLang；该钩子同时覆盖已导入和之后才导入的模块。SGLang 核心自身的 `RotaryEmbedding`
+dispatch 保持不变。
+
 ### 构建 C++ 扩展
 
 ```python
@@ -272,6 +315,11 @@ torch_musa 自带的同名头文件，因此该目录放在 torch_musa include �
 均可。torch_musa 2.9 头文件回补会在 MUSA 扩展构建时延迟、
 尽力执行；torch 2.11 及更新版本已经原生提供 stable ABI，因此会跳过回补。单纯
 `import torchada` 不会修改 PyTorch 或 torch_musa 头文件。
+
+移植后的稳定 ABI 内核如果调用 ATen 的 `TORCH_CHECK`，或把 `ScalarType` 流式写入消息，
+在 torch 2.13 上仍可编译：torch 2.13 的稳定 ABI 表面不提供这两者，而
+`torchada_stable_box.h` 的始终生效部分声明了它们；每个稳定 ABI 编译单元都会强制
+include 该头文件。
 
 原地 CUDA 到 MUSA 的转换会继续按原有规则保护系统 include 目录。可以通过环境变量
 `TORCHADA_EXCLUDE_DIRS` 额外配置要排除的目录；每一项可以是目录路径，也可以是目录
@@ -470,6 +518,9 @@ PyTorch 与 torch_musa `2.11.0.post2+musa5.2.0`），为每次调用的开销中
 
 作为对比，典型的 GPU 内核启动耗时 5,000-20,000ns，因此补丁开销对于实际应用来说可以忽略不计。
 
+这些是仓库中最新的实测数字，取自之前的 `2.11.0.post2+musa5.2.0` 栈；
+`2.13.0.post1` 栈复用同一套热路径包装器，目前还没有已提交的测量行。
+
 具有固有成本的操作（运行时调用、对象创建）耗时 400-600ns，但在不改变行为的情况下无法进一步优化。
 
 同一文件中 0.1.94 的记录是在 torch_musa 2.7.1 上测得的，上述快路径约为 120-160ns。
@@ -532,6 +583,7 @@ device = torch.device("cuda")  # 会被转换为 musa
 | `is_musa_platform()` | 在 MUSA 上运行时返回 True |
 | `is_cuda_platform()` | 在 CUDA 上运行时返回 True |
 | `is_gpu_device(device)` | 设备是 CUDA 或 MUSA 时返回 True |
+| `apply_rope_inplace(query, key, cos_sin_cache, positions, *, is_neox, rope_dim=0)` | MUSA 上的联合原地 RoPE，供 SGLang-Omni 的 fused-RoPE 提供方使用 |
 | `CUDA_HOME` | CUDA/MUSA 安装路径 |
 | `cuda_to_musa_name(name)` | 转换 `cudaXxx` → `musaXxx` |
 | `nccl_to_mccl_name(name)` | 转换 `ncclXxx` → `mcclXxx` |
@@ -619,9 +671,10 @@ if is_nvidia() or is_musa():
 
 | 项目 | 类别 | 状态 | 跟踪 |
 |------|------|------|------|
-| [SGLang](https://github.com/sgl-project/sglang) | 模型服务 | ✅ 已合并 | — |
+| [SGLang](https://github.com/sgl-project/sglang) | 模型服务 | ✅ 已合并 | [sglang#16565](https://github.com/sgl-project/sglang/issues/16565) |
+| [SGLang-Omni](https://github.com/sgl-project/sglang-omni) | 模型服务 (Omni) | ✅ 已合并 | [sglang-omni#1598](https://github.com/sgl-project/sglang-omni/issues/1598) |
 | [vLLM-MUSA](https://github.com/MooreThreads/vllm-musa) | 模型服务 | ✅ 已合并 | — |
-| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | 模型服务 (Omni) | ✅ 已合并 | — |
+| [vLLM-Omni](https://github.com/vllm-project/vllm-omni) | 模型服务 (Omni) | ✅ 已合并 | [vllm-omni#2347](https://github.com/vllm-project/vllm-omni/issues/2347) |
 | [Xinference](https://github.com/xorbitsai/inference) | 模型服务 | ✅ 已合并 | — |
 | [LightLLM](https://github.com/ModelTC/LightLLM) | 模型服务 | ✅ 已合并 | — |
 | [LightX2V](https://github.com/ModelTC/LightX2V) | 图像/视频生成 | ✅ 已合并 | — |
@@ -629,6 +682,9 @@ if is_nvidia() or is_musa():
 | [Mooncake](https://github.com/kvcache-ai/Mooncake) | KV 缓存 | ✅ 已合并 | — |
 | [ms-swift](https://github.com/modelscope/ms-swift) | 训练/微调 | ✅ 已合并 | — |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | 图像/视频生成 | 🚧 进行中 | [ComfyUI#11618](https://github.com/Comfy-Org/ComfyUI/pull/11618) |
+
+vLLM-MUSA v0.32.0-dev 线运行当前的参考栈：PyTorch / torch_musa `2.13.0.post1`、Python 3.12，
+并搭配 MATE `0.2.8.post1`。
 
 
 ## 许可证
