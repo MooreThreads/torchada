@@ -51,7 +51,8 @@ src/torchada/
 ├── _graph_rotation_src/        # C++ source of the graph-rotation aux extension
 ├── _visible_devices.py         # MUSA/CUDA_VISIBLE_DEVICES mirroring, before torch is imported
 ├── _version.py                 # version_of(): infix PEP 440 proxy used by every version gate
-├── csrc/                       # ops.h / ops.cpp / musa_ops.mu / rope.mu + stable_compat/ headers
+├── csrc/                       # ops.h / ops.cpp / musa_ops.mu / rope.mu + cuda_compat/
+│                               #   and stable_compat/ headers
 ├── cuda/                       # CUDA-compatible submodules: amp, nvtx, random
 ├── utils/cpp_extension.py      # CUDAExtension / BuildExtension / CUDA_HOME + in-place source
 │                               #   porting via SimplePorting (~1.5k lines)
@@ -63,7 +64,8 @@ docs/        custom_musa_ops.md, tune_triton_moe.md
 examples/    basic_usage.py, model_training.py, extension_setup.py, profiler_demo.py,
              migrate_existing_project.md
 benchmarks/  benchmark_overhead.py, benchmark_history.json
-scripts/     publish.sh (build + twine upload to PyPI/TestPyPI)
+scripts/     publish.sh (build + twine upload to PyPI/TestPyPI),
+             probe_cuda_compat_symbols.py (MUSA SDK alias probe)
 ```
 
 ## Architecture
@@ -457,6 +459,55 @@ if version_of(getattr(torch.musa, "__version__", None)) < "2.11.0.post2":
    `tests/test_extension_build.py`.
 4. Mention the domain in `README.md` / `README_CN.md` only when the rule set grows
    by a whole new API family.
+
+## Direct-JIT Compatibility Headers
+
+Use this path when a JIT backend compiles CUDA-spelled source directly with
+`mcc` and bypasses the normal in-place source-porting pass:
+
+```python
+import tvm_ffi.cpp
+from torchada.cuda_compat import cuda_compat_include_dir
+
+module = tvm_ffi.cpp.load_inline(
+    name="cuda_compat_example",
+    cuda_sources="#include <cuda_runtime.h>\n",
+    extra_include_paths=[cuda_compat_include_dir()],
+)
+```
+
+Do not use `torch.utils.cpp_extension.load_inline` as the direct-JIT example.
+That path is upstream torch's own loader, which no Torchada patch rewrites, so it
+needs this include directory as well; only
+`torchada.utils.cpp_extension.load_inline` ports the source.
+
+Existing code that uses the Torchada wrapper remains unchanged:
+
+```python
+from torchada.utils.cpp_extension import load_inline
+
+load_inline(
+    name="my_kernel",
+    cpp_sources=existing_cpp_sources,
+    cuda_sources=existing_cuda_sources,
+    functions=existing_functions,
+)
+```
+
+Put this include directory before every CUDA toolkit include directory. Do not
+add it to the global `include_paths()` result, because CUDA-named compatibility
+headers must not shadow the normal CUDA extension build path.
+
+When adding a direct-JIT API:
+
+1. Add the symbol to its owning file under `src/torchada/_mappings/`.
+2. Add the matching guarded alias to the owning header under
+   `src/torchada/csrc/cuda_compat/`.
+3. Extend `tests/csrc/cuda_compat_surface.mu` when the API has a new call shape.
+4. Update `UNMAPPED_JIT_NAMES`, its exact expectation in
+   `TestCudaCompatHeaderParity`, and the probe when no real MUSA declaration
+   exists. TensorMap and TMA are intentionally unsupported.
+5. Run the mapping tests, `mcc` surface compile, and the symbol probe.
 
 ## C++ Operator Overrides
 

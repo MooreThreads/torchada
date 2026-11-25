@@ -361,6 +361,70 @@ so `TORCHADA_EXCLUDE_DIRS=torch_musa` excludes `/home/torch_musa` without the
 full path. Explicit source directories remain eligible for porting even when
 they are below an excluded root.
 
+### Direct-JIT compatibility headers
+
+JIT kernels that compile CUDA-spelled source directly and bypass Torchada's
+source-porting pass can add the compatibility include directory explicitly.
+
+The loader determines whether source porting happens:
+
+| Loader | CUDA source porting | Needs `cuda_compat_include_dir()` |
+|---|---|---|
+| `torchada.utils.cpp_extension.load_inline` | Yes | No |
+| `torch.utils.cpp_extension.load_inline` | No | Yes |
+| `tvm_ffi.cpp.load_inline` | No | Yes |
+
+Existing code that imports the Torchada wrapper stays unchanged:
+
+```python
+from torchada.utils.cpp_extension import load_inline
+
+load_inline(
+    name="my_kernel",
+    cpp_sources=existing_cpp_sources,
+    cuda_sources=existing_cuda_sources,
+    functions=existing_functions,
+)
+```
+
+For a direct JIT, keep the existing source and functions and add one include
+path. The only required change to the `tvm_ffi` path used by SGLang is:
+
+```python
+import tvm_ffi.cpp
+from torchada.cuda_compat import cuda_compat_include_dir
+
+tvm_ffi.cpp.load_inline(
+    name="my_kernel",
+    cuda_sources=existing_cuda_sources,
+    functions=existing_functions,
+    extra_include_paths=[cuda_compat_include_dir(), *existing_include_paths],
+)
+```
+
+Use a stable, project-unique extension name in production code. No other
+`tvm_ffi.cpp.load_inline` changes are required.
+
+If code uses upstream `torch.utils.cpp_extension.load_inline` directly, it also
+needs the same extra include path because it does not pass through the Torchada
+wrapper. Keep `cuda_compat_include_dir()` before any CUDA toolkit include
+directory.
+It is not added to `include_paths()` automatically because that would let
+CUDA-named compatibility headers shadow normal CUDA extension builds.
+
+The directory contains CUDA-named forwarding headers for runtime, driver,
+profiler, typedef, BF16, FP16, FP8, FP4, and cuBLAS code. For example, a direct
+`mcc` compile can use:
+
+```bash
+CUDA_COMPAT_INCLUDE="$(python -c 'from torchada.cuda_compat import cuda_compat_include_dir; print(cuda_compat_include_dir())')"
+mcc -x musa -std=c++20 -I"$CUDA_COMPAT_INCLUDE" -c kernel.mu -o kernel.o
+```
+
+TensorMap and TMA are not part of this compatibility surface because MUSA does
+not provide the corresponding types or entry points. Keep those kernels behind
+their CUDA architecture guards.
+
 Porting reaches nested PyTorch headers as well: both `<torch/cuda.h>` and
 `"torch/cuda.h"` become `torch/musa.h`, while project-local names such as
 `decode_jpegs_cuda.h` are left alone.

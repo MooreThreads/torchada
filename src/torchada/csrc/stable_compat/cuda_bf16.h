@@ -1,15 +1,14 @@
 #pragma once
-// MUSA: there is no <cuda_bf16.h> on MUSA; libtorch-stable kernels that include
-// it (e.g. attention/dtype_bfloat16.cuh) get the MUSA bf16 header instead.
-// Resolved ahead of any toolchain header via the stable_compat include dir.
-#include <musa_bf16.h>
-
-// MUSA's bf16 header names its types __mt_bfloat16{,2}; kernels written for CUDA
-// use __nv_bfloat16{,2}. Alias them so CUDA-named bf16 code compiles. Guarded so
-// a translation unit that already defines these (e.g. via type_convert.cuh)
-// is not redefined.
-#ifndef TORCHADA_NV_BFLOAT16_ALIASED
-#define TORCHADA_NV_BFLOAT16_ALIASED 1
-using __nv_bfloat16 = __mt_bfloat16;
-using __nv_bfloat162 = __mt_bfloat162;
-#endif
+// Deprecated forwarder: this header now lives in ../cuda_compat/cuda_bf16.h.
+//
+// The CUDA-named headers are a layer of their own: a JIT that brings its own
+// compiler driver resolves them instead of absent CUDA headers, so that
+// directory has to precede CUDA toolkit include directories. The CUDA forwarders
+// here use a relative include rather than `#include_next`, so this directory must
+// also precede CUDA toolkit include directories for these CUDA names. Torch stable
+// ABI shims elsewhere in this tree may still defer through `#include_next`.
+//
+// Kept so a build that adds only this directory keeps resolving the header. It
+// carries no aliases itself, so the two copies cannot drift. Scheduled for
+// removal with the next major release.
+#include "../cuda_compat/cuda_bf16.h"

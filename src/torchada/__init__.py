@@ -6,9 +6,10 @@ NVIDIA GPUs (CUDA) and Moore Threads GPUs (MUSA).
 
 Usage:
     Just import torchada at the top of your script, then use standard
-    torch.cuda.* and torch.utils.cpp_extension APIs as you normally would.
-    torchada patches PyTorch to transparently redirect to MUSA on
-    Moore Threads hardware.
+    torch.cuda.* APIs as you normally would. CUDAExtension, BuildExtension,
+    CUDA_HOME, include_paths, and library_paths under torch.utils.cpp_extension
+    are patched for MUSA. Use torchada.utils.cpp_extension.load_inline when
+    source porting is required.
 
     # Add this at the top of your script:
     import torchada

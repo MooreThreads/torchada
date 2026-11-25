@@ -327,6 +327,64 @@ include 该头文件。
 `TORCHADA_EXCLUDE_DIRS=torch_musa` 可以直接排除 `/home/torch_musa`，无需填写完整路径。
 即使源目录位于排除目录下，扩展显式提供的源目录仍会执行转换。
 
+### 直接 JIT 的 CUDA 兼容头文件
+
+如果 JIT 内核绕过 Torchada 的源码移植流程，直接编译保留 CUDA 写法的源码，只需要
+显式加入兼容 include 目录。是否会自动改写源码取决于使用的 loader：
+
+| Loader | 源码移植 | 是否需要 `cuda_compat_include_dir()` |
+|---|---|---|
+| `torchada.utils.cpp_extension.load_inline` | 是 | 否 |
+| `torch.utils.cpp_extension.load_inline` | 否 | 是 |
+| `tvm_ffi.cpp.load_inline` | 否 | 是 |
+
+已有 Torchada 用法保持不变：
+
+```python
+from torchada.utils.cpp_extension import load_inline
+
+load_inline(
+    name="my_kernel",
+    cpp_sources=existing_cpp_sources,
+    cuda_sources=existing_cuda_sources,
+    functions=existing_functions,
+)
+```
+
+对于 direct JIT，源码和 functions 都不变，只增加 include path。SGLang 使用的
+`tvm_ffi` 路径只需要：
+
+```python
+import tvm_ffi.cpp
+from torchada.cuda_compat import cuda_compat_include_dir
+
+tvm_ffi.cpp.load_inline(
+    name="my_kernel",
+    cuda_sources=existing_cuda_sources,
+    functions=existing_functions,
+    extra_include_paths=[cuda_compat_include_dir(), *existing_include_paths],
+)
+```
+
+生产代码中使用项目内稳定且唯一的 extension 名称和原本的源码列表，不需要修改
+`tvm_ffi.cpp.load_inline` 的其他参数。
+
+如果直接使用 upstream `torch.utils.cpp_extension.load_inline`，同样需要增加这个
+include path，因为它不经过 Torchada wrapper。`cuda_compat_include_dir()` 必须排在
+任何 CUDA Toolkit include 目录之前。它不会自动加入 `include_paths()`，否则会让
+CUDA 命名的兼容头影响普通 CUDA 扩展构建。
+
+目录中包含 runtime、driver、profiler、typedef、BF16、FP16、FP8、FP4 和
+cuBLAS 的 CUDA 命名转发头文件。直接调用 `mcc` 的例子如下：
+
+```bash
+CUDA_COMPAT_INCLUDE="$(python -c 'from torchada.cuda_compat import cuda_compat_include_dir; print(cuda_compat_include_dir())')"
+mcc -x musa -std=c++20 -I"$CUDA_COMPAT_INCLUDE" -c kernel.mu -o kernel.o
+```
+
+TensorMap 和 TMA 不在此兼容面内，因为 MUSA 当前没有对应类型和入口。这类内核应
+继续放在 CUDA 架构门控之后。
+
 移植也会处理嵌套的 PyTorch 头文件：`<torch/cuda.h>` 和 `"torch/cuda.h"` 都会变成
 `torch/musa.h`，而形如 `decode_jpegs_cuda.h` 的项目内文件名保持不变。
 
