@@ -1,12 +1,14 @@
 #pragma once
-// MUSA: <cublas_v2.h> does not exist; map to the MUSA BLAS header. Resolved via
-// the stable_compat include dir for libtorch-stable kernels (torch_utils.h, the
-// allspark w8a16 gemm) that include it directly.
-#include <mublas.h>
-
-// MUSA: libtorch-stable kernels use the cuBLAS handle spelling; map it to the
-// muBLAS handle (defined by <mublas.h> above, and repeated harmlessly by the
-// stable-box header) so those kernels compile against the upstream name.
-#ifndef cublasHandle_t
-#define cublasHandle_t mublasHandle_t
-#endif
+// Deprecated forwarder: this header now lives in ../cuda_compat/cublas_v2.h.
+//
+// The CUDA-named headers are a layer of their own: a JIT that brings its own
+// compiler driver resolves them instead of absent CUDA headers, so that
+// directory has to precede CUDA toolkit include directories. The CUDA forwarders
+// here use a relative include rather than `#include_next`, so this directory must
+// also precede CUDA toolkit include directories for these CUDA names. Torch stable
+// ABI shims elsewhere in this tree may still defer through `#include_next`.
+//
+// Kept so a build that adds only this directory keeps resolving the header. It
+// carries no aliases itself, so the two copies cannot drift. Scheduled for
+// removal with the next major release.
+#include "../cuda_compat/cublas_v2.h"

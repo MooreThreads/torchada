@@ -2,6 +2,8 @@
 Tests for CUDA to MUSA mapping rules.
 """
 
+from pathlib import Path
+
 import pytest
 
 
@@ -182,15 +184,15 @@ class TestNVJPEGMappings:
         source = (
             '#include "nvjpeg_helpers.h"\n'
             '#include "nvjpeg.h"\n'
-            '#  include <nvjpeg.h>\n'
-            'nvjpegStatus_t status = NVJPEG_STATUS_SUCCESS;\n'
+            "#  include <nvjpeg.h>\n"
+            "nvjpegStatus_t status = NVJPEG_STATUS_SUCCESS;\n"
         )
 
         result = _port_cuda_source(source)
 
         assert '#include "nvjpeg_helpers.h"' in result
         assert '#include "mtjpeg.h"' in result
-        assert '#  include <mtjpeg.h>' in result
+        assert "#  include <mtjpeg.h>" in result
         assert "mtjpegStatus_t status = MTJPEG_STATUS_SUCCESS" in result
 
     def test_cuda_event_header(self):
@@ -218,7 +220,7 @@ class TestCUDARuntimeMappings:
         from torchada._mapping import _MAPPING_RULE
 
         assert _MAPPING_RULE["cudaHostAlloc"] == "musaHostAlloc"
-        assert _MAPPING_RULE["cudaHostFree"] == "musaHostFree"
+        assert _MAPPING_RULE["cudaHostFree"] == "musaFreeHost"
         assert _MAPPING_RULE["cudaMallocHost"] == "musaMallocHost"
         assert _MAPPING_RULE["cudaFreeHost"] == "musaFreeHost"
         assert _MAPPING_RULE["cudaMallocManaged"] == "musaMallocManaged"
@@ -535,6 +537,13 @@ class TestCUDADriverMappings:
 
     def test_memory_constants(self):
         from torchada._mapping import _MAPPING_RULE
+
+        assert _MAPPING_RULE["CUdevice_attribute"] == "MUdevice_attribute"
+
+        assert (
+            _MAPPING_RULE["CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR"]
+            == "MU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR"
+        )
 
         assert (
             _MAPPING_RULE["CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED"]
@@ -1342,8 +1351,12 @@ class TestCudaArchGuardPorting:
         # The bug: the macro is renamed while NVIDIA's threshold survives, so a guard
         # reads e.g. `310 < 800` and is always true. (The `defined(...)` operand is
         # renamed by torch_musa's own general.json, not by these rules.)
-        for nvidia in ("__MUSA_ARCH__ < 800", "__MUSA_ARCH__ >= 800",
-                       "__MUSA_ARCH__ < 900", "__MUSA_ARCH__ >= 900"):
+        for nvidia in (
+            "__MUSA_ARCH__ < 800",
+            "__MUSA_ARCH__ >= 800",
+            "__MUSA_ARCH__ < 900",
+            "__MUSA_ARCH__ >= 900",
+        ):
             assert nvidia not in result
 
     def test_guard_selects_supported_branch_on_mp31(self):
@@ -1355,4 +1368,194 @@ class TestCudaArchGuardPorting:
         assert 310 >= threshold, (
             f"ported guard is `__MUSA_ARCH__ < {threshold}`, which is true on mp_31 "
             "(310) and would disable the supported path"
+        )
+
+
+class TestCudaCompatHeaderParity:
+    """The CUDA-named compat headers must alias exactly what the porting tables alias.
+
+    Two mechanisms translate CUDA names for mcc. The text porter rewrites source at
+    build time from ``_mappings/``, and the headers in ``csrc/cuda_compat`` are
+    resolved by the preprocessor for a JIT that carries its own compiler driver and
+    never reaches the porter. A name in one mechanism and not the other fails
+    silently, as an undeclared identifier inside someone else's build, so the tables
+    are the source of truth and the headers are checked against them here.
+    """
+
+    @staticmethod
+    def _identifier_rules(domain):
+        """Rules whose key and value are single identifiers, i.e. alias material.
+
+        The domain modules also carry include-line and call-site rules
+        (``cuda_runtime.h``, ``cudaGridDependencySynchronize()``). Those are text
+        rewrites for the porter, not names a header can alias.
+        """
+        import re
+        from importlib import import_module
+
+        from torchada.cuda_compat import SUBWORD_RULES
+
+        mapping = import_module("torchada._mappings." + domain).MAPPING
+        is_identifier = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z").match
+        subword = SUBWORD_RULES.get(domain, frozenset())
+        return [
+            (key, value)
+            for key, value in mapping.items()
+            if key not in subword and is_identifier(key) and is_identifier(value)
+        ]
+
+    @staticmethod
+    def _defined_macros(header_names):
+        """``{name: target}`` for every ``#define <name> <target>`` in the headers."""
+        import re
+
+        from torchada.cuda_compat import cuda_compat_include_dir
+
+        root = Path(cuda_compat_include_dir())
+        defined = {}
+        for name in header_names:
+            text = (root / name).read_text(encoding="utf-8")
+            for macro, target in re.findall(r"^#define\s+(\w+)\s+(\w+)\s*$", text, re.MULTILINE):
+                defined[macro] = target
+        return defined
+
+    @pytest.mark.parametrize("domain", ("cublas", "cuda_driver", "cuda_runtime", "data_types"))
+    def test_every_identifier_rule_has_its_header_alias(self, domain):
+        """A rule the porter applies must also exist as a header alias, with the same target."""
+        from torchada.cuda_compat import DOMAIN_HEADERS
+
+        headers = DOMAIN_HEADERS[domain]
+        defined = self._defined_macros(headers)
+        rules = self._identifier_rules(domain)
+        assert rules, f"{domain} has no identifier rules to check"
+        wrong = [
+            (key, value, defined.get(key)) for key, value in rules if defined.get(key) != value
+        ]
+        assert not wrong, (
+            f"{domain}: {len(wrong)} of {len(rules)} rules are not aliased by {headers}; "
+            f"first mismatches (rule, alias target, got): {wrong[:5]}"
+        )
+
+    def test_each_covered_domain_names_headers_that_exist(self):
+        from torchada.cuda_compat import DOMAIN_HEADERS, cuda_compat_include_dir
+
+        root = Path(cuda_compat_include_dir())
+        for domain, names in DOMAIN_HEADERS.items():
+            for name in names:
+                assert (root / name).is_file(), f"{domain} lists {name}, which does not exist"
+
+    def test_candidate_domains_are_declared_because_no_header_exists_yet(self):
+        """Keeps the declared backlog honest: adding a header must register it above."""
+        import importlib
+
+        from torchada.cuda_compat import DOMAIN_HEADERS, HEADER_CANDIDATE_DOMAINS
+
+        for domain in HEADER_CANDIDATE_DOMAINS:
+            assert domain not in DOMAIN_HEADERS, f"{domain} has headers; register it above"
+            assert importlib.import_module("torchada._mappings." + domain).MAPPING
+            assert self._identifier_rules(domain), (
+                f"{domain} has no identifier rules, so a header cannot mirror it; "
+                "drop it from HEADER_CANDIDATE_DOMAINS"
+            )
+
+    def test_stable_compat_forwarders_carry_no_aliases_of_their_own(self):
+        """The old paths must forward, not copy: a second alias table would drift."""
+        from torchada.cuda_compat import DOMAIN_HEADERS
+        from torchada.utils.cpp_extension import stable_compat_include_dir
+
+        root = Path(stable_compat_include_dir())
+        for names in DOMAIN_HEADERS.values():
+            for name in names:
+                path = root / name
+                assert path.is_file(), f"{name} lost its stable_compat forwarder"
+                text = path.read_text(encoding="utf-8")
+                defines = [line for line in text.splitlines() if line.startswith("#define")]
+                assert not defines, f"{name} forwarder defines {defines}; it must only include"
+                assert f'#include "../cuda_compat/{name}"' in text
+
+    def test_cuda_compat_dir_is_first_and_not_on_the_default_path(self):
+        """A layer that must win over a stray CUDA toolkit cannot be an appended path.
+
+        ``stable_compat`` may be listed either way because its relative forwarders
+        resolve the sibling ``cuda_compat`` header directly; this one may not, so
+        nothing adds it implicitly: a ported build rewrites the ``#include`` lines
+        to ``musa_*`` itself and a JIT has to ask for the directory explicitly.
+        """
+        import os
+
+        from torchada import cuda_compat
+        from torchada.utils import cpp_extension
+
+        d = cuda_compat.cuda_compat_include_dir()
+        assert d.endswith(os.path.join("csrc", "cuda_compat")), d
+        assert os.path.isdir(d)
+        assert cpp_extension.cuda_compat_include_dir() == d
+        stable = cpp_extension.stable_compat_include_dir()
+        assert stable.endswith("stable_compat") and stable != d
+        assert d not in cpp_extension.include_paths()
+
+    def test_unmapped_jit_names_have_no_rule_yet(self):
+        """Each name there is a probe input; once a rule lands, the name must leave."""
+        from torchada._mapping import _MAPPING_RULE
+        from torchada.cuda_compat import UNMAPPED_JIT_NAMES
+
+        assert list(UNMAPPED_JIT_NAMES) == sorted(UNMAPPED_JIT_NAMES)
+        stale = [name for name in UNMAPPED_JIT_NAMES if name in _MAPPING_RULE]
+        assert not stale, f"now mapped, so drop them from UNMAPPED_JIT_NAMES: {stale}"
+
+    def test_only_unsupported_tensor_map_names_remain(self):
+        from torchada.cuda_compat import UNMAPPED_JIT_NAMES
+
+        assert set(UNMAPPED_JIT_NAMES) == {
+            "CUtensorMap",
+            "CUtensorMapDataType",
+            "CUtensorMapFloatOOBfill",
+            "CUtensorMapInterleave",
+            "CUtensorMapL2promotion",
+            "CUtensorMapSwizzle",
+            "CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B",
+            "CU_TENSOR_MAP_DATA_TYPE_BFLOAT16",
+            "CU_TENSOR_MAP_DATA_TYPE_FLOAT32",
+            "CU_TENSOR_MAP_DATA_TYPE_INT32",
+            "CU_TENSOR_MAP_DATA_TYPE_UINT64",
+            "CU_TENSOR_MAP_DATA_TYPE_UINT8",
+            "CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE",
+            "CU_TENSOR_MAP_INTERLEAVE_NONE",
+            "CU_TENSOR_MAP_L2_PROMOTION_L2_128B",
+            "CU_TENSOR_MAP_L2_PROMOTION_L2_256B",
+            "CU_TENSOR_MAP_L2_PROMOTION_NONE",
+            "CU_TENSOR_MAP_SWIZZLE_128B",
+            "CU_TENSOR_MAP_SWIZZLE_32B",
+            "CU_TENSOR_MAP_SWIZZLE_64B",
+            "CU_TENSOR_MAP_SWIZZLE_NONE",
+            "cuTensorMapEncodeTiled",
+        }
+
+    def test_cuda_compat_surface_compiles_when_mcc_is_available(self):
+        import os
+        import shlex
+        import shutil
+        import subprocess
+
+        from torchada.cuda_compat import cuda_compat_include_dir
+
+        mcc = os.environ.get("TORCHADA_MCC") or shutil.which("mcc")
+        if not mcc:
+            pytest.skip("mcc is not available")
+
+        root = Path(__file__).resolve().parents[1]
+        source = root / "tests" / "csrc" / "cuda_compat_surface.mu"
+        extra_args = shlex.split(os.environ.get("TORCHADA_MCC_ARGS", ""))
+        subprocess.run(
+            [
+                mcc,
+                *extra_args,
+                "-x",
+                "musa",
+                "-fsyntax-only",
+                "-std=c++20",
+                f"-I{cuda_compat_include_dir()}",
+                str(source),
+            ],
+            check=True,
         )
