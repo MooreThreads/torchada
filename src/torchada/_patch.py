@@ -30,6 +30,7 @@ import threading
 import time
 import typing
 import warnings
+import weakref
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -1410,6 +1411,41 @@ def _force_cuda_available_enabled() -> bool:
     return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _bind_musa_module_sync(musa_module: Any, cuda_wrapper: "_CudaModuleWrapper") -> None:
+    """Keep ``cuda_wrapper`` synchronized when attributes change on ``torch.musa``."""
+    if not isinstance(musa_module, ModuleType):
+        return
+
+    wrappers = getattr(musa_module, "_torchada_cuda_wrappers", None)
+    if wrappers is None:
+        wrappers = weakref.WeakSet()
+        object.__setattr__(musa_module, "_torchada_cuda_wrappers", wrappers)
+    wrappers.add(cuda_wrapper)
+
+    base_cls = type(musa_module)
+    if getattr(base_cls, "_torchada_synced_musa_cls", False):
+        return
+
+    class _SyncedMusaModule(base_cls):
+        _torchada_synced_musa_cls = True
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            super().__setattr__(name, value)
+            if name.startswith("_torchada_"):
+                return
+            for wrapper in tuple(getattr(self, "_torchada_cuda_wrappers", ())):
+                wrapper._on_musa_attr_set(name, value)
+
+        def __delattr__(self, name: str) -> None:
+            super().__delattr__(name)
+            if name.startswith("_torchada_"):
+                return
+            for wrapper in tuple(getattr(self, "_torchada_cuda_wrappers", ())):
+                wrapper._on_musa_attr_del(name)
+
+    musa_module.__class__ = _SyncedMusaModule
+
+
 class _CudaModuleWrapper(ModuleType):
     """
     A wrapper module that redirects torch.cuda to torch.musa,
@@ -1419,10 +1455,21 @@ class _CudaModuleWrapper(ModuleType):
         torch.cuda.is_available()  # Returns False on MUSA (original behavior)
     While still using torch.cuda.* APIs that redirect to torch.musa.
 
-    Performance optimization: Resolved attributes are cached in __dict__ to avoid
-    repeated __getattr__ calls. This reduces overhead from ~800ns to ~50ns for
-    cached attributes.
+    Resolved attributes are cached in __dict__ (~50ns lookup), and attribute
+    writes/deletions synchronize bidirectionally between torch.cuda and
+    torch.musa (except non-redirected attributes such as is_available).
     """
+
+    _INTERNAL_ATTRS = frozenset(
+        {
+            "_original_cuda",
+            "_musa_module",
+            "_force_cuda_available",
+            "_cudart_wrapper",
+        }
+    )
+
+    _WRAPPER_ONLY_ATTRS = frozenset({"cudart"})
 
     # Attributes that should NOT be redirected to torch.musa
     _NO_REDIRECT = {"is_available"}
@@ -1441,6 +1488,10 @@ class _CudaModuleWrapper(ModuleType):
         "_device_count_nvml": "device_count",  # NVML is NVIDIA-specific
     }
 
+    _REVERSE_REMAP_ATTRS = {
+        "device_count": ("_device_count_nvml",),
+    }
+
     # Attributes that should NOT be cached (functions that may return different values)
     # Most functions are safe to cache since they're module-level functions
     _NO_CACHE = {
@@ -1453,6 +1504,209 @@ class _CudaModuleWrapper(ModuleType):
         self._musa_module = musa_module
         self._force_cuda_available = force_cuda_available
         self._cudart_wrapper = None
+        _bind_musa_module_sync(musa_module, self)
+        self._seed_initial_cache()
+
+    def _seed_initial_cache(self) -> None:
+        if isinstance(self._musa_module, ModuleType):
+            for name, value in list(self._musa_module.__dict__.items()):
+                if (
+                    name in self._INTERNAL_ATTRS
+                    or name in self._WRAPPER_ONLY_ATTRS
+                    or name in self._NO_REDIRECT
+                    or name in self._NO_CACHE
+                    or name.startswith("_torchada_")
+                    or (name.startswith("__") and name.endswith("__"))
+                ):
+                    continue
+                object.__setattr__(self, name, value)
+
+        for name in self._NO_REDIRECT:
+            if name in self._NO_CACHE:
+                continue
+            try:
+                if name == "is_available" and self._force_cuda_available:
+                    value = self._musa_module.is_available
+                else:
+                    value = getattr(self._original_cuda, name)
+            except AttributeError:
+                continue
+            object.__setattr__(self, name, value)
+
+        for name, dotted in self._SPECIAL_ATTRS.items():
+            if name in self._NO_CACHE:
+                continue
+            try:
+                obj = self._musa_module
+                for part in dotted.split("."):
+                    obj = getattr(obj, part)
+            except AttributeError:
+                continue
+            object.__setattr__(self, name, obj)
+
+        for name, target_name in self._REMAP_ATTRS.items():
+            if name in self._NO_CACHE:
+                continue
+            try:
+                value = getattr(self._musa_module, target_name)
+            except AttributeError:
+                continue
+            object.__setattr__(self, name, value)
+
+    def _set_musa_direct(self, name: str, value: Any) -> None:
+        if isinstance(self._musa_module, ModuleType):
+            object.__setattr__(self._musa_module, name, value)
+        else:
+            setattr(self._musa_module, name, value)
+
+    def _del_musa_direct(self, name: str) -> None:
+        if isinstance(self._musa_module, ModuleType):
+            object.__delattr__(self._musa_module, name)
+        else:
+            delattr(self._musa_module, name)
+
+    def _on_musa_attr_set(self, name: str, value: Any) -> None:
+        if (
+            name in self._INTERNAL_ATTRS
+            or name in self._WRAPPER_ONLY_ATTRS
+            or (name.startswith("__") and name.endswith("__"))
+        ):
+            return
+        if name in self._NO_REDIRECT:
+            if name == "is_available" and self._force_cuda_available and name not in self._NO_CACHE:
+                object.__setattr__(self, name, value)
+            return
+        if name not in self._NO_CACHE:
+            object.__setattr__(self, name, value)
+        if name in self._REVERSE_REMAP_ATTRS:
+            for cuda_alias in self._REVERSE_REMAP_ATTRS[name]:
+                if cuda_alias in self.__dict__:
+                    object.__setattr__(self, cuda_alias, value)
+
+    def _on_musa_attr_del(self, name: str) -> None:
+        if (
+            name in self._INTERNAL_ATTRS
+            or name in self._WRAPPER_ONLY_ATTRS
+            or (name.startswith("__") and name.endswith("__"))
+        ):
+            return
+        if name in self._NO_REDIRECT and not (
+            name == "is_available" and self._force_cuda_available
+        ):
+            return
+        if name in self.__dict__:
+            object.__delattr__(self, name)
+        if name in self._REVERSE_REMAP_ATTRS:
+            for cuda_alias in self._REVERSE_REMAP_ATTRS[name]:
+                if cuda_alias in self.__dict__:
+                    object.__delattr__(self, cuda_alias)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if (
+            name in self._INTERNAL_ATTRS
+            or name in self._WRAPPER_ONLY_ATTRS
+            or (name.startswith("__") and name.endswith("__"))
+        ):
+            object.__setattr__(self, name, value)
+            return
+
+        if name in self._NO_REDIRECT:
+            if name == "is_available" and self._force_cuda_available:
+                self._set_musa_direct(name, value)
+            else:
+                setattr(self._original_cuda, name, value)
+            if name not in self._NO_CACHE:
+                object.__setattr__(self, name, value)
+            return
+
+        if name in self._SPECIAL_ATTRS:
+            parts = self._SPECIAL_ATTRS[name].split(".")
+            parent = self._musa_module
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, parts[-1], value)
+            if hasattr(self._musa_module, "__dict__") and name in self._musa_module.__dict__:
+                self._set_musa_direct(name, value)
+            if name not in self._NO_CACHE:
+                object.__setattr__(self, name, value)
+            return
+
+        if name in self._REMAP_ATTRS:
+            if name not in self._NO_CACHE:
+                object.__setattr__(self, name, value)
+            return
+
+        self._set_musa_direct(name, value)
+        if name not in self._NO_CACHE:
+            object.__setattr__(self, name, value)
+        if name in self._REVERSE_REMAP_ATTRS:
+            for cuda_alias in self._REVERSE_REMAP_ATTRS[name]:
+                if cuda_alias in self.__dict__:
+                    object.__setattr__(self, cuda_alias, value)
+
+    def __delattr__(self, name: str) -> None:
+        if (
+            name in self._INTERNAL_ATTRS
+            or name in self._WRAPPER_ONLY_ATTRS
+            or (name.startswith("__") and name.endswith("__"))
+        ):
+            object.__delattr__(self, name)
+            return
+
+        if name in self._NO_REDIRECT:
+            had_local = name in self.__dict__
+            if had_local:
+                object.__delattr__(self, name)
+            target = (
+                self._musa_module
+                if (name == "is_available" and self._force_cuda_available)
+                else self._original_cuda
+            )
+            if hasattr(target, name):
+                if target is self._musa_module:
+                    self._del_musa_direct(name)
+                else:
+                    delattr(target, name)
+            elif not had_local:
+                raise AttributeError(name)
+            return
+
+        if name in self._SPECIAL_ATTRS:
+            had_any = False
+            if name in self.__dict__:
+                object.__delattr__(self, name)
+                had_any = True
+            parts = self._SPECIAL_ATTRS[name].split(".")
+            parent = self._musa_module
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            if hasattr(parent, parts[-1]):
+                delattr(parent, parts[-1])
+                had_any = True
+            if hasattr(self._musa_module, "__dict__") and name in self._musa_module.__dict__:
+                self._del_musa_direct(name)
+                had_any = True
+            if not had_any:
+                raise AttributeError(name)
+            return
+
+        if name in self._REMAP_ATTRS:
+            if name in self.__dict__:
+                object.__delattr__(self, name)
+                return
+            raise AttributeError(name)
+
+        had_local = name in self.__dict__
+        if had_local:
+            object.__delattr__(self, name)
+        if hasattr(self._musa_module, name):
+            self._del_musa_direct(name)
+        elif not had_local:
+            raise AttributeError(name)
+        if name in self._REVERSE_REMAP_ATTRS:
+            for cuda_alias in self._REVERSE_REMAP_ATTRS[name]:
+                if cuda_alias in self.__dict__:
+                    object.__delattr__(self, cuda_alias)
 
     def cudart(self):
         """
