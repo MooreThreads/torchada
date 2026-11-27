@@ -4627,3 +4627,179 @@ class TestCublasToMublasExports:
         shim = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
         if shim is not None:
             assert "torch_musa" not in getattr(shim, "__module__", "")
+
+
+class TestCudaModuleBidirectionalSync:
+    """Bidirectional attribute synchronization between torch.cuda and torch.musa."""
+
+    @staticmethod
+    def _make_fake_modules(*, force_cuda_available: bool = False):
+        from types import ModuleType, SimpleNamespace
+
+        from torchada._patch import _CudaModuleWrapper
+
+        orig_cuda = ModuleType("torch.cuda.orig")
+        orig_cuda.is_available = lambda: False
+        orig_cuda.cudart = lambda: "orig_cudart"
+
+        musa = ModuleType("torch_musa")
+        musa.is_available = lambda: True
+        musa.device_count = lambda: 2
+        musa.musart = lambda: SimpleNamespace(musaGetDeviceCount=lambda: 2)
+
+        def native_set_stream(stream):
+            musa._active_stream = stream
+
+        musa._active_stream = "default"
+        musa.set_stream = native_set_stream
+        musa.current_stream = lambda: musa._active_stream
+
+        class NativeStreamContext:
+            def __init__(self, stream):
+                self.stream = stream
+                self.prev = None
+
+            def __enter__(self):
+                self.prev = musa.current_stream()
+                musa.set_stream(self.stream)
+                return self
+
+            def __exit__(self, *args):
+                musa.set_stream(self.prev)
+
+        stream_mod = ModuleType("torch_musa.core.stream")
+        stream_mod.StreamContext = NativeStreamContext
+        core_mod = ModuleType("torch_musa.core")
+        core_mod.stream = stream_mod
+        core_mod._utils = SimpleNamespace(_get_musa_device_index=lambda d: 0)
+        musa.core = core_mod
+        musa.StreamContext = NativeStreamContext
+        musa.stream = lambda s: NativeStreamContext(s)
+
+        wrapper = _CudaModuleWrapper(orig_cuda, musa, force_cuda_available=force_cuda_available)
+        return orig_cuda, musa, wrapper
+
+    def test_cuda_setattr_syncs_to_musa_stream_context(self):
+        """Patching torch.cuda.set_stream intercepts native torch.musa.stream() contexts."""
+        _, musa, cuda = self._make_fake_modules()
+
+        prev_set_stream = cuda.set_stream
+        assert prev_set_stream is musa.set_stream
+
+        tracked = []
+
+        def patched_set_stream(stream):
+            tracked.append(stream)
+            prev_set_stream(stream)
+
+        cuda.set_stream = patched_set_stream
+        assert cuda.set_stream is patched_set_stream
+        assert musa.set_stream is patched_set_stream
+
+        with cuda.stream("side_stream"):
+            assert tracked[-1] == "side_stream"
+            assert musa.current_stream() == "side_stream"
+        assert tracked == ["side_stream", "default"]
+        assert musa.current_stream() == "default"
+
+    def test_musa_setattr_updates_cached_cuda_attr(self):
+        """Mutating torch.musa.<attr> updates an already-cached torch.cuda.<attr>."""
+        _, musa, cuda = self._make_fake_modules()
+
+        orig_fn = cuda.set_stream
+        assert "set_stream" in cuda.__dict__
+        assert cuda.set_stream is orig_fn
+
+        replacement = lambda s: None  # noqa: E731
+        musa.set_stream = replacement
+        assert cuda.set_stream is replacement
+
+        assert cuda._device_count_nvml() == 2
+        musa.device_count = lambda: 8
+        assert cuda.device_count() == 8
+        assert cuda._device_count_nvml() == 8
+
+    def test_no_redirect_is_available_remains_isolated(self):
+        """is_available stays isolated unless TORCHADA_FORCE_CUDA_AVAILABLE is active."""
+        orig_cuda, musa, cuda = self._make_fake_modules(force_cuda_available=False)
+        orig_musa_avail = musa.is_available
+
+        custom_cuda_avail = lambda: False  # noqa: E731
+        cuda.is_available = custom_cuda_avail
+        assert cuda.is_available is custom_cuda_avail
+        assert orig_cuda.is_available is custom_cuda_avail
+        assert musa.is_available is orig_musa_avail
+
+        custom_musa_avail = lambda: True  # noqa: E731
+        musa.is_available = custom_musa_avail
+        assert cuda.is_available is custom_cuda_avail
+
+        _, musa_forced, cuda_forced = self._make_fake_modules(force_cuda_available=True)
+        forced_fn = lambda: True  # noqa: E731
+        cuda_forced.is_available = forced_fn
+        assert musa_forced.is_available is forced_fn
+
+    def test_cold_and_warm_mock_patch_roundtrip(self):
+        """unittest.mock.patch.object restores cleanly even before first cuda.<attr> read."""
+        from unittest.mock import patch
+
+        _, musa, cuda = self._make_fake_modules()
+        orig_set_stream = musa.set_stream
+        orig_ctx = musa.core.stream.StreamContext
+
+        # Cold patch.object (before any cuda.set_stream or cuda.StreamContext read).
+        with patch.object(cuda, "set_stream", lambda s: None) as cuda_mock:
+            assert cuda.set_stream is cuda_mock
+            assert musa.set_stream is cuda_mock
+        assert cuda.set_stream is orig_set_stream
+        assert musa.set_stream is orig_set_stream
+
+        class ReplacementCtx:
+            pass
+
+        with patch.object(cuda, "StreamContext", ReplacementCtx):
+            assert cuda.StreamContext is ReplacementCtx
+            assert musa.core.stream.StreamContext is ReplacementCtx
+            assert musa.StreamContext is ReplacementCtx
+        assert cuda.StreamContext is orig_ctx
+        assert musa.core.stream.StreamContext is orig_ctx
+        assert musa.StreamContext is orig_ctx
+
+        with patch.object(musa, "set_stream", lambda s: None) as musa_mock:
+            assert cuda.set_stream is musa_mock
+        assert cuda.set_stream is orig_set_stream
+
+        with patch.object(cuda, "cudart", lambda: "mock_cudart"):
+            assert cuda.cudart() == "mock_cudart"
+            assert not hasattr(musa, "cudart")
+        assert callable(cuda.cudart)
+
+        with patch.object(cuda, "ephemeral_helper", 123, create=True):
+            assert cuda.ephemeral_helper == 123
+            assert musa.ephemeral_helper == 123
+        assert not hasattr(cuda, "ephemeral_helper")
+        assert not hasattr(musa, "ephemeral_helper")
+
+    @pytest.mark.musa
+    def test_live_musa_platform_bidirectional_stream_patch(self):
+        """Exercise the real torch.cuda / torch.musa modules when running on MUSA."""
+        from unittest.mock import patch
+
+        import torch
+
+        orig = torch.cuda.set_stream
+        assert orig is torch.musa.set_stream
+        seen = []
+
+        def tracker(stream):
+            seen.append(stream)
+            return orig(stream)
+
+        with patch.object(torch.cuda, "set_stream", tracker):
+            assert torch.musa.set_stream is tracker
+            if torch.musa.device_count() > 0:
+                side = torch.cuda.Stream()
+                with torch.cuda.stream(side):
+                    assert seen and seen[-1] == side
+        assert torch.cuda.set_stream is orig
+        assert torch.musa.set_stream is orig
