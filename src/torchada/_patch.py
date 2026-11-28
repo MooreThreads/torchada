@@ -2082,6 +2082,66 @@ def _patch_stream_cuda_stream():
         MUSAStream.cuda_stream = cuda_stream
 
 
+def _load_musart_event_sync():
+    """Load ``musaEventSynchronize`` via ``ctypes.CDLL`` so blocking waits release the GIL."""
+    import ctypes
+
+    cdll_cls = _original_ctypes_CDLL or ctypes.CDLL
+    for soname in ("libmusart.so", "libmusart.so.2", "libmusart.so.1"):
+        try:
+            lib = cdll_cls(soname)
+            fn = lib.musaEventSynchronize
+            fn.argtypes = [ctypes.c_void_p]
+            fn.restype = ctypes.c_int
+            return fn
+        except (OSError, AttributeError):
+            continue
+    return None
+
+
+def _install_gil_free_event_sync(event_cls, sync_fn):
+    """Add ``cuda_event`` and wrap ``event_cls.synchronize`` to release the GIL."""
+    import ctypes
+
+    if not hasattr(event_cls, "cuda_event"):
+
+        @property
+        def cuda_event(self):
+            """Return the underlying event pointer (same as musa_event)."""
+            return self.musa_event
+
+        event_cls.cuda_event = cuda_event
+
+    if sync_fn is None or getattr(event_cls.synchronize, "_torchada_gil_free", False):
+        return
+
+    original_synchronize = event_cls.synchronize
+    c_void_p = ctypes.c_void_p
+
+    def synchronize(self):
+        """Wait for the event to complete while releasing the Python GIL."""
+        ptr = self.musa_event
+        if not ptr:
+            return original_synchronize(self)
+        rc = sync_fn(c_void_p(ptr))
+        if rc != 0:
+            original_synchronize(self)
+            raise RuntimeError(f"musaEventSynchronize failed with error {rc}")
+
+    synchronize._torchada_gil_free = True
+    synchronize.__wrapped__ = original_synchronize
+    event_cls.synchronize = synchronize
+
+
+@patch_function
+@requires_import("torch_musa.core.stream")
+def _patch_event_cuda_compat():
+    """Align MUSA Event with PyTorch CUDA Event (cuda_event alias and GIL-free synchronize)."""
+    from torch_musa.core.stream import Event as MUSAEvent
+
+    _install_gil_free_event_sync(MUSAEvent, _load_musart_event_sync())
+
+
 @patch_function
 @requires_import("torch_musa")
 def _patch_autocast():
@@ -3080,6 +3140,7 @@ def apply_patches():
     - torch.cuda.* API -> torch.musa.*
     - torch.cuda.nvtx -> no-op stub
     - torch.cuda.Stream.cuda_stream -> musa_stream
+    - torch.cuda.Event.cuda_event -> musa_event and GIL-releasing Event.synchronize()
     - torch.Tensor.cuda() -> torch.Tensor.to("musa")
     - torch.Tensor.is_cuda -> True for MUSA tensors
     - torch.nn.Module.cuda() -> torch.nn.Module.to("musa")

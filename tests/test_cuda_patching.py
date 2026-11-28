@@ -766,6 +766,149 @@ class TestStreamAndEvent:
                     pytest.skip(f"MUSA driver issue: {e}")
                 raise
 
+    def test_install_gil_free_event_sync_contract(self):
+        """Verify cuda_event alias, unrecorded fallback, error delegation, and idempotence."""
+        from torchada._patch import _install_gil_free_event_sync
+
+        fallback_calls = []
+        sync_ptrs = []
+        next_rc = [0]
+
+        class FakeEvent:
+            def __init__(self, musa_event=0):
+                self.musa_event = musa_event
+
+            def synchronize(self):
+                fallback_calls.append(self.musa_event)
+                if next_rc[0] == 77:
+                    raise RuntimeError("native MUSA event error")
+
+        def fake_sync(c_ptr):
+            sync_ptrs.append(c_ptr.value)
+            return next_rc[0]
+
+        _install_gil_free_event_sync(FakeEvent, fake_sync)
+        first_wrapper = FakeEvent.synchronize
+        _install_gil_free_event_sync(FakeEvent, fake_sync)
+        assert FakeEvent.synchronize is first_wrapper
+        assert getattr(FakeEvent.synchronize, "_torchada_gil_free", False) is True
+
+        unrecorded = FakeEvent(0)
+        assert unrecorded.cuda_event == 0
+        assert unrecorded.synchronize() is None
+        assert fallback_calls == [0]
+        assert sync_ptrs == []
+
+        recorded = FakeEvent(0x123450)
+        assert recorded.cuda_event == 0x123450
+        assert recorded.synchronize() is None
+        assert fallback_calls == [0]
+        assert sync_ptrs == [0x123450]
+
+        next_rc[0] = 77
+        with pytest.raises(RuntimeError, match="native MUSA event error"):
+            recorded.synchronize()
+        assert fallback_calls == [0, 0x123450]
+
+        next_rc[0] = 99
+        with pytest.raises(RuntimeError, match="musaEventSynchronize failed with error 99"):
+            recorded.synchronize()
+
+    def test_event_synchronize_releases_gil_via_cdll(self):
+        """A CDLL-backed sync_fn must release the GIL so peer Python threads run concurrently."""
+        import ctypes
+        import ctypes.util
+        import threading
+        import time
+
+        from torchada._patch import _install_gil_free_event_sync
+
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        try:
+            libc = ctypes.CDLL(libc_name)
+            usleep = libc.usleep
+            usleep.argtypes = [ctypes.c_void_p]
+            usleep.restype = ctypes.c_int
+        except (OSError, AttributeError):
+            pytest.skip("libc usleep unavailable")
+
+        class BlockingEvent:
+            musa_event = 60_000  # 60 ms in microseconds
+
+            def synchronize(self):
+                pass
+
+        _install_gil_free_event_sync(BlockingEvent, usleep)
+        entered = threading.Event()
+        finished = threading.Event()
+
+        def worker():
+            entered.set()
+            BlockingEvent().synchronize()
+            finished.set()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        assert entered.wait(timeout=2.0)
+        main_ticks = 0
+        while not finished.is_set():
+            main_ticks += 1
+            time.sleep(0.001)
+        t.join(timeout=2.0)
+        assert main_ticks >= 5
+
+    @pytest.mark.musa
+    @pytest.mark.gpu
+    def test_musa_event_cuda_event_and_gil_free_synchronize(self):
+        """On MUSA hardware, Event exposes cuda_event and releases the GIL during synchronize."""
+        import threading
+        import time
+
+        import torch
+
+        stream = torch.cuda.Stream()
+        event = torch.cuda.Event()
+        assert getattr(event.synchronize, "_torchada_gil_free", False) is True
+        assert event.cuda_event == event.musa_event == 0
+        event.synchronize()
+
+        a = torch.randn((4096, 4096), device="musa", dtype=torch.float16)
+        b = torch.randn((4096, 4096), device="musa", dtype=torch.float16)
+        torch.musa.synchronize()
+
+        barrier = threading.Barrier(2)
+        done = threading.Event()
+        entered_pending = []
+
+        def waiter():
+            barrier.wait(timeout=5.0)
+            entered_pending.append(not event.query())
+            event.synchronize()
+            done.set()
+
+        waiter_thread = threading.Thread(target=waiter)
+        waiter_thread.start()
+
+        with torch.cuda.stream(stream):
+            out = a
+            for _ in range(80):
+                out = torch.mm(out, b)
+            event.record(stream)
+
+        assert event.cuda_event == event.musa_event != 0
+        barrier.wait(timeout=5.0)
+
+        ticks_while_waiting = 0
+        while not done.is_set():
+            ticks_while_waiting += 1
+            time.sleep(0.0002)
+
+        waiter_thread.join(timeout=10.0)
+        assert event.query() is True
+        assert out.shape == (4096, 4096)
+        if entered_pending and entered_pending[0]:
+            assert ticks_while_waiting >= 5
+
 
 class TestContextManagers:
     """Test device context managers."""
